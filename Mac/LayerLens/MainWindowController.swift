@@ -14,6 +14,15 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     private let url: URL
     private var webView: WKWebView!
     private var loaded = false
+    /// 首次加载完成后才显示窗口, 避免看到空白页面
+    private var waitingFirstLoad = false
+    private static let themeKey = "LayerLensTheme"
+    /// 与网页 --bg 一致, 网页绘制前窗口显示此颜色
+    private static let backgroundColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0x14 / 255.0, green: 0x15 / 255.0, blue: 0x18 / 255.0, alpha: 1)
+            : NSColor(srgbRed: 0xF4 / 255.0, green: 0xF5 / 255.0, blue: 0xF7 / 255.0, alpha: 1)
+    }
 
     init(url: URL) {
         self.url = url
@@ -23,7 +32,9 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         window.isReleasedWhenClosed = false
         window.center()
         window.setFrameAutosaveName("LayerLensMainWindow")
+        window.backgroundColor = Self.backgroundColor
         super.init(window: window)
+        applyTheme(UserDefaults.standard.string(forKey: Self.themeKey) ?? "auto")
 
         let configuration = WKWebViewConfiguration()
         // 网页据此区分 App 窗口与浏览器, 只调整少量文案和入口
@@ -33,6 +44,9 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.isInspectable = true
+        // 不绘制默认的白色背景, 网页绘制前透出窗口底色
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.underPageBackgroundColor = Self.backgroundColor
         window.contentView = webView
     }
 
@@ -43,10 +57,36 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     func showAndLoad() {
         if !loaded {
             loaded = true
+            waitingFirstLoad = true
             webView.load(URLRequest(url: url))
+            // 加载过慢时不再等待
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.finishFirstLoad()
+            }
+            return
         }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func finishFirstLoad() {
+        guard waitingFirstLoad else { return }
+        waitingFirstLoad = false
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// light / dark / auto, 与网页的主题选项一致; 保存后下次启动在网页加载前即可使用
+    private func applyTheme(_ theme: String) {
+        switch theme {
+        case "dark":
+            window?.appearance = NSAppearance(named: .darkAqua)
+        case "light":
+            window?.appearance = NSAppearance(named: .aqua)
+        default:
+            window?.appearance = nil
+        }
+        UserDefaults.standard.set(theme, forKey: Self.themeKey)
     }
 
     /// 打开网页中的面板, 如 about / integration
@@ -64,6 +104,7 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finishFirstLoad()
         if let panel = pendingPanel {
             pendingPanel = nil
             openPanel(panel)
@@ -86,7 +127,7 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
 
     // MARK: - WKScriptMessageHandler
 
-    /// 网页发来的消息: {action: "openBrowser", url}
+    /// 网页发来的消息: {action: "openBrowser", url} / {action: "theme", theme}
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
@@ -96,6 +137,8 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
             if target.host == url.host && target.port == url.port {
                 NSWorkspace.shared.open(target)
             }
+        case "theme":
+            applyTheme(body["theme"] as? String ?? "auto")
         default:
             break
         }

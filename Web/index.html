@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LayerLens</title>
 <link rel="stylesheet" href="/assets/app.css">
+<script>
+  // 首次绘制前应用保存的主题, 避免先显示默认主题再切换
+  try {
+    var theme = localStorage.getItem('layerlens_theme');
+    if (theme && theme !== 'auto') document.documentElement.dataset.theme = theme;
+  } catch (e) {}
+</script>
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">

@@ -244,7 +244,10 @@ function fitView() {
 
 function hideMenu() {
   const menu = $('contextMenu');
-  if (menu) menu.remove();
+  if (!menu) return;
+  // 退出动画期间可能已打开新的菜单, 先去掉 id 避免冲突
+  menu.removeAttribute('id');
+  hideLayer(menu, 120, () => menu.remove());
 }
 
 // MARK: - Network
@@ -2347,13 +2350,34 @@ function setSpacing(value) {
 
 function togglePopover(id) {
   const target = $(id);
-  const willShow = target.hidden;
+  const willShow = target.hidden || target.classList.contains('closing');
   hidePopovers();
-  target.hidden = !willShow;
+  if (willShow) showLayer(target);
 }
 
 function hidePopovers() {
-  document.querySelectorAll('.popover').forEach((p) => (p.hidden = true));
+  document.querySelectorAll('.popover').forEach((p) => hideLayer(p, 120));
+}
+
+// 浮层显示时由 CSS 播放进入动画; 隐藏时先加 closing 播放退出动画, 结束后再设置 hidden(或执行 done)
+function showLayer(node) {
+  clearTimeout(node.exitTimer);
+  node.classList.remove('closing');
+  node.hidden = false;
+}
+
+function hideLayer(node, duration, done) {
+  if (node.hidden || node.classList.contains('closing')) return;
+  const finish = () => {
+    node.classList.remove('closing');
+    done ? done() : (node.hidden = true);
+  };
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    finish();
+    return;
+  }
+  node.classList.add('closing');
+  node.exitTimer = setTimeout(finish, duration);
 }
 
 // 主题偏好跨会话保留, 存 localStorage
@@ -2371,6 +2395,8 @@ function applyTheme(theme, save) {
   if (theme === 'auto') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = theme;
   $('themeSeg').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.theme === theme));
+  // App 窗口的标题栏和底色跟随页面主题
+  window.webkit?.messageHandlers?.layerlens?.postMessage({ action: 'theme', theme });
   if (!save) return;
   try {
     localStorage.setItem(THEME_KEY, theme);
@@ -2466,11 +2492,11 @@ function openPanel(name) {
   $('modalTitle').textContent = panel[0];
   $('modalBody').replaceChildren(...panel[1]());
   $('modalBody').scrollTop = 0;
-  $('modal').hidden = false;
+  showLayer($('modal'));
 }
 
 function closePanel() {
-  $('modal').hidden = true;
+  hideLayer($('modal'), 160);
 }
 
 function setupPanels() {
@@ -2653,7 +2679,7 @@ function setup() {
       hidePopovers();
       closePanel();
     }
-    if (!$('modal').hidden) return;
+    if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
     if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
     if (e.key === '?') togglePopover('helpMenu');
     if (e.key === 'r' && !e.metaKey && !e.ctrlKey) refresh();

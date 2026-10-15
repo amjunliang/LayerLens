@@ -185,7 +185,7 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 .target-btn { display: inline-flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 6px; margin-left: -6px; border: none; background: none; border-radius: var(--r-control); color: var(--text); }
 .target-btn:hover { background: var(--hover); }
 .target-caret { width: 12px; height: 12px; color: var(--muted); transform: rotate(90deg); }
-.menu.target-menu { left: 0; right: auto; min-width: 300px; max-height: 70vh; overflow: auto; }
+.menu.target-menu { left: 0; right: auto; min-width: 300px; max-height: 70vh; overflow: auto; transform-origin: top left; }
 .target-device { display: flex; align-items: baseline; gap: 6px; padding: 8px 8px 4px; font-weight: 600; }
 .target-device span { color: var(--muted); font-weight: normal; font-size: 12px; }
 .target-app { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px 6px 16px; border: none; background: none; border-radius: var(--r-control); text-align: left; }
@@ -219,7 +219,7 @@ body:not(.has-app) #xcodeRun { display: none; }
   border-radius: var(--r-float);
   box-shadow: var(--shadow);
 }
-.menu { right: 0; top: calc(100% + 6px); min-width: 220px; padding: 4px; }
+.menu { right: 0; top: calc(100% + 6px); min-width: 220px; padding: 4px; transform-origin: top right; }
 .menu-app { padding: 6px 8px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; color: var(--muted); }
 .menu-app b { color: var(--text); display: block; font-size: 13px; }
 .menu-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 8px; border-radius: var(--r-control); cursor: default; }
@@ -442,7 +442,7 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 /* 画布工具: 比画布高一档的底色, 加深描边和阴影, 浮在内容之上 */
 .float-group { display: flex; flex-direction: column; gap: 1px; padding: 3px; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: var(--r-float); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3); }
 /* 层间距从按钮左侧弹出, 不遮挡下方按钮 */
-.spacing-pop { top: 0; right: calc(100% + 8px); display: flex; align-items: center; gap: 8px; padding: 8px 10px; white-space: nowrap; color: var(--text-2); }
+.spacing-pop { top: 0; right: calc(100% + 8px); transform-origin: right center; display: flex; align-items: center; gap: 8px; padding: 8px 10px; white-space: nowrap; color: var(--text-2); }
 .spacing-pop input { width: 120px; }
 .spacing-pop .zoom-label { min-width: 20px; }
 
@@ -530,6 +530,7 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
   border: 1px solid var(--border);
   border-radius: var(--r-float);
   box-shadow: var(--shadow);
+  transform-origin: top left;
 }
 .context-menu .menu-title {
   font-family: var(--mono);
@@ -696,4 +697,24 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
   /* 列表底部留出浮动导航的高度, 最后几行可以滚上来 */
   .tree, .detail { padding-bottom: 80px; }
   .toast { bottom: calc(60px + env(safe-area-inset-bottom)); }
+}
+
+/* 浮层动画, 接近 macOS: 菜单进入时轻微缩放并淡入, 退出只淡出; 面板进出带缩放. 退出由 JS 加 closing 类, 动画结束后再隐藏 */
+@keyframes layer-in { from { opacity: 0; transform: scale(0.97) translateY(-3px); } }
+@keyframes layer-out { to { opacity: 0; } }
+@keyframes modal-card-in { from { opacity: 0; transform: scale(0.96); } }
+@keyframes modal-card-out { to { opacity: 0; transform: scale(0.98); } }
+@keyframes banner-in { from { opacity: 0; transform: translateX(-50%) translateY(-6px); } }
+.popover:not([hidden]), .context-menu { animation: layer-in 0.14s cubic-bezier(0.2, 0.8, 0.3, 1); }
+.spacing-pop:not([hidden]) { animation-name: layer-in-side; }
+@keyframes layer-in-side { from { opacity: 0; transform: scale(0.97) translateX(3px); } }
+.modal:not([hidden]) { animation: layer-out 0.18s ease-out reverse; }
+.modal:not([hidden]) .modal-card { animation: modal-card-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1); }
+.app-banner:not([hidden]) { animation: banner-in 0.2s cubic-bezier(0.2, 0.8, 0.3, 1); }
+.popover.closing, .context-menu.closing { animation: layer-out 0.12s ease-in forwards; pointer-events: none; }
+.modal.closing { animation: layer-out 0.16s ease-in forwards; pointer-events: none; }
+.modal.closing .modal-card { animation: modal-card-out 0.16s ease-in forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .popover, .context-menu, .modal, .modal-card, .app-banner { animation: none !important; }
+  .toast { transition: none; }
 }
