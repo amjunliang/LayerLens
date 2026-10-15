@@ -1,0 +1,25 @@
+PODS:
+  - LayerLens (0.2.0):
+    - LookinServer (~> 1.2.8)
+  - LookinServer (1.2.8):
+    - LookinServer/Core (= 1.2.8)
+  - LookinServer/Core (1.2.8)
+
+DEPENDENCIES:
+  - LayerLens (from `..`)
+
+SPEC REPOS:
+  trunk:
+    - LookinServer
+
+EXTERNAL SOURCES:
+  LayerLens:
+    :path: ".."
+
+SPEC CHECKSUMS:
+  LayerLens: b67efb67dfac450df67f2387a8030357a8cb8a6a
+  LookinServer: 1b2b61c6402ae29fa22182d48f5cd067b4e99e80
+
+PODFILE CHECKSUM: a02872deba3b4e3f1c8b8dd4cb9e336fd0c6f1a7
+
+COCOAPODS: 1.16.2

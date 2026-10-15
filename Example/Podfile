@@ -1,0 +1,15 @@
+platform :ios, '15.0'
+
+target 'LayerLensExample' do
+  # 只在 Debug 集成, 集成即启动, 无需代码
+  pod 'LayerLens', :path => '..', :configurations => ['Debug']
+end
+
+# 新版 Xcode 不再支持 LookinServer 设置的 iOS 9 最低版本
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+    end
+  end
+end

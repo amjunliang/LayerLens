@@ -1,0 +1,5 @@
+// 默认 ad-hoc 签名即可本机运行; 每次重新签名后"自动化"权限可能需要重新允许,
+// 在同目录新建 Local.xcconfig (已忽略) 写入 CODE_SIGN_IDENTITY = Apple Development: xxx 可固定签名
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+#include? "Local.xcconfig"

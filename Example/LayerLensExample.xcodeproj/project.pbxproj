@@ -1,0 +1,378 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1E07FD0B965A5D35DB56BBED /* LLEListViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 493F81BCC44405ACA20262E7 /* LLEListViewController.m */; };
+		2D3F2713CA3B3E204B7B0C71 /* libPods-LayerLensExample.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C2B4CEF7CF93C8129A6F6071 /* libPods-LayerLensExample.a */; };
+		584E27DD550757331DC29B44 /* LLEAppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = FEBF0D2314170A1D289626F3 /* LLEAppDelegate.m */; };
+		A56FE4AF3677715CF53A737E /* LLESceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 6E7052FAEBE113E56DFFBB11 /* LLESceneDelegate.m */; };
+		E1E2C6F4191B51FBD641C385 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 3AFDECB70363478D93750611 /* main.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		3AFDECB70363478D93750611 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		493F81BCC44405ACA20262E7 /* LLEListViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = LLEListViewController.m; sourceTree = "<group>"; };
+		56581B45531BAA87200A4B5A /* LLEListViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LLEListViewController.h; sourceTree = "<group>"; };
+		59CD4C70F7D8AA18A6A689DB /* Pods-LayerLensExample.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LayerLensExample.debug.xcconfig"; path = "Target Support Files/Pods-LayerLensExample/Pods-LayerLensExample.debug.xcconfig"; sourceTree = "<group>"; };
+		6216DCD487850B51B07B45B5 /* LLEAppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LLEAppDelegate.h; sourceTree = "<group>"; };
+		6E7052FAEBE113E56DFFBB11 /* LLESceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = LLESceneDelegate.m; sourceTree = "<group>"; };
+		8DC08BF4662D9569E1576955 /* LayerLensExample.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LayerLensExample.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		968FB8EDE7E2A2586F528682 /* LLESceneDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LLESceneDelegate.h; sourceTree = "<group>"; };
+		C2B4CEF7CF93C8129A6F6071 /* libPods-LayerLensExample.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-LayerLensExample.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CCC3D7668E4FE344DCA91F8F /* Pods-LayerLensExample.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-LayerLensExample.release.xcconfig"; path = "Target Support Files/Pods-LayerLensExample/Pods-LayerLensExample.release.xcconfig"; sourceTree = "<group>"; };
+		FEBF0D2314170A1D289626F3 /* LLEAppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = LLEAppDelegate.m; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		43D9D187A19A535E89F94590 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2D3F2713CA3B3E204B7B0C71 /* libPods-LayerLensExample.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		655CF0E63F3E2F5E8C2095C2 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				59CD4C70F7D8AA18A6A689DB /* Pods-LayerLensExample.debug.xcconfig */,
+				CCC3D7668E4FE344DCA91F8F /* Pods-LayerLensExample.release.xcconfig */,
+			);
+			name = Pods;
+			path = Pods;
+			sourceTree = "<group>";
+		};
+		68CA7DBA70AE6728CA181FE5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8DC08BF4662D9569E1576955 /* LayerLensExample.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9E39F706CB651D1B65BC114C /* LayerLensExample */ = {
+			isa = PBXGroup;
+			children = (
+				6216DCD487850B51B07B45B5 /* LLEAppDelegate.h */,
+				FEBF0D2314170A1D289626F3 /* LLEAppDelegate.m */,
+				56581B45531BAA87200A4B5A /* LLEListViewController.h */,
+				493F81BCC44405ACA20262E7 /* LLEListViewController.m */,
+				968FB8EDE7E2A2586F528682 /* LLESceneDelegate.h */,
+				6E7052FAEBE113E56DFFBB11 /* LLESceneDelegate.m */,
+				3AFDECB70363478D93750611 /* main.m */,
+			);
+			path = LayerLensExample;
+			sourceTree = "<group>";
+		};
+		BDD182618EC0CDED97235226 = {
+			isa = PBXGroup;
+			children = (
+				9E39F706CB651D1B65BC114C /* LayerLensExample */,
+				68CA7DBA70AE6728CA181FE5 /* Products */,
+				655CF0E63F3E2F5E8C2095C2 /* Pods */,
+				F4BBDC7F863F3210D917326F /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		F4BBDC7F863F3210D917326F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C2B4CEF7CF93C8129A6F6071 /* libPods-LayerLensExample.a */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		23DCF0B77B28800A241C00D9 /* LayerLensExample */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8112BF2C7983B495CEB30D5D /* Build configuration list for PBXNativeTarget "LayerLensExample" */;
+			buildPhases = (
+				11BF5028558089D28AA2A74A /* [CP] Check Pods Manifest.lock */,
+				A6AF2F562DF0181ECB45DE7F /* Sources */,
+				43D9D187A19A535E89F94590 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LayerLensExample;
+			productName = LayerLensExample;
+			productReference = 8DC08BF4662D9569E1576955 /* LayerLensExample.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5DA5E902D7B97E584CBDA512 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					23DCF0B77B28800A241C00D9 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 689C7F2B18BEBDBB6AF9C950 /* Build configuration list for PBXProject "LayerLensExample" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = BDD182618EC0CDED97235226;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 68CA7DBA70AE6728CA181FE5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				23DCF0B77B28800A241C00D9 /* LayerLensExample */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		11BF5028558089D28AA2A74A /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-LayerLensExample-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A6AF2F562DF0181ECB45DE7F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				584E27DD550757331DC29B44 /* LLEAppDelegate.m in Sources */,
+				1E07FD0B965A5D35DB56BBED /* LLEListViewController.m in Sources */,
+				A56FE4AF3677715CF53A737E /* LLESceneDelegate.m in Sources */,
+				E1E2C6F4191B51FBD641C385 /* main.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		254FD386D83637C440898762 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 59CD4C70F7D8AA18A6A689DB /* Pods-LayerLensExample.debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "LayerLens Example";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.example;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		3CC5B6EA44D9B9564FFF2EF1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = CCC3D7668E4FE344DCA91F8F /* Pods-LayerLensExample.release.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "LayerLens Example";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.example;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		5EBFEF58A1F54F1108B7BDB2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		77ED6FDCBEE4F32F86F3C220 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		689C7F2B18BEBDBB6AF9C950 /* Build configuration list for PBXProject "LayerLensExample" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				77ED6FDCBEE4F32F86F3C220 /* Debug */,
+				5EBFEF58A1F54F1108B7BDB2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8112BF2C7983B495CEB30D5D /* Build configuration list for PBXNativeTarget "LayerLensExample" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				254FD386D83637C440898762 /* Debug */,
+				3CC5B6EA44D9B9564FFF2EF1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 5DA5E902D7B97E584CBDA512 /* Project object */;
+}

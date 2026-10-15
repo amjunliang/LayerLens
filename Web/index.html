@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LayerLens</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></symbol>
+    <symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></symbol>
+    <symbol id="i-tree" viewBox="0 0 24 24"><path d="M5 4v14h5M5 9h5"/><rect x="12" y="6" width="8" height="5" rx="1"/><rect x="12" y="15" width="8" height="5" rx="1"/></symbol>
+    <symbol id="i-device" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+    <symbol id="i-inspect" viewBox="0 0 24 24"><path d="M10 3H5a2 2 0 0 0-2 2v5M3 14v5a2 2 0 0 0 2 2h5M14 3h5a2 2 0 0 1 2 2v5"/><path d="M12 12l9 3.2-4 1.3-1.3 4z"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  </defs>
+</svg>
+
+<header class="toolbar">
+  <div class="toolbar-left">
+    <span class="status-dot" id="statusDot" title="未连接"></span>
+    <div class="popover-anchor">
+      <button class="target-btn" id="targetBtn" title="切换设备 / App"><span class="app-name" id="appName">LayerLens</span><svg class="icon target-caret"><use href="#i-chevron"/></svg></button>
+      <div class="popover menu target-menu" id="targetMenu" hidden></div>
+    </div>
+    <span class="app-meta" id="appMeta"></span>
+  </div>
+  <div class="toolbar-center">
+    <div class="segmented" id="modeSeg">
+      <button data-mode="live" id="liveModeBtn" title="模拟器实时画面 (baguette)" hidden>实时</button>
+      <button data-mode="2d" class="active">2D</button>
+      <button data-mode="3d">3D</button>
+    </div>
+    <div class="toolbar-actions">
+      <button class="icon-btn has-live-only" id="xcodeRun" title="在 Xcode 中运行" aria-label="在 Xcode 中运行"><svg class="icon"><use href="#i-play"/></svg></button>
+      <button class="icon-btn" id="refreshBtn" title="刷新 (R)" aria-label="刷新"><svg class="icon"><use href="#i-refresh"/></svg></button>
+    </div>
+  </div>
+  <div class="toolbar-right">
+    <button class="icon-btn" id="openBrowserBtn" title="在浏览器打开" aria-label="在浏览器打开" hidden><svg class="icon"><use href="#i-external"/></svg></button>
+    <div class="popover-anchor">
+      <button class="icon-btn" id="optionsBtn" title="视图选项" aria-label="视图选项"><svg class="icon"><use href="#i-sliders"/></svg></button>
+      <div class="popover menu" id="optionsMenu" hidden>
+        <div class="menu-app" id="menuAppInfo"></div>
+        <div class="menu-row">
+          <span>主题</span>
+          <div class="segmented small" id="themeSeg">
+            <button data-theme="auto" class="active">自动</button>
+            <button data-theme="light">浅色</button>
+            <button data-theme="dark">深色</button>
+          </div>
+        </div>
+        <div class="menu-row">
+          <span>语言</span>
+          <div class="segmented small" id="langSeg">
+            <button data-lang="auto">自动</button>
+            <button data-lang="zh">中文</button>
+            <button data-lang="en">English</button>
+          </div>
+        </div>
+        <div class="menu-sep"></div>
+        <button class="menu-row menu-action" data-panel="integration">App 集成…</button>
+        <button class="menu-row menu-action" data-panel="about">关于 LayerLens</button>
+      </div>
+    </div>
+    <div class="popover-anchor help-anchor">
+      <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
+      <div class="popover menu shortcuts" id="helpMenu" hidden>
+        <div class="menu-title">快捷键</div>
+        <div class="shortcut"><kbd>↑</kbd><kbd>↓</kbd><span>上一个 / 下一个节点</span></div>
+        <div class="shortcut"><kbd>←</kbd><span>收起, 再按选中父节点</span></div>
+        <div class="shortcut"><kbd>→</kbd><span>展开, 再按进入子节点</span></div>
+        <div class="shortcut"><kbd>双指滑动</kbd><span>平移画布</span></div>
+        <div class="shortcut"><kbd>捏合</kbd><span>缩放, 也可 ⌘ + 滚轮</span></div>
+        <div class="shortcut"><kbd>拖动</kbd><span>旋转 (3D)</span></div>
+        <div class="shortcut"><kbd>R</kbd><span>刷新</span></div>
+        <div class="shortcut"><kbd>⌘</kbd><kbd>C</kbd><span>复制选中节点路径</span></div>
+        <div class="shortcut"><kbd>右键</kbd><span>复制菜单</span></div>
+        <div class="shortcut"><kbd>?</kbd><span>显示此面板</span></div>
+        <div class="menu-live">
+          <div class="menu-sep"></div>
+          <div class="menu-title">实时</div>
+          <div class="shortcut"><kbd>拖动</kbd><span>在 App 内滑动 / 滚动</span></div>
+          <div class="shortcut"><kbd>⌥</kbd><kbd>点击</kbd><span>选中元素并切到 2D</span></div>
+          <div class="shortcut"><kbd>⌘</kbd><kbd>V</kbd><span>粘贴到模拟器</span></div>
+          <div class="shortcut"><kbd>Esc</kbd><span>停止向模拟器输入按键</span></div>
+          <button class="menu-row menu-action" id="menuCopyHeal">点击无效? 复制修复命令</button>
+          <div class="menu-sep"></div>
+          <div class="menu-title">baguette</div>
+          <div class="menu-note">实时画面依赖三方工具 baguette, 由 LayerLens 自动启动和退出</div>
+          <button class="menu-row menu-action" data-copy="brew install baguette">复制安装命令</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="layout" id="layout">
+  <section class="pane tree-pane">
+    <div class="pane-header">
+      <label class="search-box">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input id="search" type="search" placeholder="搜索类名 / 地址 / ivar">
+      </label>
+      <div class="popover-anchor">
+        <button class="icon-btn" id="treeFilterBtn" title="筛选" aria-label="筛选"><svg class="icon"><use href="#i-filter"/></svg></button>
+        <div class="popover menu filter-pop" id="treeFilterPop" hidden>
+          <label class="menu-row"><span>显示 CALayer</span><input type="checkbox" id="showLayers"></label>
+          <label class="menu-row"><span>显示隐藏视图</span><input type="checkbox" id="showHidden" checked></label>
+        </div>
+      </div>
+    </div>
+    <div class="tree" id="tree"></div>
+  </section>
+
+  <div class="splitter vertical" data-split="s1"></div>
+
+  <section class="pane canvas-pane" id="canvasPane">
+    <div class="crumbs" id="crumbs"></div>
+    <div class="canvas-float">
+      <div class="float-group live-only">
+        <button class="icon-btn toggle" id="liveInspect" title="选择元素 (按住 ⌥ 点击)" aria-label="选择元素" aria-pressed="false"><svg class="icon"><use href="#i-inspect"/></svg></button>
+        <button class="icon-btn" id="liveHome" title="Home" aria-label="Home"><svg class="icon"><use href="#i-home"/></svg></button>
+      </div>
+      <div class="float-group">
+        <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
+        <button class="icon-btn three-only toggle" id="subtreeOnly" title="只看选中子树" aria-label="只看选中子树" aria-pressed="false"><svg class="icon"><use href="#i-focus"/></svg></button>
+      </div>
+      <div class="float-group three-only">
+        <div class="popover-anchor">
+          <button class="icon-btn" id="spacingBtn" title="层间距" aria-label="层间距"><svg class="icon"><use href="#i-layers"/></svg></button>
+          <div class="popover spacing-pop" id="spacingPop" hidden>
+            <span>层间距</span>
+            <input type="range" id="spacing" min="0" max="60" value="16">
+            <span class="zoom-label" id="spacingLabel">16</span>
+          </div>
+        </div>
+        <button class="icon-btn toggle on" id="showImages" title="截图" aria-label="截图" aria-pressed="true"><svg class="icon"><use href="#i-image"/></svg></button>
+      </div>
+    </div>
+    <div class="stage-wrap" id="stageWrap">
+      <div class="stage" id="stage"></div>
+    </div>
+    <div class="hover-tip" id="hoverTip" hidden></div>
+    <div class="app-banner" id="appBanner" hidden>
+      <span class="app-banner-text" id="appBannerText"></span>
+      <button class="app-banner-link" id="appBannerLink" hidden></button>
+      <button class="app-banner-run" id="appBannerRun" hidden>运行</button>
+    </div>
+    <div class="empty-state" id="emptyState" hidden>
+      <svg class="empty-icon"><use href="#i-device"/></svg>
+      <div class="empty-title" id="emptyTitle"></div>
+      <div class="empty-body" id="emptyBody"></div>
+      <button class="empty-action" id="emptyIntegration" data-panel="integration">App 集成…</button>
+    </div>
+    <div class="live-wrap" id="liveWrap" hidden>
+      <canvas class="live-canvas" id="liveCanvas" tabindex="0"></canvas>
+      <div class="live-guide" id="liveGuide" hidden>
+        <div class="live-guide-title" id="liveGuideTitle">实时画面需要安装 baguette</div>
+        <div class="live-guide-body" id="liveGuideBody">
+          <div class="live-step"><span>在终端执行</span><code>brew install baguette</code><button class="live-copy" data-copy="brew install baguette">复制</button></div>
+          <div class="live-note">安装后 LayerLens 会自动启动它, 无需其他操作</div>
+        </div>
+        <div class="live-waiting" id="liveWaiting">正在等待连接…</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="splitter vertical" data-split="s2"></div>
+  <div class="splitter horizontal" data-split="s3"></div>
+
+  <section class="pane detail-pane">
+    <div class="pane-header">
+      <div class="segmented full" id="detailTabs">
+        <button data-tab="attr" class="active">属性</button>
+        <button data-tab="class">类信息</button>
+      </div>
+    </div>
+    <div class="detail" id="detail"><div class="empty">选择一个视图</div></div>
+  </section>
+</main>
+
+<nav class="mobile-nav" id="mobileNav">
+  <button data-view="tree" title="层级" aria-label="层级"><svg class="icon"><use href="#i-tree"/></svg><span>层级</span></button>
+  <button data-view="canvas" class="active" title="画布" aria-label="画布"><svg class="icon"><use href="#i-device"/></svg><span>画布</span></button>
+  <button data-view="detail" title="详情" aria-label="详情"><svg class="icon"><use href="#i-info"/></svg><span>详情</span></button>
+</nav>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <span class="modal-title" id="modalTitle"></span>
+      <button class="icon-btn" id="modalClose" title="关闭" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/assets/i18n.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>
