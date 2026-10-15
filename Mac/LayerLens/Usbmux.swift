@@ -22,11 +22,14 @@ enum Usbmux {
     static let socketPath = "/var/run/usbmuxd"
     private static let timeout: TimeInterval = 2
 
-    /// 只返回 USB 连接的设备; 无线同步的设备经 usbmuxd 无法访问设备回环地址
-    static func listDevices(queue: DispatchQueue, completion: @escaping ([Device]) -> Void) {
+    /// 只返回 USB 连接的设备; 无线同步的设备经 usbmuxd 无法访问设备回环地址. 请求失败时回调 nil
+    static func listDevices(queue: DispatchQueue, completion: @escaping ([Device]?) -> Void) {
         request(["MessageType": "ListDevices"], queue: queue) { connection, reply in
             connection?.cancel()
-            let list = reply?["DeviceList"] as? [[String: Any]] ?? []
+            guard let list = reply?["DeviceList"] as? [[String: Any]] else {
+                completion(nil)
+                return
+            }
             let devices: [Device] = list.compactMap { item in
                 guard let properties = item["Properties"] as? [String: Any],
                       properties["ConnectionType"] as? String == "USB",
@@ -40,18 +43,19 @@ enum Usbmux {
         }
     }
 
-    /// 连接设备上的 TCP 端口, 成功时回调已就绪的连接, 之后直接收发设备端的数据
-    static func connect(deviceId: Int, port: UInt16, queue: DispatchQueue, completion: @escaping (NWConnection?) -> Void) {
+    /// 连接设备上的 TCP 端口, 成功时回调已就绪的连接, 之后直接收发设备端的数据;
+    /// 失败时 refused 表示设备明确拒绝(端口无人监听), 否则为超时等偶发错误
+    static func connect(deviceId: Int, port: UInt16, queue: DispatchQueue, completion: @escaping (_ connection: NWConnection?, _ refused: Bool) -> Void) {
         // 端口按网络字节序传递
         let message: [String: Any] = ["MessageType": "Connect", "DeviceID": deviceId, "PortNumber": Int(port.bigEndian)]
         request(message, queue: queue) { connection, reply in
             guard let connection, reply?["MessageType"] as? String == "Result", reply?["Number"] as? Int == 0 else {
                 connection?.cancel()
-                completion(nil)
+                completion(nil, reply?["Number"] as? Int == 3)
                 return
             }
             connection.stateUpdateHandler = nil
-            completion(connection)
+            completion(connection, false)
         }
     }
 

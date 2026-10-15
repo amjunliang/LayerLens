@@ -188,6 +188,15 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 .menu.target-menu { left: 0; right: auto; min-width: 300px; max-height: 70vh; overflow: auto; transform-origin: top left; }
 .target-device { display: flex; align-items: baseline; gap: 6px; padding: 8px 8px 4px; font-weight: 600; }
 .target-device span { color: var(--muted); font-weight: normal; font-size: 12px; }
+/* 设备类型标签, 靠右显示 */
+.target-device .target-kind { align-self: center; margin-left: auto; padding: 0 6px; border-radius: 3px; font-size: 11px; font-weight: 600; line-height: 18px; }
+/* 模拟器蓝色, 真机橙色; 不用绿色, 避免与在线状态混淆 */
+.target-device .kind-simulator { background: var(--accent-soft); color: var(--accent); }
+.target-device .kind-device { background: rgba(232, 135, 30, 0.16); color: #d97706; }
+:root[data-theme="dark"] .target-device .kind-device { background: rgba(245, 158, 11, 0.2); color: #f5a623; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .target-device .kind-device { background: rgba(245, 158, 11, 0.2); color: #f5a623; }
+}
 .target-app { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px 6px 16px; border: none; background: none; border-radius: var(--r-control); text-align: left; }
 .target-app:hover { background: var(--hover); }
 .target-app.current { background: var(--selected, var(--hover)); }

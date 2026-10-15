@@ -17,11 +17,11 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     /// 首次加载完成后才显示窗口, 避免看到空白页面
     private var waitingFirstLoad = false
     private static let themeKey = "LayerLensTheme"
-    /// 与网页 --bg 一致, 网页绘制前窗口显示此颜色
-    private static let backgroundColor = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0x14 / 255.0, green: 0x15 / 255.0, blue: 0x18 / 255.0, alpha: 1)
-            : NSColor(srgbRed: 0xF4 / 255.0, green: 0xF5 / 255.0, blue: 0xF7 / 255.0, alpha: 1)
+    private var appearanceObservation: NSKeyValueObservation?
+    /// 与网页工具栏 --panel 一致: 标题栏后方与工具栏连成一体, 网页绘制前窗口也显示此颜色
+    private static func backgroundColor(dark: Bool) -> NSColor {
+        dark ? NSColor(srgbRed: 0x1B / 255.0, green: 0x1D / 255.0, blue: 0x21 / 255.0, alpha: 1)
+            : NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
     }
 
     init(url: URL) {
@@ -32,9 +32,7 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         window.isReleasedWhenClosed = false
         window.center()
         window.setFrameAutosaveName("LayerLensMainWindow")
-        window.backgroundColor = Self.backgroundColor
         super.init(window: window)
-        applyTheme(UserDefaults.standard.string(forKey: Self.themeKey) ?? "auto")
 
         let configuration = WKWebViewConfiguration()
         // 网页据此区分 App 窗口与浏览器, 只调整少量文案和入口
@@ -46,8 +44,14 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         webView.isInspectable = true
         // 不绘制默认的白色背景, 网页绘制前透出窗口底色
         webView.setValue(false, forKey: "drawsBackground")
-        webView.underPageBackgroundColor = Self.backgroundColor
         window.contentView = webView
+        applyTheme(UserDefaults.standard.string(forKey: Self.themeKey) ?? "auto")
+        // 跟随系统外观时, 系统切换深浅色后同步更新底色
+        appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.updateBackgroundColor()
+            }
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -87,6 +91,15 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
             window?.appearance = nil
         }
         UserDefaults.standard.set(theme, forKey: Self.themeKey)
+        updateBackgroundColor()
+    }
+
+    /// WKWebView 在设置时即把颜色固定下来, 不会随外观变化, 需要按窗口当前外观重新设置
+    private func updateBackgroundColor() {
+        guard let window else { return }
+        let color = Self.backgroundColor(dark: window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        window.backgroundColor = color
+        webView.underPageBackgroundColor = color
     }
 
     /// 打开网页中的面板, 如 about / integration

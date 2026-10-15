@@ -192,11 +192,46 @@ async function copyText(text, label) {
   }
 }
 
-function showMenu(x, y, node) {
+// 复制图片需在点击事件中同步调用: Safari 要求同步创建 ClipboardItem, 图片数据以 Promise 传入
+async function copyImage(blob, label) {
+  try {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error(t('当前环境不支持复制图片'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    toast(t('已' + label));
+  } catch (e) {
+    toast(t('复制失败: {0}', e.message), true);
+  }
+}
+
+function fetchPNG(url) {
+  return fetch(url).then((res) => {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.blob();
+  }).then((blob) => new Blob([blob], { type: 'image/png' }));
+}
+
+function liveCanvasPNG() {
+  return new Promise((resolve, reject) => {
+    $('liveCanvas').toBlob((blob) => (blob ? resolve(blob) : reject(new Error(t('暂无画面')))), 'image/png');
+  });
+}
+
+// 屏幕截图: 实时模式取当前画面, 2D/3D 取当前窗口的 App 截图
+function screenShotAvailable() {
+  return state.mode === 'live' ? $('liveCanvas').width > 0 : !!currentWindow();
+}
+
+function screenShotPNG() {
+  return state.mode === 'live' ? liveCanvasPNG() : fetchPNG(shotURL(currentWindow().oid, 'group'));
+}
+
+// node 为空时只显示截图项; canvas 为 true 时附带屏幕截图(画布上呼出)
+function showMenu(x, y, node, canvas) {
   hideMenu();
+  if (!node && !(canvas && screenShotAvailable())) return;
   const menu = el('div', 'context-menu');
   menu.id = 'contextMenu';
-  menu.appendChild(el('div', 'menu-title', node.cls));
+  menu.appendChild(el('div', 'menu-title', node ? node.cls : t('截图')));
   const addItem = (title, run, disabled) => {
     const item = el('button', 'menu-item', title);
     item.disabled = disabled;
@@ -206,11 +241,20 @@ function showMenu(x, y, node) {
     });
     menu.appendChild(item);
   };
-  COPY_ACTIONS.forEach((action) => {
-    if (action.separatorBefore) menu.appendChild(el('div', 'menu-separator'));
-    const value = action.value(node);
-    addItem(t(action.title), () => copyText(value, action.title), !value);
-  });
+  if (node) {
+    COPY_ACTIONS.forEach((action) => {
+      if (action.separatorBefore) menu.appendChild(el('div', 'menu-separator'));
+      const value = action.value(node);
+      addItem(t(action.title), () => copyText(value, action.title), !value);
+    });
+    // 实时画面上选中框不可见, 只提供屏幕截图
+    if (!(canvas && state.mode === 'live')) {
+      menu.appendChild(el('div', 'menu-separator'));
+      addItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'));
+    }
+  }
+  if (canvas && node && state.mode === 'live') menu.appendChild(el('div', 'menu-separator'));
+  if (canvas) addItem(t('复制屏幕截图'), () => copyImage(screenShotPNG(), '复制屏幕截图'), !screenShotAvailable());
   document.body.appendChild(menu);
   const rect = menu.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
@@ -1032,8 +1076,7 @@ function setupCanvasEvents() {
   };
   // 画布菜单始终针对当前选中节点, 不按点击位置重新选中, 空白处也可呼出
   const openCanvasMenu = (point) => {
-    const node = state.nodes.get(state.selected);
-    if (node) showMenu(point.clientX, point.clientY, node);
+    showMenu(point.clientX, point.clientY, state.nodes.get(state.selected), true);
   };
   let pinch = null;
 
@@ -1483,7 +1526,9 @@ function renderTargetMenu() {
     // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
     const selectable = device.kind === 'simulator';
     const head = el(selectable ? 'button' : 'div', 'target-device', device.name);
-    head.append(el('span', null, device.os));
+    // 真机名称是用户自定义的, 附上机型; 与名称相同(如模拟器)时不重复
+    const model = device.model && device.model !== device.name ? device.model : '';
+    head.append(el('span', null, [model, device.os].filter(Boolean).join(' · ')), el('span', 'target-kind ' + (selectable ? 'kind-simulator' : 'kind-device'), selectable ? t('模拟器') : t('设备 (USB)')));
     if (selectable) {
       head.classList.toggle('current', device.id === targets.deviceId && !targets.bundleId);
       head.title = t('只使用实时画面');
@@ -1570,7 +1615,8 @@ function watchApp() {
 
 // link 为提示条上的次要按钮, 如 { text, panel }
 // 重新连上时 App 已重新启动则重新加载, 以使用新的 App 信息;
-// 刚连上时首页还未加载完(实测约 2s 后启动遮罩才移除), 过早拉取的层级会过期
+// 刚连上时首页还未加载完(实测约 2s 后启动遮罩才移除), 过早拉取的层级会过期.
+// 重启后通常停在首页, 模拟器上先切到实时画面便于操作到目标页, 切回 2D/3D 时会刷新层级
 async function reconnected() {
   try {
     await loadTargets();
@@ -1582,7 +1628,9 @@ async function reconnected() {
     setAppState('online');
     return;
   }
-  setAppState('back');
+  const toLive = liveAvailable() && state.mode !== 'live';
+  if (toLive) await setMode('live');
+  setAppState('back', toLive ? t('App 已重启, 已切换到实时画面') : '');
   setTimeout(() => location.reload(), 3000);
 }
 
@@ -1776,8 +1824,7 @@ function setupLiveEvents() {
   canvas.addEventListener('pointercancel', endTouch);
   wrap.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    const node = state.nodes.get(state.selected);
-    if (node) showMenu(e.clientX, e.clientY, node);
+    showMenu(e.clientX, e.clientY, state.nodes.get(state.selected), true);
   });
   // 与 2D 一致: 捏合 / ⌘ + 滚轮缩放, 双指滑动平移; App 内滚动用鼠标拖动.
   // 不用 baguette 的 scroll 事件: 在 iOS 26 模拟器上会导致 backboardd 崩溃
@@ -2408,7 +2455,7 @@ function applyTheme(theme, save) {
 // MARK: - Panels
 // 关于和 App 集成面板; Mac App 的菜单通过 window.layerlensOpenPanel 打开
 
-const REPO_URL = 'https://github.com/YueYou/LayerLens';
+const REPO_URL = 'https://github.com/amjunliang/LayerLens';
 const POD_LINE = `pod 'LayerLens', :git => '${REPO_URL}.git', :configurations => ['Debug']`;
 const POST_INSTALL = `post_install do |installer|
   installer.pods_project.targets.each do |target|
@@ -2454,7 +2501,7 @@ function integrationPanel() {
     paragraph(t('以 Debug 配置运行 App 即可, 无需编写代码; Release 包不包含 LayerLens.')),
     el('h5', null, t('4. 确认连接')),
     paragraph(t('Xcode 控制台输出 [LayerLens] Running on port …, 左上角的设备列表中出现该 App.')),
-    el('h5', null, t('真机')),
+    el('h5', null, t('真机调试')),
     paragraph(t('通过 USB 连接即可使用, 无需额外配置; 暂不支持 Wi-Fi 连接.')),
   ];
 }

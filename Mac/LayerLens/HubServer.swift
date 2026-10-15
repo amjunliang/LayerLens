@@ -160,7 +160,7 @@ final class HubServer {
                 case .usb(let usbDeviceId, let port):
                     var data = head.forwarded(target: upstreamTarget, host: "127.0.0.1:\(port)", keepConnection: false)
                     data.append(leftover)
-                    Usbmux.connect(deviceId: usbDeviceId, port: port, queue: self.queue) { upstream in
+                    Usbmux.connect(deviceId: usbDeviceId, port: port, queue: self.queue) { upstream, _ in
                         guard let upstream else {
                             isEventStream ? connection.abort() : connection.respond(.error(503, "App is not running"))
                             return

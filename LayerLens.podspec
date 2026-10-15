@@ -7,11 +7,11 @@ Pod::Spec.new do |spec|
   devices automatically and lets you browse the view hierarchy, inspect and edit properties, read class info
   and explore layers in 3D, in its window or in any browser. Built on LookinServer.
   DESC
-  spec.homepage     = "https://github.com/YueYou/LayerLens"
+  spec.homepage     = "https://github.com/amjunliang/LayerLens"
   spec.license      = { :type => "MIT", :file => "LICENSE" }
   spec.author       = { "YueYou" => "YueYou" }
   spec.platform     = :ios, "15.0"
-  spec.source       = { :git => "https://github.com/YueYou/LayerLens.git", :tag => spec.version.to_s }
+  spec.source       = { :git => "https://github.com/amjunliang/LayerLens.git", :tag => spec.version.to_s }
   spec.requires_arc = true
 
   spec.source_files        = "Pod/Classes/**/*.{h,m}"

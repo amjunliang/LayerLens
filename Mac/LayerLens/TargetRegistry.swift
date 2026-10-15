@@ -43,6 +43,8 @@ struct DeviceRecord {
     let kind: DeviceKind
     let name: String
     let os: String
+    /// 机型, 如 iPhone 15; 真机名称是用户自定义的, 需要另外显示机型
+    var model = ""
 }
 
 struct AppRecord {
@@ -58,6 +60,8 @@ final class TargetRegistry {
     /// 与 iOS 端 Pod 的端口范围保持一致
     static let appPorts: ClosedRange<UInt16> = 9527...9536
     static let refreshInterval: TimeInterval = 2
+    /// 真机 App 连续偶发失败(超时等)达到该次数才移除, 明确拒绝连接时立即移除
+    static let usbMissLimit = 3
 
     private let queue = DispatchQueue(label: "com.layerlens.registry")
     private let session: URLSession
@@ -65,9 +69,11 @@ final class TargetRegistry {
     private var simulators: [DeviceRecord] = []
     private var usbDevices: [Usbmux.Device] = []
     /// UDID -> devicectl 查到的名称和系统版本, 每台设备只查一次
-    private var deviceDetails: [String: (name: String, os: String)] = [:]
+    private var deviceDetails: [String: (name: String, os: String, model: String)] = [:]
     private var detailsLoading: Set<String> = []
     private var apps: [AppRecord] = []
+    /// "UDID|Bundle ID" -> 真机 App 连续偶发失败的次数
+    private var usbMisses: [String: Int] = [:]
     private var scanning = false
     private var scanWaiters: [() -> Void] = []
     /// Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
@@ -124,7 +130,7 @@ final class TargetRegistry {
                     let details = deviceDetails[app.deviceId]
                     let name = details?.name.nonEmpty ?? app.info["deviceName"] as? String ?? "iPhone"
                     let os = details?.os.nonEmpty ?? app.info["os"] as? String ?? ""
-                    devices.append(DeviceRecord(id: app.deviceId, kind: .device, name: name, os: os))
+                    devices.append(DeviceRecord(id: app.deviceId, kind: .device, name: name, os: os, model: details?.model ?? ""))
                 }
             }
             let result: [[String: Any]] = devices.map { device in
@@ -137,7 +143,7 @@ final class TargetRegistry {
                         info["connection"] = app.endpoint.connectionType
                         return info
                     }
-                return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "apps": deviceApps]
+                return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "model": device.model, "apps": deviceApps]
             }
             completion(result)
         }
@@ -177,7 +183,8 @@ final class TargetRegistry {
 
     private func refreshUSBDevices() {
         Usbmux.listDevices(queue: queue) { [weak self] devices in
-            guard let self else { return }
+            // 偶发请求失败时沿用上次结果, 避免设备上的 App 被清空
+            guard let self, let devices else { return }
             self.usbDevices = devices
             devices.filter { self.deviceDetails[$0.udid] == nil && !self.detailsLoading.contains($0.udid) }.forEach { self.loadDetails(udid: $0.udid) }
         }
@@ -189,7 +196,7 @@ final class TargetRegistry {
         let details = deviceDetails[device.udid]
         let name = details?.name.nonEmpty ?? app?.info["deviceName"] as? String ?? "iPhone"
         let os = details?.os.nonEmpty ?? app?.info["os"] as? String ?? ""
-        return DeviceRecord(id: device.udid, kind: .device, name: name, os: os)
+        return DeviceRecord(id: device.udid, kind: .device, name: name, os: os, model: details?.model ?? "")
     }
 
     private func loadDetails(udid: String) {
@@ -202,14 +209,14 @@ final class TargetRegistry {
                 self.deviceDetails.merge(details) { _, new in new }
                 // 查不到(如 Xcode 版本过旧)时记为空, 不再重复查询
                 if self.deviceDetails[udid] == nil {
-                    self.deviceDetails[udid] = ("", "")
+                    self.deviceDetails[udid] = ("", "", "")
                 }
             }
         }
     }
 
     /// 解析 `devicectl list devices --json-output`, 只能输出到文件
-    private static func devicectlDetails() -> [String: (name: String, os: String)] {
+    private static func devicectlDetails() -> [String: (name: String, os: String, model: String)] {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("layerlens-devices-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
         guard run("/usr/bin/xcrun", ["devicectl", "list", "devices", "--quiet", "--json-output", file.path]) != nil,
@@ -218,14 +225,14 @@ final class TargetRegistry {
               let devices = (json["result"] as? [String: Any])?["devices"] as? [[String: Any]] else {
             return [:]
         }
-        var result: [String: (name: String, os: String)] = [:]
+        var result: [String: (name: String, os: String, model: String)] = [:]
         for device in devices {
             let hardware = device["hardwareProperties"] as? [String: Any] ?? [:]
             let properties = device["deviceProperties"] as? [String: Any] ?? [:]
             guard let udid = hardware["udid"] as? String, let name = properties["name"] as? String else { continue }
             let version = properties["osVersionNumber"] as? String ?? ""
             let platform = hardware["platform"] as? String ?? "iOS"
-            result[udid] = (name, version.isEmpty ? "" : "\(platform) \(version)")
+            result[udid] = (name, version.isEmpty ? "" : "\(platform) \(version)", hardware["marketingName"] as? String ?? "")
         }
         return result
     }
@@ -246,15 +253,23 @@ final class TargetRegistry {
         let group = DispatchGroup()
         let lock = NSLock()
         var found: [AppRecord] = []
-        for device in usbDevices {
+        // 偶发失败(非明确拒绝)的真机端口, 用于判断是否保留上次结果
+        var transientPorts: Set<String> = []
+        let devices = usbDevices
+        for device in devices {
             for port in Self.appPorts {
                 group.enter()
-                Self.fetchUSBAppInfo(deviceId: device.id, port: port, queue: queue) { info in
+                Self.fetchUSBAppInfo(deviceId: device.id, port: port, queue: queue) { info, refused in
                     defer { group.leave() }
-                    guard let info, let bundleId = info["bundleId"] as? String else { return }
                     lock.lock()
+                    defer { lock.unlock() }
+                    guard let info, let bundleId = info["bundleId"] as? String else {
+                        if !refused {
+                            transientPorts.insert("\(device.udid)|\(port)")
+                        }
+                        return
+                    }
                     found.append(AppRecord(deviceId: device.udid, bundleId: bundleId, endpoint: .usb(deviceId: device.id, port: port), info: info))
-                    lock.unlock()
                 }
             }
         }
@@ -275,13 +290,35 @@ final class TargetRegistry {
             }.resume()
         }
         group.notify(queue: queue) { [self] in
-            apps = found
+            apps = found + retainedUSBApps(found: found, devices: devices, transientPorts: transientPorts)
             rememberSourceFiles()
             scanning = false
             let waiters = scanWaiters
             scanWaiters = []
             waiters.forEach { $0() }
         }
+    }
+
+    /// 上次找到但本次偶发失败的真机 App 暂时保留, 避免列表闪烁
+    private func retainedUSBApps(found: [AppRecord], devices: [Usbmux.Device], transientPorts: Set<String>) -> [AppRecord] {
+        var retained: [AppRecord] = []
+        var misses: [String: Int] = [:]
+        for app in apps {
+            guard case .usb(let deviceId, let port) = app.endpoint,
+                  devices.contains(where: { $0.id == deviceId }),
+                  !found.contains(where: { $0.deviceId == app.deviceId && $0.bundleId == app.bundleId }),
+                  transientPorts.contains("\(app.deviceId)|\(port)") else {
+                continue
+            }
+            let key = "\(app.deviceId)|\(app.bundleId)"
+            let count = (usbMisses[key] ?? 0) + 1
+            if count < Self.usbMissLimit {
+                misses[key] = count
+                retained.append(app)
+            }
+        }
+        usbMisses = misses
+        return retained
     }
 
     private func rememberSourceFiles() {
@@ -297,16 +334,16 @@ final class TargetRegistry {
         }
     }
 
-    /// 经 usbmuxd 请求设备上的 /api/app
-    private static func fetchUSBAppInfo(deviceId: Int, port: UInt16, queue: DispatchQueue, completion: @escaping ([String: Any]?) -> Void) {
-        Usbmux.connect(deviceId: deviceId, port: port, queue: queue) { connection in
+    /// 经 usbmuxd 请求设备上的 /api/app; refused 表示该端口无人监听
+    private static func fetchUSBAppInfo(deviceId: Int, port: UInt16, queue: DispatchQueue, completion: @escaping (_ info: [String: Any]?, _ refused: Bool) -> Void) {
+        Usbmux.connect(deviceId: deviceId, port: port, queue: queue) { connection, refused in
             guard let connection else {
-                completion(nil)
+                completion(nil, refused)
                 return
             }
             let request = HTTPClient.request(method: "GET", path: "/api/app", host: "127.0.0.1:\(port)")
             HTTPClient.exchange(request, on: connection, queue: queue, timeout: 2) { response in
-                completion(response?.status == 200 ? response?.json : nil)
+                completion(response?.status == 200 ? response?.json : nil, false)
             }
         }
     }
