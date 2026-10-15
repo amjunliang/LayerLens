@@ -129,6 +129,14 @@ const EN = {
   '当前环境不支持复制图片': 'Copying images is not supported here',
   '暂无画面': 'No frame yet',
   '未选中元素': 'No element selected',
+  '触摸似乎没有生效, 修复会结束前台 App': 'Touch does not seem to work. Fixing will quit the foreground app',
+  '修复': 'Fix',
+  '忽略': 'Ignore',
+  '正在修复触摸, 模拟器桌面约 10 秒后恢复': 'Fixing touch, the simulator will be back in about 10 seconds',
+  '触摸已修复': 'Touch fixed',
+  '修复失败: {0}': 'Fix failed: {0}',
+  '修复模拟器触摸…': 'Fix Simulator Touch…',
+  '将重启模拟器的 backboardd 与 SpringBoard, 前台 App 会被结束, 约 10 秒后恢复. 继续?': 'This restarts backboardd and SpringBoard in the simulator and quits the foreground app. It takes about 10 seconds. Continue?',
 
   // 连接与运行状态
   '连接失败': 'Connection failed',

@@ -580,6 +580,8 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .app-banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 128px); padding: 6px 6px 6px 12px; border-radius: var(--r-float); background: var(--panel); box-shadow: var(--shadow); font-size: 12px; }
 .crumbs:not(:empty) ~ .app-banner { top: 38px; }
 .app-banner[hidden] { display: none; }
+/* App 状态提示条优先, 显示时隐藏触摸修复提示 */
+#appBanner:not([hidden]) ~ #liveHeal { display: none; }
 .app-banner-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-banner-text::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--accent); vertical-align: 1px; }
 /* 绿色已连接, 红色离线; 重启中圆点换成转圈 */

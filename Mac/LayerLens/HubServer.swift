@@ -203,12 +203,20 @@ final class HubServer {
     /// /sim/<UDID>/stream 为内置实时画面的 WebSocket, /sim/<UDID>/info 返回屏幕尺寸
     private func handleSimulator(_ head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
         let parts = head.path.split(separator: "/").map(String.init)
-        guard head.method == "GET", parts.count == 3, SimulatorLive.isAvailable else {
+        // heal 会重启模拟器进程, 只接受 POST
+        guard parts.count == 3, SimulatorLive.isAvailable, head.method == (parts[2] == "heal" ? "POST" : "GET") else {
             connection.respond(.error(404, "Not Found"))
             return
         }
         let udid = parts[1]
         switch parts[2] {
+        case "heal":
+            workQueue.async { [self] in
+                let ok = live.healTouch(udid: udid)
+                queue.async {
+                    connection.respond(ok ? .json(["ok": true]) : .error(500, "Heal failed"))
+                }
+            }
         case "stream":
             live.accept(udid: udid, head: head, leftover: leftover, connection: connection)
         case "info":

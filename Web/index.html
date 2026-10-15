@@ -83,6 +83,7 @@
           </div>
         </div>
         <div class="menu-sep"></div>
+        <button class="menu-row menu-action has-live-only" id="menuHeal">修复模拟器触摸…</button>
         <button class="menu-row menu-action" data-panel="integration">App 集成…</button>
         <button class="menu-row menu-action" data-panel="about">关于 LayerLens</button>
       </div>
@@ -175,6 +176,11 @@
       <span class="app-banner-text" id="appBannerText"></span>
       <button class="app-banner-link" id="appBannerLink" hidden></button>
       <button class="app-banner-run" id="appBannerRun" hidden>运行</button>
+    </div>
+    <div class="app-banner live-only" id="liveHeal" hidden>
+      <span class="app-banner-text" id="liveHealText"></span>
+      <button class="app-banner-run" id="liveHealBtn">修复</button>
+      <button class="app-banner-link" id="liveHealClose">忽略</button>
     </div>
     <div class="empty-state" id="emptyState" hidden>
       <svg class="empty-icon"><use href="#i-device"/></svg>

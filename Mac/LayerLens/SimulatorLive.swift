@@ -28,6 +28,26 @@ final class SimulatorLive {
         return ["screen": ["width": Double(IOSurfaceGetWidth(surface)) / scale, "height": Double(IOSurfaceGetHeight(surface)) / scale, "scale": scale]]
     }
 
+    /// 修复触摸注入: 模拟器重新启动后 backboardd 偶尔不再接收注入的事件, 重启它即可恢复.
+    /// 会连带重启 SpringBoard, 前台 App 被结束; 约 10 秒后界面恢复. 同步执行, 不要在网络队列调用
+    func healTouch(udid: String) -> Bool {
+        guard SimBridge.device(udid: udid) != nil else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "spawn", udid, "launchctl", "stop", "com.apple.backboardd"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            NSLog("[live] heal failed: %@", error.localizedDescription)
+            return false
+        }
+        process.waitUntilExit()
+        NSLog("[live] heal touch %@: %d", udid, process.terminationStatus)
+        return process.terminationStatus == 0
+    }
+
     func accept(udid: String, head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
         guard head.header("Upgrade")?.lowercased() == "websocket" else {
             connection.respond(.error(400, "WebSocket upgrade required"))

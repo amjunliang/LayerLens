@@ -1348,6 +1348,10 @@ const live = {
   touch: null,
   orientation: 1,
   settle: null,
+  // 收到的画面帧数, 用于判断拖动后画面是否变化; 连续无效拖动次数
+  frames: 0,
+  deadDrags: 0,
+  healing: false,
 };
 
 function liveAvailable() {
@@ -1405,6 +1409,7 @@ function liveStart() {
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
       feedLiveFrame(new Uint8Array(e.data));
+      live.frames++;
       if (live.settle) {
         clearTimeout(live.settle.timer);
         live.settle.timer = setTimeout(liveSettled, LIVE_SETTLE_MS);
@@ -1552,6 +1557,56 @@ function layoutLive() {
   canvas.style.height = sh * scale + 'px';
   canvas.style.borderRadius = LIVE_CORNER * scale + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
+}
+
+// 触摸失效检测: 明显的拖动后画面一帧都没变化, 连续多次即提示修复.
+// 服务端只在画面变化时推帧, 拖动在 App 内几乎总会让画面变化
+function checkLiveDrag(touch) {
+  if (live.healing || touch.distance < LIVE_HEAL_DRAG) return;
+  const frames = touch.frames;
+  setTimeout(() => {
+    if (live.frames !== frames) {
+      live.deadDrags = 0;
+      return;
+    }
+    live.deadDrags++;
+    if (live.deadDrags >= LIVE_HEAL_STRIKES) showLiveHeal();
+  }, LIVE_HEAL_WAIT_MS);
+}
+
+function showLiveHeal() {
+  if (live.healing) return;
+  $('liveHeal').dataset.state = 'warn';
+  $('liveHealText').textContent = t('触摸似乎没有生效, 修复会结束前台 App');
+  $('liveHealBtn').hidden = false;
+  $('liveHealClose').hidden = false;
+  $('liveHeal').hidden = false;
+}
+
+function hideLiveHeal() {
+  live.deadDrags = 0;
+  $('liveHeal').hidden = true;
+}
+
+// 重启模拟器的 backboardd(连带 SpringBoard), 约 10 秒后界面恢复
+async function healLiveTouch() {
+  if (live.healing || !live.udid) return;
+  live.healing = true;
+  $('liveHeal').dataset.state = 'restarting';
+  $('liveHealText').textContent = t('正在修复触摸, 模拟器桌面约 10 秒后恢复');
+  $('liveHealBtn').hidden = true;
+  $('liveHealClose').hidden = true;
+  $('liveHeal').hidden = false;
+  try {
+    const res = await fetch(`/sim/${encodeURIComponent(live.udid)}/heal`, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await new Promise((resolve) => setTimeout(resolve, LIVE_HEAL_RECOVER_MS));
+    toast(t('触摸已修复'));
+  } catch (e) {
+    toast(t('修复失败: {0}', e.message), true);
+  }
+  live.healing = false;
+  hideLiveHeal();
 }
 
 function liveSend(message) {
@@ -1995,6 +2050,11 @@ async function inspectAt(point) {
 const LIVE_PRESS_DELAY_MS = 300;
 const LIVE_DRAG_SLOP = 3;
 const LIVE_TAP_MS = 40;
+// 触摸失效检测: 拖动超过多少点才计入; 松开后等多久看画面是否变化; 连续几次无变化提示修复; 修复后等待界面恢复的时长
+const LIVE_HEAL_DRAG = 40;
+const LIVE_HEAL_WAIT_MS = 600;
+const LIVE_HEAL_STRIKES = 2;
+const LIVE_HEAL_RECOVER_MS = 10000;
 
 function setupLiveEvents() {
   const wrap = $('liveWrap');
@@ -2018,7 +2078,7 @@ function setupLiveEvents() {
     }
     // 起点贴近上下边缘时作为系统手势(下拉通知中心 / 上滑回桌面)
     const edge = point.y >= h() - 20 ? 'bottom' : point.y <= 12 ? 'top' : undefined;
-    live.touch = { inspect: false, start: point, pending: true, timer: 0 };
+    live.touch = { inspect: false, start: point, pending: true, timer: 0, distance: 0, frames: live.frames };
     if (edge) {
       flushDown(live.touch, edge);
       return;
@@ -2039,7 +2099,9 @@ function setupLiveEvents() {
     const touch = live.touch;
     if (!touch || touch.inspect) return;
     const point = livePoint(e);
-    if (touch.pending && Math.hypot(point.x - touch.start.x, point.y - touch.start.y) < LIVE_DRAG_SLOP) return;
+    const distance = Math.hypot(point.x - touch.start.x, point.y - touch.start.y);
+    touch.distance = Math.max(touch.distance, distance);
+    if (touch.pending && distance < LIVE_DRAG_SLOP) return;
     flushDown(touch);
     liveSend({ type: 'touch1-move', x: point.x, y: point.y, width: w(), height: h() });
   });
@@ -2052,6 +2114,7 @@ function setupLiveEvents() {
       if (e.type === 'pointerup' && point.inside) inspectAt(point);
       return;
     }
+    if (e.type === 'pointerup') checkLiveDrag(touch);
     const up = () => liveSend({ type: 'touch1-up', x: point.x, y: point.y, width: w(), height: h() });
     // 点击时按下与抬起间隔过短可能不被识别为点击
     if (flushDown(touch)) setTimeout(up, LIVE_TAP_MS);
@@ -2109,6 +2172,12 @@ function setupLiveEvents() {
   $('liveInspect').addEventListener('click', () => setLiveInspect(!live.inspect));
   $('liveHome').addEventListener('click', liveHome);
   $('liveRotate').addEventListener('click', liveRotate);
+  $('liveHealBtn').addEventListener('click', healLiveTouch);
+  $('liveHealClose').addEventListener('click', hideLiveHeal);
+  $('menuHeal').addEventListener('click', () => {
+    hidePopovers();
+    if (confirm(t('将重启模拟器的 backboardd 与 SpringBoard, 前台 App 会被结束, 约 10 秒后恢复. 继续?'))) healLiveTouch();
+  });
   $('screenShot').addEventListener('click', () => copyImage(screenShotPNG(), '复制屏幕截图'));
   $('xcodeRun').addEventListener('click', xcodeRun);
   $('appBannerRun').addEventListener('click', xcodeRun);
