@@ -216,22 +216,20 @@ function liveCanvasPNG() {
   });
 }
 
-// 屏幕截图: 实时模式取当前画面, 2D/3D 取当前窗口的 App 截图
-function screenShotAvailable() {
-  return state.mode === 'live' ? $('liveCanvas').width > 0 : !!currentWindow();
-}
-
+// 屏幕截图(工具栏): 实时模式取当前画面, 2D/3D 取当前窗口的 App 截图
 function screenShotPNG() {
-  return state.mode === 'live' ? liveCanvasPNG() : fetchPNG(shotURL(currentWindow().oid, 'group'));
+  if (state.mode === 'live') return liveCanvasPNG();
+  const win = currentWindow();
+  return win ? fetchPNG(shotURL(win.oid, 'group')) : Promise.reject(new Error(t('暂无画面')));
 }
 
-// node 为空时只显示截图项; canvas 为 true 时附带屏幕截图(画布上呼出)
+// canvas 为 true 时(画布上呼出)未选中元素也显示菜单, 各项不可用
 function showMenu(x, y, node, canvas) {
   hideMenu();
-  if (!node && !(canvas && screenShotAvailable())) return;
+  if (!node && !canvas) return;
   const menu = el('div', 'context-menu');
   menu.id = 'contextMenu';
-  menu.appendChild(el('div', 'menu-title', node ? node.cls : t('截图')));
+  menu.appendChild(el('div', 'menu-title', node ? node.cls : t('未选中元素')));
   const addItem = (title, run, disabled) => {
     const item = el('button', 'menu-item', title);
     item.disabled = disabled;
@@ -241,20 +239,13 @@ function showMenu(x, y, node, canvas) {
     });
     menu.appendChild(item);
   };
-  if (node) {
-    COPY_ACTIONS.forEach((action) => {
-      if (action.separatorBefore) menu.appendChild(el('div', 'menu-separator'));
-      const value = action.value(node);
-      addItem(t(action.title), () => copyText(value, action.title), !value);
-    });
-    // 实时画面上选中框不可见, 只提供屏幕截图
-    if (!(canvas && state.mode === 'live')) {
-      menu.appendChild(el('div', 'menu-separator'));
-      addItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'));
-    }
-  }
-  if (canvas && node && state.mode === 'live') menu.appendChild(el('div', 'menu-separator'));
-  if (canvas) addItem(t('复制屏幕截图'), () => copyImage(screenShotPNG(), '复制屏幕截图'), !screenShotAvailable());
+  COPY_ACTIONS.forEach((action) => {
+    if (action.separatorBefore) menu.appendChild(el('div', 'menu-separator'));
+    const value = node && action.value(node);
+    addItem(t(action.title), () => copyText(value, action.title), !value);
+  });
+  menu.appendChild(el('div', 'menu-separator'));
+  addItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'), !node);
   document.body.appendChild(menu);
   const rect = menu.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
@@ -414,9 +405,13 @@ function restoreNodeState() {
 
 // MARK: - Hierarchy
 
+// 连续刷新时只采用最后一次请求的结果, 避免较早的响应晚到覆盖新层级
+let refreshSeq = 0;
 async function refresh() {
+  const seq = ++refreshSeq;
   try {
     const roots = await api('/api/hierarchy');
+    if (seq !== refreshSeq) return;
     state.stamp = Date.now();
     images.pending = [];
     images.loaded.clear();
@@ -806,6 +801,9 @@ function renderCanvas() {
   if (state.mode === '2d') {
     const img = el('img', 'shot');
     img.draggable = false;
+    // 缓存命中时直接设置地址会重新请求, App 重启中会失败, 隐藏避免显示裂图
+    img.onerror = () => (img.style.visibility = 'hidden');
+    img.onload = () => (img.style.visibility = '');
     loadImage(shotURL(win.oid, 'group'), (url) => (img.src = url));
     stage.append(img, el('div', 'box hover'), el('div', 'box selected'));
   } else {
@@ -1241,6 +1239,8 @@ function setupCanvasEvents() {
 // 模拟器实时画面: Mac App 采集模拟器屏幕编码为 H.264 经 /sim/ 推送, 并注入触摸与按键, 页面只负责解码绘制与转发操作
 
 const LIVE_RETRY_MS = 2000;
+// 画面静止判定: 服务端只在画面变化时推帧, 超过该时长没有新帧即视为静止
+const LIVE_SETTLE_MS = 500;
 const LIVE_CORNER = 55;
 // 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向左旋转的下一个方向, 与 Simulator.app 的 ⌘← 一致
 const LIVE_ROTATION = { 1: 0, 3: -90, 2: 180, 4: 90 };
@@ -1259,6 +1259,7 @@ const live = {
   altHeld: false,
   touch: null,
   orientation: 1,
+  settle: null,
 };
 
 function liveAvailable() {
@@ -1316,6 +1317,11 @@ function liveStart() {
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
       feedLiveFrame(new Uint8Array(e.data));
+      if (live.settle) {
+        clearTimeout(live.settle.timer);
+        live.settle.timer = setTimeout(liveSettled, LIVE_SETTLE_MS);
+        live.settle.changed = true;
+      }
       return;
     }
     // 方向由 Mac App 记录并广播, 多个页面保持一致
@@ -1338,6 +1344,25 @@ function liveStart() {
     live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
   if (!live.raf) live.raf = requestAnimationFrame(paintLive);
+}
+
+// duration 内每当实时画面变化后重新静止就执行一次 run; 新的调用替换之前的
+function watchLiveSettle(run, duration) {
+  clearTimeout(live.settle?.timer);
+  clearTimeout(live.settle?.end);
+  const settle = { run, changed: false, timer: 0 };
+  settle.end = setTimeout(() => {
+    clearTimeout(settle.timer);
+    if (live.settle === settle) live.settle = null;
+  }, duration);
+  live.settle = settle;
+}
+
+function liveSettled() {
+  const settle = live.settle;
+  if (!settle?.changed) return;
+  settle.changed = false;
+  settle.run();
 }
 
 function liveStop() {
@@ -1694,7 +1719,22 @@ async function reconnected() {
   }
   const toLive = liveAvailable() && state.mode !== 'live';
   if (toLive) await setMode('live');
-  setAppState('back', toLive ? t('App 已重启, 已切换到实时画面') : '');
+  // 实时画面一直连着, 不整页重新加载, 原地更新 App 信息; 层级立即取一次,
+  // 之后几秒内启动遮罩等首屏变化每次结束(画面静止)时再取, 不必固定等待
+  if (state.mode === 'live') {
+    appState.dropped = false;
+    appState.instanceId = currentApp()?.instanceId || '';
+    appState.warning = compatibilityWarning(currentApp());
+    // 原来靠整页重新加载复位, 这里手动结束运行跟踪
+    setRunning(false);
+    setAppState('online');
+    if (toLive) toast(t('App 已重启, 已切换到实时画面'));
+    loadAppInfo();
+    refresh();
+    watchLiveSettle(refresh, 5000);
+    return;
+  }
+  setAppState('back');
   setTimeout(() => location.reload(), 3000);
 }
 
@@ -1931,10 +1971,8 @@ function setupLiveEvents() {
   };
   canvas.addEventListener('pointerup', endTouch);
   canvas.addEventListener('pointercancel', endTouch);
-  wrap.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showMenu(e.clientX, e.clientY, state.nodes.get(state.selected), true);
-  });
+  // 实时画面不弹右键菜单: 元素信息在层级树右键复制, 屏幕截图在工具栏
+  wrap.addEventListener('contextmenu', (e) => e.preventDefault());
   // 与 2D 一致: 捏合 / ⌘ + 滚轮缩放, 双指滑动平移; App 内滚动用鼠标拖动.
   // 不注入滚轮事件: 在 iOS 26 模拟器上会导致 backboardd 崩溃
   wrap.addEventListener('wheel', (e) => {
@@ -1983,6 +2021,7 @@ function setupLiveEvents() {
   $('liveInspect').addEventListener('click', () => setLiveInspect(!live.inspect));
   $('liveHome').addEventListener('click', liveHome);
   $('liveRotate').addEventListener('click', liveRotate);
+  $('screenShot').addEventListener('click', () => copyImage(screenShotPNG(), '复制屏幕截图'));
   $('xcodeRun').addEventListener('click', xcodeRun);
   $('appBannerRun').addEventListener('click', xcodeRun);
   $('emptyGuide').addEventListener('click', (e) => {
@@ -2897,7 +2936,12 @@ async function start() {
     setAppState('offline');
     return;
   }
-  api('/api/app').then((info) => {
+  loadAppInfo();
+  refresh();
+}
+
+function loadAppInfo() {
+  return api('/api/app').then((info) => {
     $('appName').textContent = info.appName;
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
@@ -2907,7 +2951,6 @@ async function start() {
     document.title = `${info.appName} - LayerLens`;
     setupLive(info);
   }).catch((e) => toast(e.message, true));
-  refresh();
 }
 
 setup();

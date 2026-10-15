@@ -118,6 +118,7 @@ const EN = {
   '已复制屏幕截图': 'Copied screen screenshot',
   '当前环境不支持复制图片': 'Copying images is not supported here',
   '暂无画面': 'No frame yet',
+  '未选中元素': 'No element selected',
 
   // 连接与运行状态
   '连接失败': 'Connection failed',
