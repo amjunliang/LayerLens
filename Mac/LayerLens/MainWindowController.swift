@@ -34,6 +34,9 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         window.setFrameAutosaveName("LayerLensMainWindow")
         super.init(window: window)
 
+        // 整页重新加载放在标题栏右侧; 用标题栏附件而不是工具栏, 不增加标题栏高度
+        window.addTitlebarAccessoryViewController(makeReloadAccessory())
+
         let configuration = WKWebViewConfiguration()
         // 网页据此区分 App 窗口与浏览器, 只调整少量文案和入口
         let script = WKUserScript(source: "window.LAYERLENS_APP = true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
@@ -102,6 +105,11 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         webView.underPageBackgroundColor = color
     }
 
+    /// 整页重新加载
+    @objc func reload() {
+        webView.reload()
+    }
+
     /// 打开网页中的面板, 如 about / integration
     func openPanel(_ name: String) {
         let script = "window.layerlensOpenPanel && window.layerlensOpenPanel('\(name)')"
@@ -113,6 +121,23 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     }
 
     private var pendingPanel: String?
+
+    private func makeReloadAccessory() -> NSTitlebarAccessoryViewController {
+        let title = L("重新加载页面", "Reload Page")
+        let image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: title)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        let button = NSButton(image: image ?? NSImage(), target: self, action: #selector(reload))
+        button.bezelStyle = .accessoryBarAction
+        button.showsBorderOnlyWhileMouseInside = true
+        button.toolTip = title + " (⇧⌘R)"
+        button.frame = NSRect(x: 0, y: 3, width: 28, height: 22)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 36, height: 28))
+        container.addSubview(button)
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = container
+        accessory.layoutAttribute = .trailing
+        return accessory
+    }
 
     // MARK: - WKNavigationDelegate
 

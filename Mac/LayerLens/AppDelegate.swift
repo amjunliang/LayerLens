@@ -65,6 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(server.baseURL)
     }
 
+    @objc func reloadPage() {
+        openWindow()
+        windowController.reload()
+    }
+
     @objc func showAbout() {
         openWindow()
         windowController.openPanel("about")

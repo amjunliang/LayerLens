@@ -601,6 +601,15 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .empty-icon { width: 40px; height: 40px; fill: none; stroke: #6b717c; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .empty-title { font-size: 15px; font-weight: 600; color: #fff; }
 .empty-body { max-width: 360px; font-size: 12px; line-height: 1.6; }
+.guide { display: flex; flex-direction: column; gap: 14px; width: min(520px, 100%); margin-top: 6px; text-align: left; }
+.guide[hidden] { display: none; }
+.guide-step { display: flex; gap: 12px; align-items: flex-start; }
+.guide-index { flex: none; width: 22px; height: 22px; border-radius: 50%; background: rgba(255, 255, 255, 0.12); color: #fff; font-size: 12px; font-weight: 600; line-height: 22px; text-align: center; }
+.guide-content { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.guide-title { color: #fff; font-size: 13px; font-weight: 600; line-height: 22px; }
+.guide-text { font-size: 12px; line-height: 1.6; }
+.guide-code { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.guide-code code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 4px 8px; background: rgba(255, 255, 255, 0.08); font: 12px/1.6 var(--mono); color: #fff; }
 .empty-action { margin-top: 4px; background: var(--accent); color: #fff; font-weight: 600; border: none; }
 .empty-action:hover { filter: brightness(1.08); }
 /* 有主要操作时集成说明降为次要按钮 */

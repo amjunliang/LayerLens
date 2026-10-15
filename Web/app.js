@@ -1449,7 +1449,8 @@ const TARGET_KEY = 'layerlens_target';
 const TARGETS_POLL_MS = 2000;
 const API_VERSION = 1;
 // hadDevice: 页面加载时选中的设备是否存在
-const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false };
+// idle: 正在显示没有设备的默认页; goneSince: 设备全部断开的时间
+const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false, idle: false, goneSince: 0 };
 
 function targetBase() {
   return `/t/${encodeURIComponent(targets.deviceId || '-')}/${encodeURIComponent(targets.bundleId || '-')}`;
@@ -1561,6 +1562,13 @@ function renderTargetMenu() {
 
 // 需要自动切换时返回 [设备 ID, Bundle ID]: 选中的设备启动了, 选中的设备上出现 App, 或未选设备时出现设备
 function nextTarget() {
+  if (targets.idle) {
+    if (!targets.devices.length) return null;
+    const back = currentDevice();
+    if (back) return [back.id, targets.bundleId || back.apps[0]?.bundleId || ''];
+    const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
+    return [first.id, first.apps[0]?.bundleId || ''];
+  }
   const device = currentDevice();
   if (device) {
     if (!targets.hadDevice) return [device.id, targets.bundleId || device.apps[0]?.bundleId || ''];
@@ -1572,12 +1580,28 @@ function nextTarget() {
   return [first.id, first.apps[0]?.bundleId || ''];
 }
 
+// 设备全部断开持续一段时间后回到默认页, 短暂中断(重新插拔, 模拟器重启)不切换
+const DEVICES_GONE_MS = 3000;
+
+function devicesGone() {
+  if (targets.idle || targets.devices.length) {
+    targets.goneSince = 0;
+    return false;
+  }
+  targets.goneSince = targets.goneSince || Date.now();
+  return Date.now() - targets.goneSince >= DEVICES_GONE_MS;
+}
+
 // 定时刷新设备列表, 设备或 App 出现时自动连接
 function pollTargets() {
   setTimeout(async () => {
     try {
       await loadTargets();
       renderTargetMenu();
+      if (devicesGone()) {
+        location.reload();
+        return;
+      }
       const next = nextTarget();
       if (next) {
         switchTarget(...next);
@@ -1664,8 +1688,28 @@ function setAppState(value, message, link) {
 function showEmptyState(title, body) {
   $('emptyTitle').textContent = title;
   $('emptyBody').textContent = body;
+  $('emptyGuide').hidden = true;
   $('emptyState').hidden = false;
   document.body.classList.add('has-empty');
+}
+
+// 没有任何设备时的默认页: 使用步骤
+function showGuide() {
+  showEmptyState(t('没有发现设备'), t('按以下步骤开始使用, 设备连接后会自动打开'));
+  const box = (cls, children) => {
+    const node = el('div', cls);
+    node.append(...children);
+    return node;
+  };
+  const step = (index, title, content) => box('guide-step', [el('span', 'guide-index', String(index)), box('guide-content', [el('div', 'guide-title', title), ...content])]);
+  const copy = el('button', 'live-copy', t('复制'));
+  copy.dataset.copy = POD_LINE;
+  $('emptyGuide').replaceChildren(
+    step(1, t('集成'), [box('guide-code', [el('code', null, POD_LINE), copy]), el('div', 'guide-text', t('只在 Debug 下集成, 执行 pod install 即可, 无需代码'))]),
+    step(2, t('运行'), [el('div', 'guide-text', t('在模拟器中运行 App, 或通过 USB 连接真机运行'))]),
+    step(3, t('查看'), [el('div', 'guide-text', t('2D / 3D 查看视图层级和属性, 模拟器还支持实时画面'))]),
+  );
+  $('emptyGuide').hidden = false;
 }
 
 // MARK: - Xcode run
@@ -1875,6 +1919,10 @@ function setupLiveEvents() {
   $('liveHome').addEventListener('click', liveHome);
   $('xcodeRun').addEventListener('click', xcodeRun);
   $('appBannerRun').addEventListener('click', xcodeRun);
+  $('emptyGuide').addEventListener('click', (e) => {
+    const value = e.target.closest('.live-copy')?.dataset.copy;
+    if (value) copyText(value, '复制');
+  });
   $('liveGuide').addEventListener('click', (e) => {
     const value = e.target.closest('.live-copy')?.dataset.copy;
     if (value) copyText(value, '复制命令');
@@ -2762,10 +2810,12 @@ async function start() {
   targets.hadDevice = !!device;
   renderTargetMenu();
   pollTargets();
-  if (!device && !targets.bundleId) {
+  // 一台设备都没有时显示默认页, 保留选中的目标, 该设备回来时优先连接
+  if (!targets.devices.length) {
+    targets.idle = true;
     $('appName').textContent = t('未连接');
     await setupLive(null);
-    showEmptyState(t('没有发现设备'), t('启动模拟器并运行集成了 LayerLens 的 App, 会自动连接'));
+    showGuide();
     setAppState('offline', t('没有发现设备'));
     return;
   }
@@ -2774,7 +2824,7 @@ async function start() {
     await setupLive(null);
     const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
     showEmptyState(t('没有运行中的已集成 App'), body);
-    setAppState('offline', t('没有运行中的已集成 App'), { text: t('App 集成…'), panel: 'integration' });
+    setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
     return;
   }
   document.body.classList.add('has-app');
