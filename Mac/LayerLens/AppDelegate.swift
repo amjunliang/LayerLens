@@ -11,8 +11,7 @@ import AppKit
 /// 界面全部由网页提供, 原生部分只有承载网页的窗口、系统菜单和菜单栏图标
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let registry = TargetRegistry()
-    private let baguette = BaguetteManager()
-    private lazy var server = HubServer(registry: registry, baguette: baguette)
+    private lazy var server = HubServer(registry: registry)
     private lazy var windowController = MainWindowController(url: server.baseURL)
     private var statusItem: NSStatusItem?
     private var terminationSource: DispatchSourceSignal?
@@ -26,7 +25,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = MainMenu.build(target: self)
         setupStatusItem()
         registry.start()
-        baguette.start()
         server.start { [weak self] error in
             guard let self else { return }
             if let error {
@@ -35,11 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.windowController.showAndLoad()
         }
-    }
-
-    /// baguette 随 LayerLens 退出
-    func applicationWillTerminate(_ notification: Notification) {
-        baguette.stop()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -94,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = item
     }
 
-    /// 被 kill 等方式结束时也走正常退出流程, 保证 baguette 一同退出
+    /// 被 kill 等方式结束时也走正常退出流程
     private func handleTerminationSignal() {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)

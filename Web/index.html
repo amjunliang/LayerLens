@@ -30,6 +30,7 @@
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><rect x="9" y="8" width="11" height="13" rx="2"/><path d="M4 11V8a4 4 0 0 1 4-4h3"/><path d="M9 2l2 2-2 2"/></symbol>
     <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/></symbol>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
     <symbol id="i-inspect" viewBox="0 0 24 24"><path d="M10 3H5a2 2 0 0 0-2 2v5M3 14v5a2 2 0 0 0 2 2h5M14 3h5a2 2 0 0 1 2 2v5"/><path d="M12 12l9 3.2-4 1.3-1.3 4z"/></symbol>
@@ -49,7 +50,7 @@
   </div>
   <div class="toolbar-center">
     <div class="segmented" id="modeSeg">
-      <button data-mode="live" id="liveModeBtn" title="模拟器实时画面 (baguette)" hidden>实时</button>
+      <button data-mode="live" id="liveModeBtn" title="模拟器实时画面" hidden>实时</button>
       <button data-mode="2d" class="active">2D</button>
       <button data-mode="3d">3D</button>
     </div>
@@ -106,11 +107,6 @@
           <div class="shortcut"><kbd>⌥</kbd><kbd>点击</kbd><span>选中元素并切到 2D</span></div>
           <div class="shortcut"><kbd>⌘</kbd><kbd>V</kbd><span>粘贴到模拟器</span></div>
           <div class="shortcut"><kbd>Esc</kbd><span>停止向模拟器输入按键</span></div>
-          <button class="menu-row menu-action" id="menuCopyHeal">点击无效? 复制修复命令</button>
-          <div class="menu-sep"></div>
-          <div class="menu-title">baguette</div>
-          <div class="menu-note">实时画面依赖三方工具 baguette, 由 LayerLens 自动启动和退出</div>
-          <button class="menu-row menu-action" data-copy="brew install baguette">复制安装命令</button>
         </div>
       </div>
     </div>
@@ -143,6 +139,7 @@
       <div class="float-group live-only">
         <button class="icon-btn toggle" id="liveInspect" title="选择元素 (按住 ⌥ 点击)" aria-label="选择元素" aria-pressed="false"><svg class="icon"><use href="#i-inspect"/></svg></button>
         <button class="icon-btn" id="liveHome" title="Home" aria-label="Home"><svg class="icon"><use href="#i-home"/></svg></button>
+        <button class="icon-btn" id="liveRotate" title="向左旋转" aria-label="向左旋转"><svg class="icon"><use href="#i-rotate"/></svg></button>
       </div>
       <div class="float-group">
         <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
@@ -179,11 +176,8 @@
     <div class="live-wrap" id="liveWrap" hidden>
       <canvas class="live-canvas" id="liveCanvas" tabindex="0"></canvas>
       <div class="live-guide" id="liveGuide" hidden>
-        <div class="live-guide-title" id="liveGuideTitle">实时画面需要安装 baguette</div>
-        <div class="live-guide-body" id="liveGuideBody">
-          <div class="live-step"><span>在终端执行</span><code>brew install baguette</code><button class="live-copy" data-copy="brew install baguette">复制</button></div>
-          <div class="live-note">安装后 LayerLens 会自动启动它, 无需其他操作</div>
-        </div>
+        <div class="live-guide-title" id="liveGuideTitle">正在连接实时画面…</div>
+        <div class="live-note live-error" id="liveError" hidden></div>
         <div class="live-waiting" id="liveWaiting">正在等待连接…</div>
       </div>
     </div>

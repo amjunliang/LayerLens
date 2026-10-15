@@ -1238,10 +1238,13 @@ function setupCanvasEvents() {
 }
 
 // MARK: - Live
-// 模拟器实时画面: 由 LayerLens 启动的 baguette 提供 H.264 流与输入注入, 经 /baguette/ 转发, 页面只负责解码绘制与转发操作
+// 模拟器实时画面: Mac App 采集模拟器屏幕编码为 H.264 经 /sim/ 推送, 并注入触摸与按键, 页面只负责解码绘制与转发操作
 
 const LIVE_RETRY_MS = 2000;
 const LIVE_CORNER = 55;
+// 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向左旋转的下一个方向, 与 Simulator.app 的 ⌘← 一致
+const LIVE_ROTATION = { 1: 0, 3: -90, 2: 180, 4: 90 };
+const LIVE_ROTATE_LEFT = { 1: 3, 3: 2, 2: 4, 4: 1 };
 const LIVE_KEY_CODE = /^(Key[A-Z]|Digit\d|Enter|Backspace|Tab|Space|Arrow(Up|Down|Left|Right)|Minus|Equal|Bracket(Left|Right)|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash)$/;
 const live = {
   udid: '',
@@ -1255,23 +1258,29 @@ const live = {
   inspect: false,
   altHeld: false,
   touch: null,
+  orientation: 1,
 };
 
 function liveAvailable() {
   return !!live.udid;
 }
 
-// 当前设备是模拟器时启用实时画面, App 未运行也可用; 屏幕尺寸优先取 App 上报的, 否则取 baguette 的设备外观描述
+// Mac App 加载 Xcode 的模拟器私有框架失败时为 false
+function liveSupported() {
+  return targets.hub?.live !== false;
+}
+
+// 当前设备是模拟器时启用实时画面, App 未运行也可用; 屏幕尺寸优先取 App 上报的, 否则向 Mac App 查询
 async function setupLive(info) {
   const device = currentDevice();
   live.udid = device?.kind === 'simulator' ? device.id : '';
   if (info?.screen) live.screen = info.screen;
   if (live.udid && !info?.screen) {
     try {
-      const chrome = await fetch(`/baguette/simulators/${encodeURIComponent(live.udid)}/chrome.json`).then((r) => r.json());
-      live.screen = [chrome.screen.width, chrome.screen.height];
+      const info = await fetch(`/sim/${encodeURIComponent(live.udid)}/info`).then((r) => r.json());
+      live.screen = [info.screen.width, info.screen.height];
     } catch (e) {
-      // baguette 未就绪时用常见尺寸, 连上后不影响画面, 只影响触摸坐标精度
+      // 查询失败时用常见尺寸, 只影响画面比例, 触摸按比例换算不受影响
       live.screen = [402, 874];
     }
   }
@@ -1279,7 +1288,7 @@ async function setupLive(info) {
   const realDevice = !!device && device.kind !== 'simulator';
   $('liveModeBtn').hidden = !liveAvailable() && !realDevice;
   $('liveModeBtn').classList.toggle('unavailable', realDevice);
-  $('liveModeBtn').title = realDevice ? t('真机不支持实时画面') : t('模拟器实时画面 (baguette)');
+  $('liveModeBtn').title = realDevice ? t('真机不支持实时画面') : t('模拟器实时画面');
   document.body.classList.toggle('has-live', liveAvailable());
   // 恢复到实时模式但当前不可用(如真机)时回到 2D
   if (state.mode === 'live') liveAvailable() ? liveStart() : setMode('2d');
@@ -1293,7 +1302,11 @@ function liveStart() {
     showLiveGuide(t('当前浏览器不支持 WebCodecs, 请使用 Chrome 或 Safari'), false);
     return;
   }
-  const ws = new WebSocket(`ws://${location.host}/baguette/simulators/${encodeURIComponent(live.udid)}/stream?format=avcc&version=v2`);
+  if (!liveSupported()) {
+    showLiveGuide();
+    return;
+  }
+  const ws = new WebSocket(`ws://${location.host}/sim/${encodeURIComponent(live.udid)}/stream`);
   ws.binaryType = 'arraybuffer';
   live.ws = ws;
   ws.onopen = () => {
@@ -1301,14 +1314,27 @@ function liveStart() {
     $('liveGuide').hidden = true;
   };
   ws.onmessage = (e) => {
-    if (e.data instanceof ArrayBuffer) feedLiveFrame(new Uint8Array(e.data));
+    if (e.data instanceof ArrayBuffer) {
+      feedLiveFrame(new Uint8Array(e.data));
+      return;
+    }
+    // 方向由 Mac App 记录并广播, 多个页面保持一致
+    try {
+      const message = JSON.parse(e.data);
+      if (message.type === 'orientation' && LIVE_ROTATION[message.value] !== undefined) {
+        live.orientation = message.value;
+        layoutLive();
+      }
+    } catch (err) {
+      // 忽略无法解析的消息
+    }
   };
   ws.onclose = () => {
     if (live.ws !== ws) return;
     const wasConnected = live.connected;
     liveStop();
     if (state.mode !== 'live') return;
-    showLiveGuide(wasConnected ? t('与 baguette 的连接已断开') : '');
+    showLiveGuide(wasConnected ? t('实时画面连接已断开') : '');
     live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
   if (!live.raf) live.raf = requestAnimationFrame(paintLive);
@@ -1341,13 +1367,14 @@ function liveStop() {
   live.touch = null;
 }
 
-// 未安装 baguette 时显示安装命令, 否则显示等待连接
+// 私有框架加载失败时说明原因, 否则显示等待连接
 function showLiveGuide(title) {
-  const installed = targets.hub?.baguette?.installed !== false;
+  const supported = liveSupported();
   $('liveGuide').hidden = false;
-  $('liveGuideTitle').textContent = title || (installed ? t('正在连接实时画面…') : t('实时画面需要安装 baguette'));
-  $('liveGuideBody').hidden = installed;
-  $('liveWaiting').hidden = !installed;
+  $('liveGuideTitle').textContent = title || (supported ? t('正在连接实时画面…') : t('无法加载 Xcode 的模拟器框架'));
+  $('liveError').hidden = supported;
+  $('liveError').textContent = supported ? '' : `${t('请确认已安装 Xcode, 并用 xcode-select 选中它')}\n${targets.hub?.liveError || ''}`;
+  $('liveWaiting').hidden = !supported;
 }
 
 // 帧格式: 1 字节类型 + 数据. 0x01 解码配置, 0x02 关键帧, 0x03 增量帧, 0x04 首个关键帧前的 JPEG 占位图
@@ -1403,13 +1430,15 @@ function layoutLive() {
   const canvas = $('liveCanvas');
   const [sw, sh] = live.screen;
   if (!sw || !sh || !wrap.clientWidth) return;
-  // 与 2D 舞台相同的适配系数, 切换时比例与位置保持一致
+  // 与 2D 舞台相同的适配系数, 切换时比例与位置保持一致; 横屏时按旋转后的尺寸适配
   const [width, height] = contentSize(wrap);
-  const scale = Math.min(width / sw, height / sh) * planFitRatio() * state.zoom;
+  const deg = LIVE_ROTATION[live.orientation] || 0;
+  const [fw, fh] = Math.abs(deg) === 90 ? [sh, sw] : [sw, sh];
+  const scale = Math.min(width / fw, height / fh) * planFitRatio() * state.zoom;
   canvas.style.width = sw * scale + 'px';
   canvas.style.height = sh * scale + 'px';
   canvas.style.borderRadius = LIVE_CORNER * scale + 'px';
-  canvas.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
+  canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
 }
 
 function liveSend(message) {
@@ -1417,12 +1446,23 @@ function liveSend(message) {
 }
 
 // 客户端坐标 -> 模拟器屏幕坐标(point)
+// 画布按设备方向旋转显示, 先绕中心反向旋转回未旋转的画布, 再换算为竖屏的屏幕坐标
 function livePoint(e) {
-  const rect = $('liveCanvas').getBoundingClientRect();
+  const canvas = $('liveCanvas');
+  const rect = canvas.getBoundingClientRect();
   const [sw, sh] = live.screen;
-  const x = Math.max(0, Math.min(sw, (e.clientX - rect.left) / rect.width * sw));
-  const y = Math.max(0, Math.min(sh, (e.clientY - rect.top) / rect.height * sh));
-  return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, inside: e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom };
+  const rad = -(LIVE_ROTATION[live.orientation] || 0) * Math.PI / 180;
+  const dx = e.clientX - (rect.left + rect.width / 2);
+  const dy = e.clientY - (rect.top + rect.height / 2);
+  const rx = (dx * Math.cos(rad) - dy * Math.sin(rad)) / canvas.offsetWidth + 0.5;
+  const ry = (dx * Math.sin(rad) + dy * Math.cos(rad)) / canvas.offsetHeight + 0.5;
+  const x = Math.max(0, Math.min(sw, rx * sw));
+  const y = Math.max(0, Math.min(sh, ry * sh));
+  return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, inside: rx >= 0 && rx <= 1 && ry >= 0 && ry <= 1 };
+}
+
+function liveRotate() {
+  liveSend({ type: 'orientation', value: LIVE_ROTATE_LEFT[live.orientation] || 1 });
 }
 
 // Home: 由 LayerLens 启动 SpringBoard, 直接回桌面; 失败时退回上滑手势.
@@ -1896,7 +1936,7 @@ function setupLiveEvents() {
     showMenu(e.clientX, e.clientY, state.nodes.get(state.selected), true);
   });
   // 与 2D 一致: 捏合 / ⌘ + 滚轮缩放, 双指滑动平移; App 内滚动用鼠标拖动.
-  // 不用 baguette 的 scroll 事件: 在 iOS 26 模拟器上会导致 backboardd 崩溃
+  // 不注入滚轮事件: 在 iOS 26 模拟器上会导致 backboardd 崩溃
   wrap.addEventListener('wheel', (e) => {
     e.preventDefault();
     const unit = e.deltaMode === 1 ? 16 : 1;
@@ -1942,25 +1982,18 @@ function setupLiveEvents() {
 
   $('liveInspect').addEventListener('click', () => setLiveInspect(!live.inspect));
   $('liveHome').addEventListener('click', liveHome);
+  $('liveRotate').addEventListener('click', liveRotate);
   $('xcodeRun').addEventListener('click', xcodeRun);
   $('appBannerRun').addEventListener('click', xcodeRun);
   $('emptyGuide').addEventListener('click', (e) => {
     const value = e.target.closest('.live-copy')?.dataset.copy;
     if (value) copyText(value, '复制');
   });
-  $('liveGuide').addEventListener('click', (e) => {
-    const value = e.target.closest('.live-copy')?.dataset.copy;
-    if (value) copyText(value, '复制命令');
-  });
   $('helpMenu').addEventListener('click', (e) => {
     const value = e.target.closest('[data-copy]')?.dataset.copy;
     if (!value) return;
     hidePopovers();
     copyText(value, '复制命令');
-  });
-  $('menuCopyHeal').addEventListener('click', () => {
-    hidePopovers();
-    copyText(`baguette heal --udid ${live.udid}`, '复制修复命令, 执行后会重启 SpringBoard');
   });
   new ResizeObserver(layoutLive).observe(wrap);
 }
@@ -2582,12 +2615,12 @@ function integrationPanel() {
 function aboutPanel() {
   const hub = targets.hub || {};
   const app = currentApp();
-  const baguette = !hub.baguette ? '-' : !hub.baguette.installed ? t('未安装') : hub.baguette.running ? t('运行中') : t('未运行');
+  const liveStatus = hub.live === undefined ? '-' : hub.live ? t('可用') : t('不可用');
   const rows = [
     [t('版本'), hub.version || '-'],
     [t('接口版本'), String(API_VERSION)],
     [t('当前 App'), app ? `${app.appName || app.bundleId} · Pod ${app.podVersion || t('旧版本')}` : '-'],
-    ['baguette', baguette],
+    [t('模拟器实时画面'), liveStatus],
   ];
   const head = el('div', 'about-head');
   head.append(el('div', 'about-name', 'LayerLens'), el('div', 'about-desc', t('iOS 视图调试工具, 浏览器和 Mac App 使用同一界面')));
@@ -2599,7 +2632,7 @@ function aboutPanel() {
     paragraph(linkTo('GitHub', REPO_URL), document.createTextNode(' · ' + t('以 MIT 许可证开源'))),
     el('h5', null, t('致谢')),
     paragraph(linkTo('LookinServer', 'https://github.com/QMUI/LookinServer'), document.createTextNode(' by QMUI · ' + t('视图层级数据'))),
-    paragraph(linkTo('baguette', 'https://tddworks.github.io/baguette/'), document.createTextNode(' by tddworks · ' + t('模拟器实时画面'))),
+    paragraph(linkTo('baguette', 'https://tddworks.github.io/baguette/'), document.createTextNode(' by tddworks · ' + t('模拟器画面采集与输入注入的实现参考'))),
   ];
 }
 

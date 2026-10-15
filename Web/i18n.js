@@ -21,7 +21,6 @@ const LANG = (() => {
 const EN = {
   // 工具栏与菜单
   '未连接': 'Not connected',
-  '模拟器实时画面 (baguette)': 'Simulator live view (baguette)',
   '实时': 'Live',
   '在 Xcode 中运行': 'Run in Xcode',
   '刷新 (R)': 'Refresh (R)',
@@ -52,8 +51,6 @@ const EN = {
   '选中元素并切到 2D': 'Select element and switch to 2D',
   '粘贴到模拟器': 'Paste to simulator',
   '停止向模拟器输入按键': 'Stop sending keys to simulator',
-  '点击无效? 复制修复命令': 'Taps not working? Copy fix command',
-  '复制安装命令': 'Copy install command',
 
   // 层级与画布
   '搜索类名 / 地址 / ivar': 'Search class / address / ivar',
@@ -69,7 +66,7 @@ const EN = {
   '运行': 'Run',
   '正在等待连接…': 'Waiting for connection…',
   '当前浏览器不支持 WebCodecs, 请使用 Chrome 或 Safari': 'This browser does not support WebCodecs, please use Chrome or Safari',
-  '与 baguette 的连接已断开': 'Disconnected from baguette',
+  '实时画面连接已断开': 'Live view disconnected',
   '层级': 'Hierarchy',
   '画布': 'Canvas',
   '详情': 'Details',
@@ -149,10 +146,12 @@ const EN = {
   '需要允许 LayerLens 控制 Xcode': 'LayerLens needs permission to control Xcode',
   '请在系统弹窗中允许 LayerLens 控制 Xcode': 'Allow LayerLens to control Xcode in the system dialog',
   '正在连接实时画面…': 'Connecting live view…',
-  '实时画面需要安装 baguette': 'Live view needs baguette',
-  '在终端执行': 'Run in Terminal',
-  '安装后 LayerLens 会自动启动它, 无需其他操作': 'LayerLens starts it automatically once installed',
-  '实时画面依赖三方工具 baguette, 由 LayerLens 自动启动和退出': 'Live view relies on the third-party tool baguette, LayerLens starts and quits it automatically',
+  '无法加载 Xcode 的模拟器框架': 'Unable to load Xcode simulator frameworks',
+  '请确认已安装 Xcode, 并用 xcode-select 选中它': 'Make sure Xcode is installed and selected with xcode-select',
+  '可用': 'Available',
+  '向左旋转': 'Rotate Left',
+  '不可用': 'Unavailable',
+  '模拟器画面采集与输入注入的实现参考': 'Reference for simulator capture and input injection',
   // 面板与状态提示
   '在浏览器打开': 'Open in Browser',
   '按以下步骤开始使用, 设备连接后会自动打开': 'Follow these steps to get started, it opens automatically when a device connects',
@@ -189,7 +188,6 @@ const EN = {
   '模拟器': 'Simulator',
   '设备 (USB)': 'Device (USB)',
   '通过 USB 连接即可使用, 无需额外配置; 暂不支持 Wi-Fi 连接.': 'Works over USB with no extra setup. Wi-Fi is not supported yet.',
-  '未安装': 'Not installed',
   '运行中': 'Running',
   '未运行': 'Not running',
   '版本': 'Version',

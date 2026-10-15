@@ -20,17 +20,16 @@ final class HubServer {
 
     let queue = DispatchQueue(label: "com.layerlens.hub")
     let registry: TargetRegistry
-    let baguette: BaguetteManager
     private let xcode = XcodeController()
+    private let live = SimulatorLive()
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     private let webRoot: URL
     private var listener: NWListener?
     private let allowedHosts: Set<String> = ["127.0.0.1:\(HubServer.port)", "localhost:\(HubServer.port)"]
 
-    init(registry: TargetRegistry, baguette: BaguetteManager) {
+    init(registry: TargetRegistry) {
         self.registry = registry
-        self.baguette = baguette
         webRoot = Self.locateWebRoot()
     }
 
@@ -89,8 +88,8 @@ final class HubServer {
             proxyToApp(head, leftover: leftover, connection: connection)
             return
         }
-        if head.path.hasPrefix("/baguette/") {
-            proxyToBaguette(head, leftover: leftover, connection: connection)
+        if head.path.hasPrefix("/sim/") {
+            handleSimulator(head, leftover: leftover, connection: connection)
             return
         }
         if head.method == "POST" {
@@ -105,9 +104,10 @@ final class HubServer {
         case "/":
             connection.respond(staticFile("index.html"))
         case "/api/targets":
-            let baguetteInfo: [String: Any] = ["installed": baguette.isInstalled, "running": baguette.isRunning]
+            var hubInfo: [String: Any] = ["version": Self.version, "apiVersion": Self.apiVersion, "live": SimulatorLive.isAvailable]
+            hubInfo["liveError"] = SimBridge.loadError
             registry.snapshot { devices in
-                connection.respond(.json(["hub": ["version": Self.version, "apiVersion": Self.apiVersion, "baguette": baguetteInfo], "devices": devices]))
+                connection.respond(.json(["hub": hubInfo, "devices": devices]))
             }
         case "/api/hub/run-status":
             let sourceFile = registry.sourceFile(bundleId: head.query["app"] ?? "")
@@ -200,16 +200,26 @@ final class HubServer {
         }
     }
 
-    /// /baguette/<路径> 转发到 LayerLens 启动的 baguette, 只对 WebSocket 保留 Upgrade 头.
-    /// 普通请求必须关闭连接: 隧道是原样转发, 浏览器复用这条 keep-alive 连接时后续请求(如 /)会直接发给 baguette
-    private func proxyToBaguette(_ head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
-        let upstreamTarget = String(head.target.dropFirst("/baguette".count))
-        let isUpgrade = head.header("upgrade") != nil
-        var data = head.forwarded(target: upstreamTarget, host: "127.0.0.1:\(BaguetteManager.port)", keepConnection: isUpgrade)
-        data.append(leftover)
-        let upstream = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: BaguetteManager.port)!, using: .tcp)
-        connection.tunnel(to: upstream, initialData: data) {
-            connection.respond(.error(503, "baguette is not running"))
+    /// /sim/<UDID>/stream 为内置实时画面的 WebSocket, /sim/<UDID>/info 返回屏幕尺寸
+    private func handleSimulator(_ head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
+        let parts = head.path.split(separator: "/").map(String.init)
+        guard head.method == "GET", parts.count == 3, SimulatorLive.isAvailable else {
+            connection.respond(.error(404, "Not Found"))
+            return
+        }
+        let udid = parts[1]
+        switch parts[2] {
+        case "stream":
+            live.accept(udid: udid, head: head, leftover: leftover, connection: connection)
+        case "info":
+            workQueue.async { [self] in
+                let info = live.info(udid: udid)
+                queue.async {
+                    connection.respond(info.map { .json($0) } ?? .error(404, "Simulator not available"))
+                }
+            }
+        default:
+            connection.respond(.error(404, "Not Found"))
         }
     }
 
@@ -284,7 +294,7 @@ final class HubConnection {
 
     /// 转发请求带着已读到的请求体透传; 本地处理的请求需先读完请求体
     private func route(_ head: HTTPRequestHead, leftover: Data) {
-        if head.path.hasPrefix("/t/") || head.path.hasPrefix("/baguette/") || head.contentLength <= leftover.count {
+        if head.path.hasPrefix("/t/") || head.path.hasPrefix("/sim/") || head.contentLength <= leftover.count {
             server.handle(head, leftover: leftover, connection: self)
             return
         }
@@ -315,6 +325,12 @@ final class HubConnection {
         connection.send(content: response.serialized(), contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { [self] _ in
             connection.cancel()
         })
+    }
+
+    /// 交出底层连接(如升级为 WebSocket), 之后由接收方负责收发和关闭
+    func detach() -> NWConnection {
+        connection.stateUpdateHandler = nil
+        return connection
     }
 
     /// 不响应直接断开
