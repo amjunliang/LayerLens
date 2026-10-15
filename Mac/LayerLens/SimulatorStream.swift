@@ -10,7 +10,7 @@ import Foundation
 import IOSurface
 
 /// 一台模拟器的画面与输入: 采集和编码只做一份, 广播给所有观看的网页; 触摸通道共用.
-/// 画面状态在 queue 上访问, 触摸在 touchQueue 上发送, 互不阻塞
+/// 三个队列互不阻塞: queue 管理观看者与发送, captureQueue 采集和编码(每帧约十几毫秒), touchQueue 注入输入
 final class SimulatorStream {
     /// 网络发送跟不上时该观看者跳过增量帧, 从下一个关键帧继续
     static let maxInFlight = 6
@@ -18,26 +18,40 @@ final class SimulatorStream {
     static let edges: [String: UInt8] = ["bottom": 0x01, "top": 0x08]
     /// 浏览器解码器可能滞留最后一帧, 画面静止后补编一帧把它顶出来
     static let trailingDelay: TimeInterval = 0.1
+    /// 强制关键帧的最小间隔, 关键帧较大, 频繁出现会拉低所有观看者的帧率
+    static let keyFrameInterval: TimeInterval = 0.5
 
     private let udid: String
     private let queue: DispatchQueue
+    private let captureQueue: DispatchQueue
     private let touchQueue: DispatchQueue
-    private let encoder = SimulatorEncoder()
-    private var viewers: [ObjectIdentifier: Viewer] = [:]
-    private var screen: SimScreen?
     private var touch: SimTouch?
-    private var config: Data?
+
+    // queue 上访问
+    private var viewers: [ObjectIdentifier: Viewer] = [:]
     private var device: NSObject?
+    private var config: Data?
+    private var running = false
+    private var lastKeyFrameRequest: TimeInterval = 0
+    private var keyFrameScheduled = false
     /// 最近一次设置的方向, 新观看者据此旋转画面; 默认竖屏
     private var orientation: UInt32 = 1
+
+    // captureQueue 上访问
+    private let encoder = SimulatorEncoder()
+    private var screen: SimScreen?
     private var frameSerial = 0
-    private var running = false
+    /// 编码比采集慢时只保留最新一帧
+    private var pendingSurface: IOSurface?
+    private var encoding = false
 
     private final class Viewer {
         let socket: WebSocketConnection
         var inFlight = 0
         /// 新加入或丢帧后, 等到关键帧再开始发送
         var waitingKeyFrame = true
+        /// 丢帧后等积压发完再申请关键帧, 收不动的页面(如被节流的后台标签)不会反复触发
+        var recovering = false
 
         init(socket: WebSocketConnection) {
             self.socket = socket
@@ -47,6 +61,7 @@ final class SimulatorStream {
     init(udid: String) {
         self.udid = udid
         queue = DispatchQueue(label: "com.layerlens.live.\(udid)")
+        captureQueue = DispatchQueue(label: "com.layerlens.live.capture.\(udid)", qos: .userInteractive)
         touchQueue = DispatchQueue(label: "com.layerlens.live.touch.\(udid)")
         encoder.onOutput = { [weak self] type, data in
             self?.queue.async { self?.broadcast(type, data) }
@@ -72,27 +87,26 @@ final class SimulatorStream {
                 send(Data([0x01]) + config, to: viewers[id])
             }
             socket.sendText(orientationMessage)
-            encoder.requestKeyFrame()
-            if let surface = screen?.surface() {
-                encode(surface, trailing: false)
-            }
+            requestKeyFrame()
         }
     }
 
-    // MARK: - Screen
+    // MARK: - Viewers
 
     private func start() -> Bool {
-        guard let device = SimBridge.device(udid: udid), let screen = SimScreen(device: device, queue: queue) else {
+        guard let device = SimBridge.device(udid: udid), let screen = SimScreen(device: device, queue: captureQueue) else {
             NSLog("[live] simulator %@ not available", udid)
             return false
         }
-        self.screen = screen
         self.device = device
         running = true
-        screen.onFrame = { [weak self] surface in
-            self?.encode(surface, trailing: false)
+        captureQueue.async { [self] in
+            self.screen = screen
+            screen.onFrame = { [weak self] surface in
+                self?.capture(surface, trailing: false)
+            }
+            screen.start()
         }
-        screen.start()
         // 预先建立触摸通道, 首次触摸不必等待
         touchQueue.async { [self] in
             if touch == nil {
@@ -106,23 +120,14 @@ final class SimulatorStream {
         viewers[id] = nil
         guard viewers.isEmpty, running else { return }
         running = false
-        screen?.stop()
-        screen = nil
-        encoder.invalidate()
         config = nil
-        touchQueue.async { [self] in touch = nil }
-    }
-
-    private func encode(_ surface: IOSurface, trailing: Bool) {
-        guard running else { return }
-        encoder.encode(surface)
-        guard !trailing else { return }
-        frameSerial += 1
-        let serial = frameSerial
-        queue.asyncAfter(deadline: .now() + Self.trailingDelay) { [weak self] in
-            guard let self, serial == self.frameSerial, let surface = self.screen?.surface() else { return }
-            self.encode(surface, trailing: true)
+        captureQueue.async { [self] in
+            screen?.stop()
+            screen = nil
+            pendingSurface = nil
+            encoder.invalidate()
         }
+        touchQueue.async { [self] in touch = nil }
     }
 
     private func broadcast(_ type: UInt8, _ data: Data) {
@@ -142,7 +147,7 @@ final class SimulatorStream {
                 guard !viewer.waitingKeyFrame else { continue }
                 if viewer.inFlight >= Self.maxInFlight {
                     viewer.waitingKeyFrame = true
-                    encoder.requestKeyFrame()
+                    viewer.recovering = true
                     continue
                 }
                 send(frame, to: viewer)
@@ -154,8 +159,62 @@ final class SimulatorStream {
         guard let viewer else { return }
         viewer.inFlight += 1
         viewer.socket.sendBinary(frame) { [weak self, weak viewer] _ in
-            self?.queue.async { viewer?.inFlight -= 1 }
+            self?.queue.async {
+                guard let self, let viewer else { return }
+                viewer.inFlight -= 1
+                if viewer.recovering && viewer.inFlight == 0 {
+                    viewer.recovering = false
+                    self.requestKeyFrame()
+                }
+            }
         }
+    }
+
+    /// 下一帧编为关键帧并立即补编当前画面, 画面静止时也能恢复; 限制频率, 间隔内的请求合并
+    private func requestKeyFrame() {
+        guard running, !keyFrameScheduled else { return }
+        let wait = lastKeyFrameRequest + Self.keyFrameInterval - CFAbsoluteTimeGetCurrent()
+        guard wait <= 0 else {
+            keyFrameScheduled = true
+            queue.asyncAfter(deadline: .now() + wait) { [weak self] in
+                self?.keyFrameScheduled = false
+                self?.requestKeyFrame()
+            }
+            return
+        }
+        lastKeyFrameRequest = CFAbsoluteTimeGetCurrent()
+        captureQueue.async { [self] in
+            encoder.requestKeyFrame()
+            if let surface = screen?.surface() {
+                capture(surface, trailing: false)
+            }
+        }
+    }
+
+    // MARK: - Capture
+
+    private func capture(_ surface: IOSurface, trailing: Bool) {
+        guard screen != nil else { return }
+        if !trailing {
+            frameSerial += 1
+            let serial = frameSerial
+            captureQueue.asyncAfter(deadline: .now() + Self.trailingDelay) { [weak self] in
+                guard let self, serial == self.frameSerial, let surface = self.screen?.surface() else { return }
+                self.capture(surface, trailing: true)
+            }
+        }
+        pendingSurface = surface
+        guard !encoding else { return }
+        encoding = true
+        // 先让出队列, 期间到达的帧只保留最新一帧
+        captureQueue.async { [weak self] in self?.encodePending() }
+    }
+
+    private func encodePending() {
+        defer { encoding = false }
+        guard screen != nil, let surface = pendingSurface else { return }
+        pendingSurface = nil
+        encoder.encode(surface)
     }
 
     // MARK: - Orientation
