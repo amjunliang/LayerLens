@@ -118,6 +118,13 @@ const isCodeClass = (cls) => !!cls && !SYSTEM_CLASS.test(cls);
 const CONTAINER_CONTROLLER = /(?:Navigation|TabBar|SplitView|PageView|ListContainer)(?:View)?Controller$/;
 const TREE_INDENT = 10;
 const LONG_PRESS_MS = 500;
+const DOUBLE_CLICK_MS = 300;
+// F 聚焦时选中元素占画布的比例
+const FOCUS_FILL = 0.7;
+// 层间距范围与 [ ] 每次调整的步长, 与工具栏滑块一致
+const SPACING_MIN = 0;
+const SPACING_MAX = 60;
+const SPACING_STEP = 4;
 
 // "Host : Declaring._ivar" 表示 ivar 声明在父类中; 只保留声明在非系统类中的 ivar
 function codeIvars(node) {
@@ -921,6 +928,39 @@ function updatePivot() {
   applyStageTransform();
 }
 
+// 把选中元素放大到画布中央; 未选中或实时模式时等同适应窗口
+function focusSelected() {
+  const win = currentWindow();
+  const node = state.nodes.get(state.selected);
+  if (state.mode === 'live' || !win || !node || node.win !== win || !node.rect[2] || !node.rect[3]) {
+    fitView();
+    return;
+  }
+  const [width, height] = contentSize($('stageWrap'));
+  const base = stageScale(win) / state.zoom;
+  // 元素已经足够大时只居中, 不比适应窗口更小
+  state.zoom = Math.max(1, Math.min(6, Math.min(width / node.rect[2], height / node.rect[3]) * FOCUS_FILL / base));
+  if (state.mode === '3d') updatePivot();
+  const [fx, fy, fw, fh] = canvasFrame(win);
+  const center = {
+    x: node.rect[0] + node.rect[2] / 2 - fx - fw / 2,
+    y: node.rect[1] + node.rect[3] / 2 - fy - fh / 2,
+    z: state.mode === '3d' ? (node.level || 0) * state.spacing : 0,
+  };
+  const screen = projectToScreen(center);
+  state.panX -= screen.x;
+  state.panY -= screen.y;
+  if (state.mode === '3d') state.panZ -= screen.z;
+  applyStageTransform();
+}
+
+// 按住空格时拖动画布为平移
+const panKey = { held: false };
+function setPanKey(held) {
+  panKey.held = held;
+  document.body.classList.toggle('pan-key', held);
+}
+
 // 屏幕偏移 anchor 处的内容在缩放前后保持不动
 function zoomAt(zoom, anchor) {
   const before = state.zoom;
@@ -1042,15 +1082,18 @@ function placeBox(box, node, win) {
   box.style.height = node.rect[3] + 'px';
 }
 
+// 2D 下取包含该点的所有节点, 最上层在前
+function hitTestAll(x, y) {
+  const win = currentWindow();
+  return drawableNodes(win).filter((node) => {
+    const [nx, ny, nw, nh] = node.rect;
+    return x >= nx - win.rect[0] && x <= nx - win.rect[0] + nw && y >= ny - win.rect[1] && y <= ny - win.rect[1] + nh;
+  }).reverse();
+}
+
 // 2D 下取包含该点的最上层节点
 function hitTest(x, y) {
-  const win = currentWindow();
-  let hit = null;
-  drawableNodes(win).forEach((node) => {
-    const [nx, ny, nw, nh] = node.rect;
-    if (x >= nx - win.rect[0] && x <= nx - win.rect[0] + nw && y >= ny - win.rect[1] && y <= ny - win.rect[1] + nh) hit = node;
-  });
-  return hit;
+  return hitTestAll(x, y)[0] || null;
 }
 
 function stagePoint(event) {
@@ -1065,12 +1108,36 @@ function setupCanvasEvents() {
   let drag = null;
   let lastTap = 0;
 
-  const nodeAtPoint = (point) => {
-    if (!currentWindow()) return null;
-    if (state.mode === '2d') return hitTest(...stagePoint(point));
-    const target = document.elementFromPoint(point.clientX, point.clientY);
-    const slab = target && target.closest('.slab');
-    return slab ? state.nodes.get(slab.dataset.key) : null;
+  // 该点下的所有节点, 最上层在前
+  const nodesAtPoint = (point) => {
+    if (!currentWindow()) return [];
+    if (state.mode === '2d') return hitTestAll(...stagePoint(point));
+    return document.elementsFromPoint(point.clientX, point.clientY)
+      .filter((target) => target.classList.contains('slab') && wrap.contains(target))
+      .map((slab) => state.nodes.get(slab.dataset.key))
+      .filter(Boolean);
+  };
+  // 鼠标上次点击, 用于在同一位置再点时选中下一层, 以及识别双击
+  let lastClick = null;
+  const clickSelect = (e) => {
+    const nodes = nodesAtPoint(e);
+    const now = Date.now();
+    const near = lastClick && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 4;
+    if (near && now - lastClick.time < DOUBLE_CLICK_MS) {
+      // 双击(3D): 元素上进入只看子树, 空白处退出; 第一下若切换了层则撤销, 第二下不切换
+      const { before } = lastClick;
+      lastClick = null;
+      if (state.mode !== '3d') return;
+      if (before && before !== state.selected && state.nodes.has(before)) select(before);
+      if (nodes.length && !state.subtreeOnly) $('subtreeOnly').click();
+      else if (!nodes.length && state.subtreeOnly) $('subtreeOnly').click();
+      return;
+    }
+    // before: 再次点击切换层前的选中, 双击时恢复
+    lastClick = { x: e.clientX, y: e.clientY, time: now, before: near ? state.selected : null };
+    if (!nodes.length) return;
+    const index = near ? nodes.findIndex((node) => node.key === state.selected) : -1;
+    select(nodes[(index + 1) % nodes.length].key);
   };
   // 画布菜单始终针对当前选中节点, 不按点击位置重新选中, 空白处也可呼出
   const openCanvasMenu = (point) => {
@@ -1103,6 +1170,19 @@ function setupCanvasEvents() {
   };
 
   wrap.addEventListener('pointerdown', (e) => {
+    // 按住空格或中键拖动: 平移
+    if (e.pointerType === 'mouse' && (e.button === 1 || (e.button === 0 && panKey.held))) {
+      e.preventDefault();
+      try {
+        wrap.setPointerCapture(e.pointerId);
+      } catch (err) {
+        // 忽略
+      }
+      hideHoverTip();
+      drag = { pan: true, x: e.clientX, y: e.clientY, panX: state.panX, panY: state.panY, moved: true };
+      wrap.classList.add('dragging');
+      return;
+    }
     // 仅左键/触摸开始拖拽, 右键交给菜单
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1136,6 +1216,12 @@ function setupCanvasEvents() {
       const [a, b] = [...pointers.values()];
       const distance = Math.hypot(a.x - b.x, a.y - b.y);
       zoomAt(pinch.zoom * distance / Math.max(pinch.distance, 1), clientToAnchor((a.x + b.x) / 2, (a.y + b.y) / 2));
+      return;
+    }
+    if (drag?.pan) {
+      state.panX = drag.panX + e.clientX - drag.x;
+      state.panY = drag.panY + e.clientY - drag.y;
+      applyStageTransform();
       return;
     }
     if (drag) {
@@ -1172,17 +1258,19 @@ function setupCanvasEvents() {
     // setPointerCapture 后 e.target 恒为 wrap, 需按坐标取真实元素
     const target = document.elementFromPoint(e.clientX, e.clientY);
     if (!target || !wrap.contains(target)) return;
-    const node = nodeAtPoint(e);
+    if (e.pointerType === 'mouse') {
+      clickSelect(e);
+      return;
+    }
+    const node = nodesAtPoint(e)[0];
     if (node) select(node.key);
     // 触屏双击适应窗口
-    if (e.pointerType !== 'mouse') {
-      const now = Date.now();
-      if (now - lastTap < 300) {
-        fitView();
-        lastTap = 0;
-      } else {
-        lastTap = now;
-      }
+    const now = Date.now();
+    if (now - lastTap < DOUBLE_CLICK_MS) {
+      fitView();
+      lastTap = 0;
+    } else {
+      lastTap = now;
     }
   };
   wrap.addEventListener('pointerup', endPointer);
@@ -2529,6 +2617,47 @@ function syncTreeFilter() {
   $('treeFilterBtn').classList.toggle('active', state.showLayers || !state.showHidden);
 }
 
+function requestMode(mode) {
+  if (mode === 'live' && !liveAvailable()) {
+    toast(t('真机不支持实时画面'));
+    return;
+  }
+  if (mode) setMode(mode);
+}
+
+// 画布视图快捷键, 返回是否已处理
+function handleViewKey(key) {
+  const three = state.mode === '3d';
+  switch (key.toLowerCase()) {
+    case 'f':
+      focusSelected();
+      return true;
+    case '0':
+      fitView();
+      return true;
+    case '1':
+      requestMode('live');
+      return true;
+    case '2':
+      requestMode('2d');
+      return true;
+    case '3':
+      requestMode('3d');
+      return true;
+    case '[':
+    case ']':
+      if (!three) return false;
+      setSpacing(Math.max(SPACING_MIN, Math.min(SPACING_MAX, state.spacing + (key === ']' ? SPACING_STEP : -SPACING_STEP))));
+      return true;
+    case 'i':
+      if (!three) return false;
+      $('showImages').click();
+      return true;
+    default:
+      return false;
+  }
+}
+
 function setSpacing(value) {
   state.spacing = value;
   $('spacing').value = value;
@@ -2808,14 +2937,7 @@ function setup() {
     if (key === state.selected && isNarrow()) setView('detail');
     else select(key);
   });
-  $('modeSeg').addEventListener('click', (e) => {
-    const mode = e.target.dataset.mode;
-    if (mode === 'live' && !liveAvailable()) {
-      toast(t('真机不支持实时画面'));
-      return;
-    }
-    if (mode) setMode(mode);
-  });
+  $('modeSeg').addEventListener('click', (e) => requestMode(e.target.dataset.mode));
   $('showLayers').addEventListener('change', (e) => {
     state.showLayers = e.target.checked;
     syncTreeFilter();
@@ -2874,6 +2996,16 @@ function setup() {
     if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
     if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
     if (e.key === '?') togglePopover('helpMenu');
+    if (e.code === 'Space' && state.mode !== 'live') {
+      // 阻止页面滚动和触发聚焦中的按钮
+      e.preventDefault();
+      setPanKey(true);
+      return;
+    }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && handleViewKey(e.key)) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'r' && !e.metaKey && !e.ctrlKey) refresh();
     if (!e.metaKey && !e.ctrlKey && !e.altKey && handleTreeKey(e.key)) e.preventDefault();
     // 未选中页面文本时, ⌘C 复制选中节点路径
@@ -2885,6 +3017,10 @@ function setup() {
       }
     }
   });
+  document.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') setPanKey(false);
+  });
+  window.addEventListener('blur', () => setPanKey(false));
   setupCanvasEvents();
   setupLiveEvents();
   setupLayout();

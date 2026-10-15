@@ -391,6 +391,9 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 .mode-3d .stage-wrap { perspective: 2400px; cursor: grab; }
 .mode-3d .stage-wrap.dragging { cursor: grabbing; }
 .mode-3d .stage { transform-style: preserve-3d; }
+/* 按住空格或中键拖动平移 */
+.pan-key .stage-wrap { cursor: grab; }
+.stage-wrap.dragging { cursor: grabbing; }
 .slab {
   position: absolute;
   border: 1px solid var(--slab-line);
