@@ -405,9 +405,11 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
   top: 0;
   z-index: 5;
   pointer-events: none;
-  padding: 1px 6px;
-  background: rgba(255, 255, 255, 0.55);
-  color: #111;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
   font: 600 11px/1.5 var(--mono);
   white-space: nowrap;
 }
@@ -419,13 +421,13 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
   top: 100%;
   transform: translateX(-50%);
   border: 5px solid transparent;
-  border-top-color: rgba(255, 255, 255, 0.9);
+  border-top-color: var(--accent);
 }
 .hover-tip.below::after {
   top: auto;
   bottom: 100%;
   border-top-color: transparent;
-  border-bottom-color: rgba(255, 255, 255, 0.55);
+  border-bottom-color: var(--accent);
 }
 /* 实时: 模拟器画面 (H.264 流) */
 .mode-live .stage-wrap, .mode-live .hover-tip { display: none; }
