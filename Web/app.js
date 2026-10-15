@@ -1823,6 +1823,11 @@ async function inspectAt(point) {
   select((node || win).key);
 }
 
+// 静止按住多久后发送按下; 移动多少点(设备坐标)才算拖动; 点击时按下到抬起的间隔
+const LIVE_PRESS_DELAY_MS = 300;
+const LIVE_DRAG_SLOP = 3;
+const LIVE_TAP_MS = 40;
+
 function setupLiveEvents() {
   const wrap = $('liveWrap');
   const canvas = $('liveCanvas');
@@ -1845,12 +1850,29 @@ function setupLiveEvents() {
     }
     // 起点贴近上下边缘时作为系统手势(下拉通知中心 / 上滑回桌面)
     const edge = point.y >= h() - 20 ? 'bottom' : point.y <= 12 ? 'top' : undefined;
-    live.touch = { inspect: false };
-    liveSend({ type: 'touch1-down', x: point.x, y: point.y, width: w(), height: h(), edge });
+    live.touch = { inspect: false, start: point, pending: true, timer: 0 };
+    if (edge) {
+      flushDown(live.touch, edge);
+      return;
+    }
+    // 静止按住一段时间后才按下, 以便长按手势照常触发
+    live.touch.timer = setTimeout(() => live.touch && flushDown(live.touch), LIVE_PRESS_DELAY_MS);
   });
+  // 鼠标通常先按住再拖动, 若按下即发送, 超过 UIScrollView 的延迟(约 150ms)后触摸会交给按钮等 UIControl, 列表无法滚动.
+  // 因此推迟到开始移动或松开时才发送按下, 使 App 看到的是按下即移动的手势, 与手指滑动一致
+  const flushDown = (touch, edge) => {
+    if (!touch.pending) return false;
+    touch.pending = false;
+    clearTimeout(touch.timer);
+    liveSend({ type: 'touch1-down', x: touch.start.x, y: touch.start.y, width: w(), height: h(), edge });
+    return true;
+  };
   canvas.addEventListener('pointermove', (e) => {
-    if (!live.touch || live.touch.inspect) return;
+    const touch = live.touch;
+    if (!touch || touch.inspect) return;
     const point = livePoint(e);
+    if (touch.pending && Math.hypot(point.x - touch.start.x, point.y - touch.start.y) < LIVE_DRAG_SLOP) return;
+    flushDown(touch);
     liveSend({ type: 'touch1-move', x: point.x, y: point.y, width: w(), height: h() });
   });
   const endTouch = (e) => {
@@ -1862,7 +1884,10 @@ function setupLiveEvents() {
       if (e.type === 'pointerup' && point.inside) inspectAt(point);
       return;
     }
-    liveSend({ type: 'touch1-up', x: point.x, y: point.y, width: w(), height: h() });
+    const up = () => liveSend({ type: 'touch1-up', x: point.x, y: point.y, width: w(), height: h() });
+    // 点击时按下与抬起间隔过短可能不被识别为点击
+    if (flushDown(touch)) setTimeout(up, LIVE_TAP_MS);
+    else up();
   };
   canvas.addEventListener('pointerup', endTouch);
   canvas.addEventListener('pointercancel', endTouch);
