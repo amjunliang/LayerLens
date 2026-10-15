@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LayerLens</title>
+<link rel="icon" type="image/svg+xml" href="/assets/icon.svg">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <link rel="stylesheet" href="/assets/app.css">
 <script>
   // 首次绘制前应用保存的主题, 避免先显示默认主题再切换
@@ -85,40 +87,11 @@
         <div class="menu-sep"></div>
         <button class="menu-row menu-action has-live-only" id="menuHeal">修复模拟器触摸…</button>
         <button class="menu-row menu-action" data-panel="integration">App 集成…</button>
-        <button class="menu-row menu-action" data-panel="about">关于 LayerLens</button>
+        <button class="menu-row menu-action" data-panel="about">关于 LayerLens…</button>
       </div>
     </div>
     <div class="popover-anchor help-anchor">
       <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
-      <div class="popover menu shortcuts" id="helpMenu" hidden>
-        <div class="menu-title">快捷键</div>
-        <div class="shortcut"><kbd>↑</kbd><kbd>↓</kbd><span>上一个 / 下一个节点</span></div>
-        <div class="shortcut"><kbd>←</kbd><span>收起, 再按选中父节点</span></div>
-        <div class="shortcut"><kbd>→</kbd><span>展开, 再按进入子节点</span></div>
-        <div class="shortcut"><kbd>双指滑动</kbd><span>平移画布</span></div>
-        <div class="shortcut"><kbd>空格</kbd><kbd>拖动</kbd><span>平移画布, 也可中键拖动</span></div>
-        <div class="shortcut"><kbd>捏合</kbd><span>缩放, 也可 ⌘ + 滚轮</span></div>
-        <div class="shortcut"><kbd>拖动</kbd><span>旋转 (3D)</span></div>
-        <div class="shortcut"><kbd>再次点击</kbd><span>选中下面一层</span></div>
-        <div class="shortcut"><kbd>双击</kbd><span>只看该子树, 双击空白处退出 (3D)</span></div>
-        <div class="shortcut"><kbd>F</kbd><span>放大选中元素</span></div>
-        <div class="shortcut"><kbd>0</kbd><span>适应窗口</span></div>
-        <div class="shortcut"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><span>实时 / 2D / 3D</span></div>
-        <div class="shortcut"><kbd>[</kbd><kbd>]</kbd><span>调整层间距 (3D)</span></div>
-        <div class="shortcut"><kbd>I</kbd><span>显示 / 隐藏截图 (3D)</span></div>
-        <div class="shortcut"><kbd>R</kbd><span>刷新</span></div>
-        <div class="shortcut"><kbd>⌘</kbd><kbd>C</kbd><span>复制选中节点路径</span></div>
-        <div class="shortcut"><kbd>右键</kbd><span>复制菜单</span></div>
-        <div class="shortcut"><kbd>?</kbd><span>显示此面板</span></div>
-        <div class="menu-live">
-          <div class="menu-sep"></div>
-          <div class="menu-title">实时</div>
-          <div class="shortcut"><kbd>拖动</kbd><span>在 App 内滑动 / 滚动</span></div>
-          <div class="shortcut"><kbd>⌥</kbd><kbd>点击</kbd><span>选中元素并切到 2D</span></div>
-          <div class="shortcut"><kbd>⌘</kbd><kbd>V</kbd><span>粘贴到模拟器</span></div>
-          <div class="shortcut"><kbd>Esc</kbd><span>停止向模拟器输入按键</span></div>
-        </div>
-      </div>
     </div>
   </div>
 </header>

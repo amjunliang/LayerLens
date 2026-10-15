@@ -1082,18 +1082,15 @@ function placeBox(box, node, win) {
   box.style.height = node.rect[3] + 'px';
 }
 
-// 2D 下取包含该点的所有节点, 最上层在前
-function hitTestAll(x, y) {
-  const win = currentWindow();
-  return drawableNodes(win).filter((node) => {
-    const [nx, ny, nw, nh] = node.rect;
-    return x >= nx - win.rect[0] && x <= nx - win.rect[0] + nw && y >= ny - win.rect[1] && y <= ny - win.rect[1] + nh;
-  }).reverse();
-}
-
 // 2D 下取包含该点的最上层节点
 function hitTest(x, y) {
-  return hitTestAll(x, y)[0] || null;
+  const win = currentWindow();
+  let hit = null;
+  drawableNodes(win).forEach((node) => {
+    const [nx, ny, nw, nh] = node.rect;
+    if (x >= nx - win.rect[0] && x <= nx - win.rect[0] + nw && y >= ny - win.rect[1] && y <= ny - win.rect[1] + nh) hit = node;
+  });
+  return hit;
 }
 
 function stagePoint(event) {
@@ -1108,36 +1105,12 @@ function setupCanvasEvents() {
   let drag = null;
   let lastTap = 0;
 
-  // 该点下的所有节点, 最上层在前
-  const nodesAtPoint = (point) => {
-    if (!currentWindow()) return [];
-    if (state.mode === '2d') return hitTestAll(...stagePoint(point));
-    return document.elementsFromPoint(point.clientX, point.clientY)
-      .filter((target) => target.classList.contains('slab') && wrap.contains(target))
-      .map((slab) => state.nodes.get(slab.dataset.key))
-      .filter(Boolean);
-  };
-  // 鼠标上次点击, 用于在同一位置再点时选中下一层, 以及识别双击
-  let lastClick = null;
-  const clickSelect = (e) => {
-    const nodes = nodesAtPoint(e);
-    const now = Date.now();
-    const near = lastClick && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 4;
-    if (near && now - lastClick.time < DOUBLE_CLICK_MS) {
-      // 双击(3D): 元素上进入只看子树, 空白处退出; 第一下若切换了层则撤销, 第二下不切换
-      const { before } = lastClick;
-      lastClick = null;
-      if (state.mode !== '3d') return;
-      if (before && before !== state.selected && state.nodes.has(before)) select(before);
-      if (nodes.length && !state.subtreeOnly) $('subtreeOnly').click();
-      else if (!nodes.length && state.subtreeOnly) $('subtreeOnly').click();
-      return;
-    }
-    // before: 再次点击切换层前的选中, 双击时恢复
-    lastClick = { x: e.clientX, y: e.clientY, time: now, before: near ? state.selected : null };
-    if (!nodes.length) return;
-    const index = near ? nodes.findIndex((node) => node.key === state.selected) : -1;
-    select(nodes[(index + 1) % nodes.length].key);
+  const nodeAtPoint = (point) => {
+    if (!currentWindow()) return null;
+    if (state.mode === '2d') return hitTest(...stagePoint(point));
+    const target = document.elementFromPoint(point.clientX, point.clientY);
+    const slab = target && target.closest('.slab');
+    return slab ? state.nodes.get(slab.dataset.key) : null;
   };
   // 画布菜单始终针对当前选中节点, 不按点击位置重新选中, 空白处也可呼出
   const openCanvasMenu = (point) => {
@@ -1258,12 +1231,9 @@ function setupCanvasEvents() {
     // setPointerCapture 后 e.target 恒为 wrap, 需按坐标取真实元素
     const target = document.elementFromPoint(e.clientX, e.clientY);
     if (!target || !wrap.contains(target)) return;
-    if (e.pointerType === 'mouse') {
-      clickSelect(e);
-      return;
-    }
-    const node = nodesAtPoint(e)[0];
+    const node = nodeAtPoint(e);
     if (node) select(node.key);
+    if (e.pointerType === 'mouse') return;
     // 触屏双击适应窗口
     const now = Date.now();
     if (now - lastTap < DOUBLE_CLICK_MS) {
@@ -2174,22 +2144,13 @@ function setupLiveEvents() {
   $('liveRotate').addEventListener('click', liveRotate);
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
-  $('menuHeal').addEventListener('click', () => {
-    hidePopovers();
-    if (confirm(t('将重启模拟器的 backboardd 与 SpringBoard, 前台 App 会被结束, 约 10 秒后恢复. 继续?'))) healLiveTouch();
-  });
+  $('menuHeal').addEventListener('click', () => openPanel('heal'));
   $('screenShot').addEventListener('click', () => copyImage(screenShotPNG(), '复制屏幕截图'));
   $('xcodeRun').addEventListener('click', xcodeRun);
   $('appBannerRun').addEventListener('click', xcodeRun);
   $('emptyGuide').addEventListener('click', (e) => {
     const value = e.target.closest('.live-copy')?.dataset.copy;
     if (value) copyText(value, '复制');
-  });
-  $('helpMenu').addEventListener('click', (e) => {
-    const value = e.target.closest('[data-copy]')?.dataset.copy;
-    if (!value) return;
-    hidePopovers();
-    copyText(value, '复制命令');
   });
   new ResizeObserver(layoutLive).observe(wrap);
 }
@@ -2722,6 +2683,10 @@ function handleViewKey(key) {
       if (!three) return false;
       $('showImages').click();
       return true;
+    case 's':
+      if (!three) return false;
+      $('subtreeOnly').click();
+      return true;
     default:
       return false;
   }
@@ -2873,10 +2838,81 @@ function aboutPanel() {
   ];
 }
 
+// Mac App 的 WebView 不支持 confirm(), 用面板确认
+function healPanel() {
+  const actions = el('div', 'modal-actions');
+  const cancel = el('button', null, t('取消'));
+  const ok = el('button', 'primary', t('修复'));
+  cancel.addEventListener('click', closePanel);
+  ok.addEventListener('click', () => {
+    closePanel();
+    healLiveTouch();
+  });
+  actions.append(cancel, ok);
+  return [
+    paragraph(document.createTextNode(t('模拟器重启后偶尔不再响应注入的触摸, 重启模拟器的 backboardd 即可恢复.'))),
+    paragraph(document.createTextNode(t('会连带重启 SpringBoard, 前台 App 会被结束, 约 10 秒后回到桌面.'))),
+    actions,
+  ];
+}
+
+// 快捷键: [分组标题, 只在有实时画面时显示, [[按键...], 说明]...]
+const SHORTCUT_GROUPS = [
+  ['通用', false, [
+    [['R'], '刷新'],
+    [['⌘', 'C'], '复制选中节点路径'],
+    [['右键'], '复制菜单'],
+    [['?'], '显示此面板'],
+  ]],
+  ['层级树', false, [
+    [['↑', '↓'], '上一个 / 下一个节点'],
+    [['←'], '收起, 再按选中父节点'],
+    [['→'], '展开, 再按进入子节点'],
+  ]],
+  ['画布', false, [
+    [['双指滑动'], '平移画布'],
+    [['空格', '拖动'], '平移画布, 也可中键拖动'],
+    [['捏合'], '缩放, 也可 ⌘ + 滚轮'],
+    [['F'], '放大选中元素'],
+    [['0'], '适应窗口'],
+    [['1', '2', '3'], '实时 / 2D / 3D'],
+  ]],
+  ['3D', false, [
+    [['拖动'], '旋转'],
+    [['S'], '独立显示选中元素'],
+    [['[', ']'], '调整层间距'],
+    [['I'], '显示 / 隐藏截图'],
+  ]],
+  ['实时', true, [
+    [['拖动'], '在 App 内滑动 / 滚动'],
+    [['⌥', '点击'], '选中元素并切到 2D'],
+    [['⌘', 'V'], '粘贴到模拟器'],
+    [['Esc'], '停止向模拟器输入按键'],
+  ]],
+];
+
+function shortcutsPanel() {
+  const grid = el('div', 'shortcut-groups');
+  SHORTCUT_GROUPS.forEach(([title, liveOnly, items]) => {
+    const group = el('div', liveOnly ? 'shortcut-group has-live-only' : 'shortcut-group');
+    group.appendChild(el('h5', null, t(title)));
+    items.forEach(([keys, text]) => {
+      const row = el('div', 'shortcut');
+      const keysCell = el('div', 'shortcut-keys');
+      keys.forEach((key) => keysCell.appendChild(el('kbd', null, t(key))));
+      row.append(keysCell, el('span', null, t(text)));
+      group.appendChild(row);
+    });
+    grid.appendChild(group);
+  });
+  return [grid];
+}
+
 function openPanel(name) {
-  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel] };
+  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel] };
   const panel = panels[name];
   if (!panel) return;
+  state.panel = name;
   hidePopovers();
   hideMenu();
   $('modalTitle').textContent = panel[0];
@@ -3027,7 +3063,7 @@ function setup() {
     });
   });
   $('optionsBtn').addEventListener('click', () => togglePopover('optionsMenu'));
-  $('helpBtn').addEventListener('click', () => togglePopover('helpMenu'));
+  $('helpBtn').addEventListener('click', () => openPanel('shortcuts'));
   $('spacingBtn').addEventListener('click', () => togglePopover('spacingPop'));
   $('treeFilterBtn').addEventListener('click', () => togglePopover('treeFilterPop'));
   $('zoomFit').addEventListener('click', fitView);
@@ -3062,9 +3098,13 @@ function setup() {
       hidePopovers();
       closePanel();
     }
+    if (e.key === '?' && !(e.target instanceof Element && e.target.matches('input, select, textarea'))) {
+      if ($('modal').hidden || $('modal').classList.contains('closing') || state.panel !== 'shortcuts') openPanel('shortcuts');
+      else closePanel();
+      return;
+    }
     if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
     if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
-    if (e.key === '?') togglePopover('helpMenu');
     if (e.code === 'Space' && state.mode !== 'live') {
       // 阻止页面滚动和触发聚焦中的按钮
       e.preventDefault();

@@ -101,6 +101,8 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--border-strong); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { filter: brightness(1.08); }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 input, select {
   font: inherit;
@@ -214,7 +216,7 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 .app-meta { font-variant-numeric: tabular-nums; }
 body:not(.mode-3d) .three-only { display: none !important; }
 body:not(.mode-live) .live-only { display: none !important; }
-body:not(.has-live) .menu-live, body:not(.has-live) .has-live-only { display: none; }
+body:not(.has-live) .has-live-only { display: none; }
 /* 只选了设备时没有可运行的 App */
 body:not(.has-app) #xcodeRun { display: none; }
 
@@ -240,11 +242,18 @@ label.menu-row:hover { background: var(--hover); }
 .menu-action:hover { background: var(--hover); border-color: transparent; }
 .menu-row input[type=range] { width: 110px; }
 .menu-title { padding: 4px 8px 6px; color: var(--muted); font-size: 12px; }
-.shortcuts { min-width: 240px; }
 .menu-note { max-width: 240px; padding: 0 8px 4px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.shortcut { display: flex; align-items: center; gap: 4px; padding: 4px 8px; }
-.shortcut span { margin-left: 6px; color: var(--text-2); }
+/* 快捷键弹窗: 分组按列排布, 宽度不够时单列, 超出高度由弹窗滚动 */
+.shortcut-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 28px; }
+/* 每组两列, 按键列按本组最宽的按键自适应, 窄屏下说明不会被推得很远 */
+.shortcut-group { display: grid; grid-template-columns: minmax(92px, max-content) 1fr; align-content: start; align-items: center; gap: 10px 14px; }
+.modal-body .shortcut-groups .shortcut-group h5 { grid-column: 1 / -1; margin: 22px 0 2px; }
+.modal-body .shortcut-groups .shortcut-group:first-child h5 { margin-top: 0; }
+.shortcut { display: contents; }
+.shortcut-keys { display: flex; flex-wrap: wrap; gap: 4px; }
+.shortcut span { color: var(--text-2); line-height: 1.4; }
 kbd {
+  white-space: nowrap;
   font: 12px var(--mono);
   min-width: 20px;
   padding: 1px 5px;
@@ -618,9 +627,10 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 /* 有主要操作时集成说明降为次要按钮 */
 
 /* 关于 / App 集成面板 */
-.modal { position: fixed; inset: 0; z-index: 150; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.4); }
+/* 上边距让出顶部工具栏 */
+.modal { position: fixed; inset: 0; z-index: 150; display: flex; align-items: center; justify-content: center; padding: 56px 16px 16px; background: transparent; }
 .modal[hidden] { display: none; }
-.modal-card { display: flex; flex-direction: column; width: 640px; max-width: 100%; max-height: calc(100vh - 32px); background: var(--panel); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+.modal-card { display: flex; flex-direction: column; width: 640px; max-width: 100%; max-height: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.12); overflow: hidden; }
 .modal-head { flex: none; display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--border); }
 .modal-title { font-size: 14px; font-weight: 600; }
 .modal-body { overflow: auto; padding: 16px; line-height: 1.6; }
@@ -676,6 +686,8 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
   .stage-wrap, .live-wrap { padding: 8px 56px calc(56px + env(safe-area-inset-bottom)); }
   .menu-item { padding-top: 9px; padding-bottom: 9px; }
   /* 视图切换: 底部居中的胶囊浮条, 与画布工具同款外观 */
+  /* 不遮挡底部导航 */
+  .modal { padding-bottom: 60px; }
   .mobile-nav {
     position: fixed;
     left: 50%;
@@ -745,3 +757,6 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
   word-break: break-all;
   max-width: 420px;
 }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.modal-actions button { min-width: 72px; }

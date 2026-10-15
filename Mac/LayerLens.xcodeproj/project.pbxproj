@@ -13,6 +13,7 @@
 		295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541966EE0D953E021F155FB9 /* SimulatorBridge.swift */; };
 		2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB1A4B00E5E141A81FF61999 /* main.swift */; };
 		2F60E987BD741C84FE39106E /* ProxyTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */; };
+		338274FF3D5BCF29C3D95D06 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3C8CE72D1DFF6E56990FF617 /* Assets.xcassets */; };
 		44A7FDB4C38BD8E2AA69EB05 /* HTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */; };
 		4B606CC7F77C28B4B516E660 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */; };
 		5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018BD14CAF3AA5013A6E67EA /* Usbmux.swift */; };
@@ -32,6 +33,7 @@
 		11722AD1612955ACE9D53083 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		1CD20781F27975DD00515545 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
 		1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPMessage.swift; sourceTree = "<group>"; };
+		3C8CE72D1DFF6E56990FF617 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4643A7B6CBF41019EE8D9D7B /* LayerLens.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LayerLens.entitlements; sourceTree = "<group>"; };
 		4EA9476CF005F0D8805106BB /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
 		541966EE0D953E021F155FB9 /* SimulatorBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorBridge.swift; sourceTree = "<group>"; };
@@ -75,6 +77,7 @@
 			isa = PBXGroup;
 			children = (
 				DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */,
+				3C8CE72D1DFF6E56990FF617 /* Assets.xcassets */,
 				BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */,
 				1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */,
 				B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */,
@@ -165,6 +168,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				338274FF3D5BCF29C3D95D06 /* Assets.xcassets in Resources */,
 				98161385819625EABB95614A /* Web in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
