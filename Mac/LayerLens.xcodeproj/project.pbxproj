@@ -7,17 +7,22 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		13167D6D62E8C21851B54CE8 /* BaguetteManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E97F186EFCE6926CB08DC63 /* BaguetteManager.swift */; };
+		0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */; };
+		13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */; };
 		1F92C6B485796F8B4DFD7632 /* HTTPMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */; };
+		295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541966EE0D953E021F155FB9 /* SimulatorBridge.swift */; };
 		2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB1A4B00E5E141A81FF61999 /* main.swift */; };
 		2F60E987BD741C84FE39106E /* ProxyTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */; };
 		44A7FDB4C38BD8E2AA69EB05 /* HTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */; };
 		4B606CC7F77C28B4B516E660 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */; };
 		5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018BD14CAF3AA5013A6E67EA /* Usbmux.swift */; };
 		5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BEB09D7814382476662F06E /* XcodeController.swift */; };
+		64ED4F6E692A2A9ABF7CB5D7 /* SimulatorEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */; };
+		89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */; };
 		8CCD018F71C87A6C6F8B962C /* TargetRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */; };
 		98161385819625EABB95614A /* Web in Resources */ = {isa = PBXBuildFile; fileRef = 97DC8C75223B44DCC6264C99 /* Web */; };
 		AE99CD6490BFF1D10DBE64F9 /* MainMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EA9476CF005F0D8805106BB /* MainMenu.swift */; };
+		C3328F67A77FE0E4F668B64C /* SimulatorKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */; };
 		C9CDC699FE2578D78BE232EC /* HubServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */; };
 		D1B3FD3F79A4FF247AB49D3D /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CD20781F27975DD00515545 /* MainWindowController.swift */; };
 /* End PBXBuildFile section */
@@ -27,17 +32,22 @@
 		11722AD1612955ACE9D53083 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		1CD20781F27975DD00515545 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
 		1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPMessage.swift; sourceTree = "<group>"; };
-		2E97F186EFCE6926CB08DC63 /* BaguetteManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BaguetteManager.swift; sourceTree = "<group>"; };
 		4643A7B6CBF41019EE8D9D7B /* LayerLens.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LayerLens.entitlements; sourceTree = "<group>"; };
 		4EA9476CF005F0D8805106BB /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
+		541966EE0D953E021F155FB9 /* SimulatorBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorBridge.swift; sourceTree = "<group>"; };
+		5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorKeyboard.swift; sourceTree = "<group>"; };
 		78F1AD52529F3E51E363B48B /* LayerLens.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LayerLens.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorStream.swift; sourceTree = "<group>"; };
 		85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyTunnel.swift; sourceTree = "<group>"; };
 		8BEB09D7814382476662F06E /* XcodeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XcodeController.swift; sourceTree = "<group>"; };
 		952DDBAAEE608BB432BB2E87 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		97DC8C75223B44DCC6264C99 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Web; path = ../Web; sourceTree = SOURCE_ROOT; };
+		A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketConnection.swift; sourceTree = "<group>"; };
 		B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubServer.swift; sourceTree = "<group>"; };
 		BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
+		C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorEncoder.swift; sourceTree = "<group>"; };
 		C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetRegistry.swift; sourceTree = "<group>"; };
+		D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorLive.swift; sourceTree = "<group>"; };
 		DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		DB1A4B00E5E141A81FF61999 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -65,7 +75,6 @@
 			isa = PBXGroup;
 			children = (
 				DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */,
-				2E97F186EFCE6926CB08DC63 /* BaguetteManager.swift */,
 				BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */,
 				1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */,
 				B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */,
@@ -75,8 +84,14 @@
 				4EA9476CF005F0D8805106BB /* MainMenu.swift */,
 				1CD20781F27975DD00515545 /* MainWindowController.swift */,
 				85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */,
+				541966EE0D953E021F155FB9 /* SimulatorBridge.swift */,
+				C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */,
+				5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */,
+				D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */,
+				835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */,
 				C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */,
 				018BD14CAF3AA5013A6E67EA /* Usbmux.swift */,
+				A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */,
 				8BEB09D7814382476662F06E /* XcodeController.swift */,
 			);
 			path = LayerLens;
@@ -162,15 +177,20 @@
 			buildActionMask = 2147483647;
 			files = (
 				4B606CC7F77C28B4B516E660 /* AppDelegate.swift in Sources */,
-				13167D6D62E8C21851B54CE8 /* BaguetteManager.swift in Sources */,
 				44A7FDB4C38BD8E2AA69EB05 /* HTTPClient.swift in Sources */,
 				1F92C6B485796F8B4DFD7632 /* HTTPMessage.swift in Sources */,
 				C9CDC699FE2578D78BE232EC /* HubServer.swift in Sources */,
 				AE99CD6490BFF1D10DBE64F9 /* MainMenu.swift in Sources */,
 				D1B3FD3F79A4FF247AB49D3D /* MainWindowController.swift in Sources */,
 				2F60E987BD741C84FE39106E /* ProxyTunnel.swift in Sources */,
+				295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */,
+				64ED4F6E692A2A9ABF7CB5D7 /* SimulatorEncoder.swift in Sources */,
+				C3328F67A77FE0E4F668B64C /* SimulatorKeyboard.swift in Sources */,
+				13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */,
+				89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */,
 				8CCD018F71C87A6C6F8B962C /* TargetRegistry.swift in Sources */,
 				5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */,
+				0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */,
 				5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */,
 				2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */,
 			);
