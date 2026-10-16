@@ -1955,7 +1955,7 @@ function showGuide() {
   const copy = el('button', 'live-copy', t('复制'));
   copy.dataset.copy = POD_LINE;
   $('emptyGuide').replaceChildren(
-    step(1, t('集成'), [box('guide-code', [copy, el('code', null, POD_LINE)]), el('div', 'guide-text', t('只在 Debug 下集成, 执行 pod install 即可, 无需代码'))]),
+    step(1, t('集成'), [box('guide-code', [balanceScrollbar(el('code', null, POD_LINE)), copy]), el('div', 'guide-text', t('只在 Debug 下集成, 执行 pod install 即可, 无需代码'))]),
     step(2, t('运行'), [el('div', 'guide-text', t('在模拟器中运行 App, 或通过 USB 连接真机运行'))]),
     step(3, t('查看'), [el('div', 'guide-text', t('2D / 3D 查看视图层级和属性, 模拟器还支持实时画面'))]),
   );
@@ -2834,11 +2834,22 @@ const POST_INSTALL = `post_install do |installer|
   end
 end`;
 
+// 常显滚动条会占用底部高度, 在顶部补同样的高度, 让单行代码和复制按钮对齐
+function balanceScrollbar(node) {
+  new ResizeObserver(() => {
+    node.style.paddingTop = '';
+    const bar = node.offsetHeight - node.clientHeight;
+    if (bar > 0) node.style.paddingTop = `${parseFloat(getComputedStyle(node).paddingTop) + bar}px`;
+  }).observe(node);
+  return node;
+}
+
 function codeBlock(text) {
-  const box = el('div', 'code-block');
+  // 单行时复制按钮竖向居中, 多行时贴顶
+  const box = el('div', text.includes('\n') ? 'code-block multiline' : 'code-block');
   const button = el('button', null, t('复制'));
   button.dataset.copy = text;
-  box.append(el('pre', null, text), button);
+  box.append(balanceScrollbar(el('pre', null, text)), button);
   return box;
 }
 

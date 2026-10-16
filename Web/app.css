@@ -632,9 +632,10 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .guide-content { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
 .guide-title { color: #fff; font-size: 13px; font-weight: 600; line-height: 22px; }
 .guide-text { font-size: 12px; line-height: 1.6; }
-.guide-code { min-width: 0; padding: 6px 6px 6px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); }
-.guide-code .live-copy { float: right; margin: -1px 0 2px 8px; padding: 1px 8px; font-size: 11px; line-height: 18px; }
-.guide-code code { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); color: #fff; user-select: all; }
+.guide-code { display: flex; gap: 8px; align-items: center; min-width: 0; padding: 6px 6px 6px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); }
+.guide-code code { flex: 1; min-width: 0; padding: 2px 0; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent; font: 12px/1.6 var(--mono); color: #fff; }
+.guide-code code::-webkit-scrollbar { height: 6px; }
+.guide-code code::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(255, 255, 255, 0.2); }
 .empty-action { margin-top: 4px; background: var(--accent); color: #fff; font-weight: 600; border: none; }
 .empty-action:hover { filter: brightness(1.08); }
 /* 有主要操作时集成说明降为次要按钮 */
@@ -652,9 +653,12 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .modal-body p { margin: 4px 0; color: var(--text-2); }
 .modal-body a { color: var(--accent); text-decoration: none; }
 .modal-body a:hover { text-decoration: underline; }
-.code-block { position: relative; margin: 6px 0; }
-.code-block pre { margin: 0; padding: 10px 12px; padding-right: 64px; overflow-x: auto; background: var(--input); border-radius: var(--r-control); font: 12px/1.6 var(--mono); color: var(--text); }
-.code-block button { position: absolute; top: 6px; right: 6px; padding: 2px 8px; font-size: 12px; background: var(--panel); border-color: var(--border-strong); }
+.code-block { display: flex; gap: 8px; align-items: center; margin: 6px 0; padding: 6px 6px 6px 12px; background: var(--input); border-radius: 8px; }
+.code-block pre { flex: 1; min-width: 0; margin: 0; padding: 4px 0; overflow-x: auto; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--text) 22%, transparent) transparent; font: 12px/1.6 var(--mono); color: var(--text); }
+.code-block pre::-webkit-scrollbar { height: 6px; }
+.code-block pre::-webkit-scrollbar-thumb { border-radius: 3px; background: color-mix(in srgb, var(--text) 22%, transparent); }
+.code-block.multiline { align-items: flex-start; }
+.code-block button { flex: none; padding: 2px 8px; font-size: 12px; background: var(--panel); border-color: var(--border-strong); }
 .about-head { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0 12px; text-align: center; }
 .about-name { font-size: 20px; font-weight: 700; }
 .about-desc { color: var(--muted); font-size: 12px; }
