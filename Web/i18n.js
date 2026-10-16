@@ -22,7 +22,6 @@ const EN = {
   // 工具栏与菜单
   '未连接': 'Not connected',
   '实时': 'Live',
-  '实时画面': 'Live screen',
   '在 Xcode 中运行': 'Run in Xcode',
   '刷新 (R)': 'Refresh (R)',
   '刷新': 'Refresh',

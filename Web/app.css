@@ -553,21 +553,29 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 }
 .context-menu .menu-title {
   font-family: var(--mono);
-  padding: 4px 10px 6px;
+  padding: 2px 10px 5px;
+  font-size: 13px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   margin-bottom: 4px;
   overflow-wrap: anywhere;
   white-space: normal;
 }
-.menu-item { position: relative; display: block; width: 100%; text-align: left; border: none; background: none; padding: 6px 10px; }
+.menu-item { position: relative; display: block; width: 100%; text-align: left; border: none; background: none; padding: 4px 10px; font-size: 14px; line-height: 20px; border-radius: 4px; }
 .menu-item:disabled { color: var(--muted); cursor: default; }
 .menu-item:not(:disabled):hover { background: var(--accent); color: #fff; border-color: transparent; }
-.menu-separator { border-top: 1px solid var(--border); margin: 4px 0; }
+.menu-separator { border-top: 1px solid var(--border); margin: 4px 6px; }
 .menu-item.has-submenu { padding-right: 26px; }
 .menu-item.has-submenu::after { content: '›'; position: absolute; right: 10px; top: 50%; transform: translateY(-52%); font-size: 15px; }
 .menu-item.has-submenu.open:not(:disabled) { background: var(--accent); color: #fff; }
 .context-menu.submenu { z-index: 101; }
+/* 只有一两项的菜单按内容宽度 */
+.context-menu.fit { min-width: 0; }
+/* 触摸设备上加大点击区域; 按输入方式判断, 窄窗口用鼠标时保持紧凑 */
+@media (pointer: coarse) {
+  .menu-item { padding-top: 9px; padding-bottom: 9px; }
+}
+.submenu-inline { padding-left: 12px; }
 .toast {
   position: fixed;
   left: 50%;
@@ -688,7 +696,6 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
   .crumb:not(.current) .crumb-ivar { display: none; }
   /* 适应窗口时画面上下各留 8px, 底部再让出导航条; 左右对称让出浮动工具列, 画面居中且不被遮挡 */
   .stage-wrap, .live-wrap { padding: 8px 56px calc(56px + env(safe-area-inset-bottom)); }
-  .menu-item { padding-top: 9px; padding-bottom: 9px; }
   /* 视图切换: 底部居中的胶囊浮条, 与画布工具同款外观 */
   /* 不遮挡底部导航 */
   .modal { padding-bottom: 60px; }

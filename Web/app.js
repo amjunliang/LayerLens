@@ -232,13 +232,13 @@ function screenShotPNG() {
 }
 
 // canvas 为 true 时(画布上呼出)未选中元素也显示菜单, 元素各项不可用, 末尾附带屏幕截图;
-// screenOnly 用于实时画面, 只有屏幕截图
+// screenOnly 用于实时画面, 只有屏幕截图一项, 不显示标题
 function showMenu(x, y, node, canvas, screenOnly) {
   hideMenu();
   if (!node && !canvas) return;
-  const menu = el('div', 'context-menu');
+  const menu = el('div', screenOnly ? 'context-menu fit' : 'context-menu');
   menu.id = 'contextMenu';
-  menu.appendChild(el('div', 'menu-title', screenOnly ? t('实时画面') : node ? node.cls : t('未选中元素')));
+  if (!screenOnly) menu.appendChild(el('div', 'menu-title', node ? node.cls : t('未选中元素')));
   const makeItem = (title, run, disabled) => {
     const item = el('button', 'menu-item', title);
     item.disabled = disabled;
@@ -246,8 +246,10 @@ function showMenu(x, y, node, canvas, screenOnly) {
       hideMenu();
       run();
     });
-    // 移到其他项上时收起子菜单
-    item.addEventListener('pointerenter', () => hideSubmenu(menu));
+    // 移到主菜单的其他项上时收起子菜单; 子菜单自己的项不处理, 否则会关掉再打开, 不停闪烁
+    item.addEventListener('pointerenter', () => {
+      if (item.parentNode === menu) hideSubmenu(menu);
+    });
     return item;
   };
   if (!screenOnly) {
@@ -277,26 +279,38 @@ function placeMenu(menu, x, y) {
   menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
 }
 
-// 子菜单单独挂在 body 上, 避免被主菜单的滚动区域裁剪; 右侧放不下时放到左侧
+// 子菜单单独挂在 body 上, 避免被主菜单的滚动区域裁剪; 右侧放不下时放到左侧,
+// 两侧都放不下(窗口很窄)时直接在主菜单内展开
 function showSubmenu(menu, anchor, items) {
   if (anchor.disabled || menu.submenu?.anchor === anchor) return;
   hideSubmenu(menu);
+  anchor.classList.add('open');
   const sub = el('div', 'context-menu submenu');
   sub.append(...items);
   sub.anchor = anchor;
   menu.submenu = sub;
-  anchor.classList.add('open');
   document.body.appendChild(sub);
   const a = anchor.getBoundingClientRect();
   const width = sub.getBoundingClientRect().width;
-  const x = a.right + 2 + width <= window.innerWidth - 8 ? a.right + 2 : a.left - width - 2;
-  placeMenu(sub, x, a.top - 4);
+  if (a.right + 2 + width <= window.innerWidth - 8) {
+    placeMenu(sub, a.right + 2, a.top - 4);
+  } else if (a.left - width - 2 >= 8) {
+    placeMenu(sub, a.left - width - 2, a.top - 4);
+  } else {
+    sub.remove();
+    sub.className = 'submenu-inline';
+    anchor.after(sub);
+    placeMenu(menu, parseFloat(menu.style.left), parseFloat(menu.style.top));
+  }
 }
 
 function hideSubmenu(menu) {
-  if (!menu.submenu) return;
-  menu.submenu.anchor.classList.remove('open');
-  menu.submenu.remove();
+  const sub = menu.submenu;
+  if (!sub) return;
+  // 内嵌展开的子菜单保持打开, 直到菜单关闭
+  if (sub.className === 'submenu-inline' && menu.isConnected && sub.isConnected && !menu.closing) return;
+  sub.anchor.classList.remove('open');
+  sub.remove();
   menu.submenu = null;
 }
 
@@ -330,6 +344,7 @@ function hideMenu() {
   if (!menu) return;
   // 退出动画期间可能已打开新的菜单, 先去掉 id 避免冲突
   menu.removeAttribute('id');
+  menu.closing = true;
   hideSubmenu(menu);
   hideLayer(menu, 120, () => menu.remove());
 }
