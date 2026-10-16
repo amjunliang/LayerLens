@@ -633,8 +633,10 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .guide-title { color: #fff; font-size: 13px; font-weight: 600; line-height: 22px; }
 .guide-text { font-size: 12px; line-height: 1.6; }
 .guide-code { display: flex; gap: 8px; align-items: center; min-width: 0; padding: 6px 6px 6px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); }
-.guide-code code { flex: 1; min-width: 0; padding: 2px 0; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent; font: 12px/1.6 var(--mono); color: #fff; }
-.guide-code code::-webkit-scrollbar { height: 6px; }
+.guide-code code { flex: 1; min-width: 0; padding: 2px 0; overflow-x: auto; white-space: nowrap; font: 12px/1.6 var(--mono); color: #fff; }
+/* 覆盖全局 scrollbar-width, 否则 WebKit 用系统滚动条(带轨道边框), 不走下面的自定义样式 */
+.guide-code code, .code-block pre { scrollbar-width: auto; scrollbar-color: auto; }
+.guide-code code::-webkit-scrollbar { height: 6px; background: transparent; }
 .guide-code code::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(255, 255, 255, 0.2); }
 .empty-action { margin-top: 4px; background: var(--accent); color: #fff; font-weight: 600; border: none; }
 .empty-action:hover { filter: brightness(1.08); }
@@ -654,8 +656,8 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .modal-body a { color: var(--accent); text-decoration: none; }
 .modal-body a:hover { text-decoration: underline; }
 .code-block { display: flex; gap: 8px; align-items: center; margin: 6px 0; padding: 6px 6px 6px 12px; background: var(--input); border-radius: 8px; }
-.code-block pre { flex: 1; min-width: 0; margin: 0; padding: 4px 0; overflow-x: auto; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--text) 22%, transparent) transparent; font: 12px/1.6 var(--mono); color: var(--text); }
-.code-block pre::-webkit-scrollbar { height: 6px; }
+.code-block pre { flex: 1; min-width: 0; margin: 0; padding: 4px 0; overflow-x: auto; font: 12px/1.6 var(--mono); color: var(--text); }
+.code-block pre::-webkit-scrollbar { height: 6px; background: transparent; }
 .code-block pre::-webkit-scrollbar-thumb { border-radius: 3px; background: color-mix(in srgb, var(--text) 22%, transparent); }
 .code-block.multiline { align-items: flex-start; }
 .code-block button { flex: none; padding: 2px 8px; font-size: 12px; background: var(--panel); border-color: var(--border-strong); }

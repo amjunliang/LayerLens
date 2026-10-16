@@ -6,7 +6,7 @@
 //  Copyright © 2026 YueYou. Released under the MIT License.
 //
 
-import Foundation
+import AppKit
 import IOSurface
 import ObjectiveC
 
@@ -19,12 +19,31 @@ enum SimBridge {
     /// 私有框架加载失败的原因, 供网页提示
     private(set) static var loadError: String?
 
-    /// 与 simctl 使用同一个 Xcode
-    static let developerDir: String = {
+    /// 实际加载 SimulatorKit 的 Xcode, 加载前为 xcode-select 选中的 Xcode
+    private(set) static var developerDir = selectedDeveloperDir
+
+    /// xcode-select 选中的 Xcode, 与 simctl 一致
+    private static let selectedDeveloperDir: String = {
         let output = TargetRegistry.run("/usr/bin/xcode-select", ["-p"]).flatMap { String(data: $0, encoding: .utf8) }
         let path = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return path.isEmpty ? "/Applications/Xcode.app/Contents/Developer" : path
     }()
+
+    /// 候选 Xcode 的 Developer 目录, 按优先级:
+    /// 1. 正在运行的 Simulator.app 所属的 Xcode: 它已在和系统的 CoreSimulator 配合工作, 用同一个 Xcode 的 SimulatorKit 最稳妥
+    /// 2. xcode-select 选中的 Xcode
+    /// 3. LaunchServices 登记的所有 Xcode, 按 bundle id 查找, 不受改名影响
+    private static func candidateDeveloperDirs() -> [String] {
+        var dirs: [String] = []
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator") {
+            // <Xcode>/Contents/Developer/Applications/Simulator.app
+            if let url = app.bundleURL { dirs.append(url.deletingLastPathComponent().deletingLastPathComponent().path) }
+        }
+        dirs.append(selectedDeveloperDir)
+        dirs += NSWorkspace.shared.urlsForApplications(withBundleIdentifier: "com.apple.dt.Xcode").map { $0.appendingPathComponent("Contents/Developer").path }
+        var seen = Set<String>()
+        return dirs.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }.filter { seen.insert($0).inserted }
+    }
 
     static func load() -> Bool {
         lock.lock()
@@ -36,13 +55,27 @@ enum SimBridge {
             NSLog("[live] %@", loadError ?? "")
             return false
         }
-        let kitPath = developerDir + "/../SharedFrameworks/SimulatorKit.framework/SimulatorKit"
-        simKit = dlopen(kitPath, RTLD_NOW | RTLD_GLOBAL)
-        if simKit == nil {
-            loadError = "SimulatorKit: " + String(cString: dlerror())
-            NSLog("[live] %@", loadError ?? "")
+        let dirs = candidateDeveloperDirs()
+        var errors: [String] = []
+        for dir in dirs {
+            // Xcode 26 及更早在 Developer/Library/PrivateFrameworks, Xcode 27 移到了 Contents/SharedFrameworks
+            let paths = [
+                dir + "/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit",
+                dir + "/../SharedFrameworks/SimulatorKit.framework/SimulatorKit",
+            ]
+            for path in paths where FileManager.default.fileExists(atPath: path) {
+                if let handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL) {
+                    simKit = handle
+                    developerDir = dir
+                    NSLog("[live] SimulatorKit loaded from %@", path)
+                    return true
+                }
+                errors.append(String(cString: dlerror()))
+            }
         }
-        return simKit != nil
+        loadError = "SimulatorKit: " + (errors.isEmpty ? "not found in " + dirs.joined(separator: ", ") : errors.joined(separator: "; "))
+        NSLog("[live] %@", loadError ?? "")
+        return false
     }
 
     static func symbol(_ name: String) -> UnsafeMutableRawPointer? {
