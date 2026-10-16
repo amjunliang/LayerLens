@@ -564,6 +564,10 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .menu-item:disabled { color: var(--muted); cursor: default; }
 .menu-item:not(:disabled):hover { background: var(--accent); color: #fff; border-color: transparent; }
 .menu-separator { border-top: 1px solid var(--border); margin: 4px 0; }
+.menu-item.has-submenu { padding-right: 26px; }
+.menu-item.has-submenu::after { content: '›'; position: absolute; right: 10px; top: 50%; transform: translateY(-52%); font-size: 15px; }
+.menu-item.has-submenu.open:not(:disabled) { background: var(--accent); color: #fff; }
+.context-menu.submenu { z-index: 101; }
 .toast {
   position: fixed;
   left: 50%;

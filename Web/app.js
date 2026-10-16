@@ -169,13 +169,14 @@ function elementSummary(node) {
   return parts.join(' < ');
 }
 
+// more 为 true 的收进右键菜单的"更多复制"子菜单
 const COPY_ACTIONS = [
   { title: '复制类名', value: (n) => n.cls },
-  { title: '复制成员变量名', value: (n) => [...new Set(n.ivarTraces.map((trace) => trace.split('.').pop()).filter(Boolean))].join('\n') },
   { title: '复制层级路径', value: nodePath },
-  { title: '复制元素信息', value: elementSummary, separatorBefore: true },
-  { title: '复制对象地址', value: (n) => n.address, separatorBefore: true },
-  { title: '复制 LLDB 命令', value: lldbCommand },
+  { title: '复制元素信息', value: elementSummary },
+  { title: '复制成员变量名', value: (n) => [...new Set(n.ivarTraces.map((trace) => trace.split('.').pop()).filter(Boolean))].join('\n'), more: true },
+  { title: '复制对象地址', value: (n) => n.address, more: true },
+  { title: '复制 LLDB 命令', value: lldbCommand, more: true },
 ];
 
 async function copyText(text, label) {
@@ -223,40 +224,80 @@ function liveCanvasPNG() {
   });
 }
 
-// 屏幕截图(工具栏): 实时模式取当前画面, 2D/3D 取当前窗口的 App 截图
+// 屏幕截图(画布右键菜单): 实时模式取当前画面, 2D/3D 取当前窗口的 App 截图
 function screenShotPNG() {
   if (state.mode === 'live') return liveCanvasPNG();
   const win = currentWindow();
   return win ? fetchPNG(shotURL(win.oid, 'group')) : Promise.reject(new Error(t('暂无画面')));
 }
 
-// canvas 为 true 时(画布上呼出)未选中元素也显示菜单, 各项不可用
-function showMenu(x, y, node, canvas) {
+// canvas 为 true 时(画布上呼出)未选中元素也显示菜单, 元素各项不可用, 末尾附带屏幕截图;
+// screenOnly 用于实时画面, 只有屏幕截图
+function showMenu(x, y, node, canvas, screenOnly) {
   hideMenu();
   if (!node && !canvas) return;
   const menu = el('div', 'context-menu');
   menu.id = 'contextMenu';
-  menu.appendChild(el('div', 'menu-title', node ? node.cls : t('未选中元素')));
-  const addItem = (title, run, disabled) => {
+  menu.appendChild(el('div', 'menu-title', screenOnly ? t('实时画面') : node ? node.cls : t('未选中元素')));
+  const makeItem = (title, run, disabled) => {
     const item = el('button', 'menu-item', title);
     item.disabled = disabled;
     item.addEventListener('click', () => {
       hideMenu();
       run();
     });
-    menu.appendChild(item);
+    // 移到其他项上时收起子菜单
+    item.addEventListener('pointerenter', () => hideSubmenu(menu));
+    return item;
   };
-  COPY_ACTIONS.forEach((action) => {
-    if (action.separatorBefore) menu.appendChild(el('div', 'menu-separator'));
-    const value = node && action.value(node);
-    addItem(t(action.title), () => copyText(value, action.title), !value);
-  });
-  menu.appendChild(el('div', 'menu-separator'));
-  addItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'), !node);
+  if (!screenOnly) {
+    const copyItem = (action) => {
+      const value = node && action.value(node);
+      return makeItem(t(action.title), () => copyText(value, action.title), !value);
+    };
+    COPY_ACTIONS.filter((action) => !action.more).forEach((action) => menu.appendChild(copyItem(action)));
+    const more = COPY_ACTIONS.filter((action) => action.more).map(copyItem);
+    const moreItem = el('button', 'menu-item has-submenu', t('更多复制'));
+    moreItem.disabled = more.every((item) => item.disabled);
+    const open = () => showSubmenu(menu, moreItem, more);
+    moreItem.addEventListener('pointerenter', open);
+    moreItem.addEventListener('click', open);
+    menu.appendChild(moreItem);
+    menu.appendChild(el('div', 'menu-separator'));
+    menu.appendChild(makeItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'), !node));
+  }
+  if (canvas) menu.appendChild(makeItem(t('复制屏幕截图'), () => copyImage(screenShotPNG(), '复制屏幕截图')));
   document.body.appendChild(menu);
+  placeMenu(menu, x, y);
+}
+
+function placeMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
   menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+}
+
+// 子菜单单独挂在 body 上, 避免被主菜单的滚动区域裁剪; 右侧放不下时放到左侧
+function showSubmenu(menu, anchor, items) {
+  if (anchor.disabled || menu.submenu?.anchor === anchor) return;
+  hideSubmenu(menu);
+  const sub = el('div', 'context-menu submenu');
+  sub.append(...items);
+  sub.anchor = anchor;
+  menu.submenu = sub;
+  anchor.classList.add('open');
+  document.body.appendChild(sub);
+  const a = anchor.getBoundingClientRect();
+  const width = sub.getBoundingClientRect().width;
+  const x = a.right + 2 + width <= window.innerWidth - 8 ? a.right + 2 : a.left - width - 2;
+  placeMenu(sub, x, a.top - 4);
+}
+
+function hideSubmenu(menu) {
+  if (!menu.submenu) return;
+  menu.submenu.anchor.classList.remove('open');
+  menu.submenu.remove();
+  menu.submenu = null;
 }
 
 // 适应窗口: 缩放与平移归位, 3D 下同时恢复默认旋转角度
@@ -289,6 +330,7 @@ function hideMenu() {
   if (!menu) return;
   // 退出动画期间可能已打开新的菜单, 先去掉 id 避免冲突
   menu.removeAttribute('id');
+  hideSubmenu(menu);
   hideLayer(menu, 120, () => menu.remove());
 }
 
@@ -2092,8 +2134,11 @@ function setupLiveEvents() {
   };
   canvas.addEventListener('pointerup', endTouch);
   canvas.addEventListener('pointercancel', endTouch);
-  // 实时画面不弹右键菜单: 元素信息在层级树右键复制, 屏幕截图在工具栏
-  wrap.addEventListener('contextmenu', (e) => e.preventDefault());
+  // 实时画面的右键菜单只有屏幕截图, 元素信息在层级树右键复制
+  wrap.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, null, true, true);
+  });
   // 与 2D 一致: 捏合 / ⌘ + 滚轮缩放, 双指滑动平移; App 内滚动用鼠标拖动.
   // 不注入滚轮事件: 在 iOS 26 模拟器上会导致 backboardd 崩溃
   wrap.addEventListener('wheel', (e) => {
@@ -2145,7 +2190,6 @@ function setupLiveEvents() {
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
   $('menuHeal').addEventListener('click', () => openPanel('heal'));
-  $('screenShot').addEventListener('click', () => copyImage(screenShotPNG(), '复制屏幕截图'));
   $('xcodeRun').addEventListener('click', xcodeRun);
   $('appBannerRun').addEventListener('click', xcodeRun);
   $('emptyGuide').addEventListener('click', (e) => {
@@ -3016,7 +3060,7 @@ function setup() {
     showMenu(e.clientX, e.clientY, state.nodes.get(row.dataset.key));
   });
   document.addEventListener('pointerdown', (e) => {
-    if (!e.target.closest('#contextMenu')) hideMenu();
+    if (!e.target.closest('.context-menu')) hideMenu();
     if (!e.target.closest('.popover-anchor')) hidePopovers();
   });
   document.addEventListener('scroll', hideMenu, true);

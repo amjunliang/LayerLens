@@ -22,6 +22,7 @@ const EN = {
   // 工具栏与菜单
   '未连接': 'Not connected',
   '实时': 'Live',
+  '实时画面': 'Live screen',
   '在 Xcode 中运行': 'Run in Xcode',
   '刷新 (R)': 'Refresh (R)',
   '刷新': 'Refresh',
@@ -123,6 +124,7 @@ const EN = {
   '复制失败: {0}': 'Copy failed: {0}',
   '复制元素截图': 'Copy element screenshot',
   '复制屏幕截图': 'Copy screen screenshot',
+  '更多复制': 'More copy options',
   '已复制元素截图': 'Copied element screenshot',
   '已复制屏幕截图': 'Copied screen screenshot',
   '当前环境不支持复制图片': 'Copying images is not supported here',
