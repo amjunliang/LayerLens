@@ -41,11 +41,34 @@ final class XcodeController {
 
     private static let xcodeBundleId = "com.apple.dt.Xcode"
 
-    /// - Parameter sourceFile: App 编译时的源文件路径, 用于找到对应的工作区
-    func run(sourceFile: String) -> Result<Void, Failure> {
+    /// - Parameters:
+    ///   - sourceFile: App 编译时的源文件路径, 用于找到对应的工作区
+    ///   - deviceId: 页面上正在查看的设备 UDID, 运行前把 Xcode 的运行目标切到它; 为空时不切换
+    /// - Returns: 是否切换到了该设备; 找不到对应的运行目标(如 Scheme 不支持该设备)时沿用 Xcode 当前的运行目标
+    func run(sourceFile: String, deviceId: String) -> Result<Bool, Failure> {
         // 由用户点击触发, 需要时弹出系统授权窗口并等待选择
         checkPermission(ask: true).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
-            execute("run (first workspace document whose path is \(quoted(path)))\nreturn \"\"", xcode: xcode).map { _ in () }
+            // 运行目标的 device identifier 即模拟器 / 真机的 UDID; Apple 芯片上同一模拟器还有 Rosetta(x86_64) 目标, 优先选原生架构.
+            // Xcode 26 读取 active run destination 会返回 missing value, 但设置有效, 所以不回读确认
+            let script = """
+            set doc to first workspace document whose path is \(quoted(path))
+            set picked to missing value
+            if \(quoted(deviceId)) is not "" then
+                repeat with destination in (run destinations of doc)
+                    try
+                        if (device identifier of (device of destination)) is \(quoted(deviceId)) then
+                            if picked is missing value or (architecture of destination) is not "x86_64" then set picked to contents of destination
+                            if (architecture of destination) is not "x86_64" then exit repeat
+                        end if
+                    end try
+                end repeat
+            end if
+            if picked is not missing value then set active run destination of doc to picked
+            run doc
+            if picked is missing value then return "unchanged"
+            return "switched"
+            """
+            return execute(script, xcode: xcode).map { $0 == "switched" }
         }
     }
 

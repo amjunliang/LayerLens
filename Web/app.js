@@ -1973,7 +1973,7 @@ const xcode = { running: false, timer: null };
 async function callXcode(command) {
   const app = encodeURIComponent(targets.bundleId);
   const res = command === 'run'
-    ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: targets.bundleId }) })
+    ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: targets.bundleId, device: targets.deviceId || '' }) })
     : await fetch(`/api/hub/run-status?app=${app}`, { cache: 'no-store' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -2020,7 +2020,9 @@ async function xcodeRun() {
     // 首次运行会弹出系统授权窗口, 请求会等待用户选择
     const hint = setTimeout(() => toast(t('请在系统弹窗中允许 LayerLens 控制 Xcode')), 1500);
     try {
-      await callXcode('run');
+      const { switched } = await callXcode('run');
+      // Xcode 会先切到正在查看的设备; 没有对应的运行目标时沿用 Xcode 当前选择, App 可能运行在别的设备上
+      if (!switched && targets.deviceId) toast(t('Xcode 中没有当前设备的运行目标, 将运行到 Xcode 当前选择的设备'));
     } finally {
       clearTimeout(hint);
     }

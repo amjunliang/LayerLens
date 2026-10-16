@@ -87,11 +87,11 @@ open build/Build/Products/Release/LayerLens.app
 
 ## 运行按钮
 
-点击工具栏的运行按钮, Xcode 按当前 Scheme 和运行目标重新编译运行, 与点击 Xcode 的运行按钮相同. 编译失败时错误直接显示在页面上; App 重启后页面自动重连.
+点击工具栏的运行按钮, Xcode 按当前 Scheme 在正在查看的设备上重新编译运行, 与点击 Xcode 的运行按钮相同. 编译失败时错误直接显示在页面上; App 重启后页面自动重连.
 
 - LayerLens 根据 App 编译时的源文件路径找到对应的 Xcode 工作区, 同时打开多个项目或多个 Xcode 时也能区分.
 - 第一次运行时 macOS 会询问是否允许 LayerLens 控制 Xcode. 如果之前拒绝了, 在 系统设置 › 隐私与安全性 › 自动化 中打开.
-- 运行目标以 Xcode 中选择的为准, 如果不是当前查看的设备, 页面上的 App 不会重启.
+- 运行前会把 Xcode 的运行目标切到正在查看的设备. Xcode 中没有该设备的运行目标时 (如 Scheme 不支持), 沿用 Xcode 当前的运行目标, 页面会给出提示.
 
 ## 真机
 

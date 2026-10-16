@@ -87,11 +87,11 @@ Pick an app on a simulator and switch to Live. The Mac app captures the simulato
 
 ## Run button
 
-The Run button in the toolbar has Xcode build and run with the current scheme and run destination, just like Xcode's own Run button. Build errors are shown on the page, and the page reconnects when the app restarts.
+The Run button in the toolbar has Xcode build and run with the current scheme on the device you're viewing, just like Xcode's own Run button. Build errors are shown on the page, and the page reconnects when the app restarts.
 
 - LayerLens finds the right Xcode workspace from the app's source paths, even with several projects or several Xcode versions open.
 - The first run asks for permission to control Xcode. If you declined, enable it in System Settings › Privacy & Security › Automation.
-- Xcode's selected run destination is used. If it's a different device, the app on the page won't restart.
+- Before running, Xcode's run destination is switched to the device you're viewing. If Xcode has no destination for it (for example the scheme doesn't support it), Xcode's current destination is used and the page tells you.
 
 ## Physical devices
 

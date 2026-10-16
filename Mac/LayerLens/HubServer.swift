@@ -178,9 +178,9 @@ final class HubServer {
         case "/api/hub/run":
             let sourceFile = registry.sourceFile(bundleId: json["app"] as? String ?? "")
             workQueue.async { [self] in
-                switch xcode.run(sourceFile: sourceFile) {
-                case .success:
-                    connection.respond(.json(["ok": true]))
+                switch xcode.run(sourceFile: sourceFile, deviceId: json["device"] as? String ?? "") {
+                case .success(let switched):
+                    connection.respond(.json(["ok": true, "switched": switched]))
                 case .failure(let failure):
                     connection.respond(.json(["error": failure.code.rawValue, "message": failure.message], status: 400))
                 }

@@ -165,6 +165,7 @@ const EN = {
   '端口 {0}': 'Port {0}',
   '无法连接 LayerLens: {0}': 'Cannot reach LayerLens: {0}',
   '无法连接 LayerLens': 'Cannot reach LayerLens',
+  'Xcode 中没有当前设备的运行目标, 将运行到 Xcode 当前选择的设备': 'Xcode has no run destination for this device, running on the destination selected in Xcode',
   '需要允许 LayerLens 控制 Xcode': 'LayerLens needs permission to control Xcode',
   '请在系统弹窗中允许 LayerLens 控制 Xcode': 'Allow LayerLens to control Xcode in the system dialog',
   '正在连接实时画面…': 'Connecting live view…',
