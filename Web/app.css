@@ -632,8 +632,9 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .guide-content { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
 .guide-title { color: #fff; font-size: 13px; font-weight: 600; line-height: 22px; }
 .guide-text { font-size: 12px; line-height: 1.6; }
-.guide-code { display: flex; gap: 8px; align-items: center; min-width: 0; }
-.guide-code code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 4px 8px; background: rgba(255, 255, 255, 0.08); font: 12px/1.6 var(--mono); color: #fff; }
+.guide-code { min-width: 0; padding: 6px 6px 6px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); }
+.guide-code .live-copy { float: right; margin: -1px 0 2px 8px; padding: 1px 8px; font-size: 11px; line-height: 18px; }
+.guide-code code { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); color: #fff; user-select: all; }
 .empty-action { margin-top: 4px; background: var(--accent); color: #fff; font-weight: 600; border: none; }
 .empty-action:hover { filter: brightness(1.08); }
 /* 有主要操作时集成说明降为次要按钮 */
