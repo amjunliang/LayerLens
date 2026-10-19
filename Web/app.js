@@ -43,6 +43,7 @@ const state = {
   nodes: new Map(),
   selected: null,
   hover: null,
+  // 展开的节点(oid): 选中节点的祖先 + 手动展开的, 不做持久化
   expanded: new Set(),
   mode: '2d',
   showLayers: false,
@@ -448,7 +449,6 @@ function saveViewState() {
     windowAddress: win ? win.address : null,
     selected: state.selected,
     selectedAddress: node ? node.address : null,
-    expanded: [...state.expanded],
   };
   PERSIST_FIELDS.forEach((field) => (data[field] = state[field]));
   try {
@@ -479,16 +479,20 @@ function loadViewState() {
   $('detailTabs').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === state.tab));
 }
 
-// App 重启后 oid 会重新分配, 用内存地址校验后才恢复选中与展开状态
+// App 重启后 oid 会重新分配, 用内存地址校验后才恢复选中
 function restoreNodeState() {
   const data = pendingRestore;
   pendingRestore = null;
   const win = keyWindow();
-  if (!data || !win || data.windowAddress !== win.address) return false;
-  (data.expanded || []).forEach((key) => state.expanded.add(key));
+  if (!data || !win || data.windowAddress !== win.address) return;
   const node = state.nodes.get(data.selected);
   if (node && node.address === data.selectedAddress) state.selected = node.key;
-  return true;
+}
+
+// 展开选中节点的所有祖先, 保证选中行可见
+function expandToSelected() {
+  const node = state.nodes.get(state.selected);
+  for (let p = node?.parent; p; p = p.parent) state.expanded.add(p.key);
 }
 
 // MARK: - Hierarchy
@@ -520,6 +524,7 @@ function applyHierarchy(roots) {
     const win = keyWindow();
     if (win) state.selected = win.key;
   }
+  expandToSelected();
   renderTree();
   renderCanvas();
   loadDetail();
@@ -562,11 +567,7 @@ function prepare(roots) {
     node.children.forEach((child) => walk(child, node, depth + 1, node.win));
   };
   roots.forEach((root) => walk(root, null, 0, null));
-  if (isFirst && !restoreNodeState()) {
-    state.nodes.forEach((node) => {
-      if (node.depth < 3) state.expanded.add(node.key);
-    });
-  }
+  if (isFirst) restoreNodeState();
 }
 
 function keyWindow() {
@@ -762,7 +763,7 @@ function select(key, fromTree) {
   state.selected = key;
   state.classTarget = null;
   if (!fromTree) {
-    for (let p = state.nodes.get(key).parent; p; p = p.parent) state.expanded.add(p.key);
+    expandToSelected();
   }
   renderTree();
   if (previousWindow !== currentWindow() || (state.mode === '3d' && state.subtreeOnly)) {
@@ -1968,8 +1969,10 @@ async function reconnected() {
     appState.dropped = false;
     appState.instanceId = currentApp()?.instanceId || '';
     appState.warning = compatibilityWarning(currentApp());
-    // 原来靠整页重新加载复位, 这里手动结束运行跟踪
+    // 原来靠整页重新加载复位, 这里手动结束运行跟踪; oid 已重新分配, 旧的选中和展开作废
     setRunning(false);
+    state.selected = null;
+    state.expanded.clear();
     setAppState('online');
     if (toLive) toast(t('App 已重启, 已切换到实时画面'));
     loadAppInfo();
