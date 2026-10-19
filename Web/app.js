@@ -363,7 +363,9 @@ function shotURL(oid, type) {
 }
 
 // 截图并发控制与缓存: App 端截图在主线程串行执行, 并发过高只会排队超时
-const images = { running: 0, pending: [], max: 4, loaded: new Map() };
+// gen: 刷新层级时递增, 作废旧请求并重置并发计数; 请求挂起(如 App 挂起期间)时超时释放, 避免占满并发后不再加载
+const images = { running: 0, pending: [], max: 4, loaded: new Map(), gen: 0, active: new Set() };
+const IMAGE_TIMEOUT_MS = 15000;
 function loadImage(url, apply) {
   const cached = images.loaded.get(url);
   if (cached === true) {
@@ -374,21 +376,37 @@ function loadImage(url, apply) {
   images.pending.push({ url, apply, attempts: 0 });
   pumpImages();
 }
+function resetImages() {
+  // 取消进行中的请求, 释放浏览器连接
+  images.active.forEach((img) => (img.src = ''));
+  images.active.clear();
+  images.gen++;
+  images.running = 0;
+  images.pending = [];
+  images.loaded.clear();
+}
 function pumpImages() {
   while (images.running < images.max && images.pending.length) {
     const job = images.pending.shift();
+    const gen = images.gen;
     images.running++;
     const img = new Image();
-    img.onload = () => {
+    images.active.add(img);
+    let timer = 0;
+    const finish = (ok) => {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = 0;
+      img.onload = img.onerror = null;
+      images.active.delete(img);
+      // 已被刷新作废: 计数已重置, 不再处理
+      if (gen !== images.gen) return;
       images.running--;
-      images.loaded.set(job.url, true);
-      job.apply(job.url);
-      pumpImages();
-    };
-    img.onerror = () => {
-      images.running--;
-      // 失败重试一次, 仍失败则视为该节点没有截图
-      if (job.attempts < 1) {
+      if (ok) {
+        images.loaded.set(job.url, true);
+        job.apply(job.url);
+      } else if (job.attempts < 1) {
+        // 失败重试一次, 仍失败则视为该节点没有截图
         job.attempts++;
         images.pending.push(job);
       } else {
@@ -396,6 +414,12 @@ function pumpImages() {
       }
       pumpImages();
     };
+    timer = setTimeout(() => {
+      img.src = '';
+      finish(false);
+    }, IMAGE_TIMEOUT_MS);
+    img.onload = () => finish(true);
+    img.onerror = () => finish(false);
     img.src = job.url;
   }
 }
@@ -489,8 +513,7 @@ function showRefreshError(e) {
 
 function applyHierarchy(roots) {
   state.stamp = Date.now();
-  images.pending = [];
-  images.loaded.clear();
+  resetImages();
   prepare(roots);
   if (state.selected && !state.nodes.has(state.selected)) state.selected = null;
   if (!state.selected) {
