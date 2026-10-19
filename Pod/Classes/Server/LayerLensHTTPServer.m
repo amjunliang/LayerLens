@@ -22,7 +22,14 @@
 //已停止: 阻止停止后的 ready 回调和换端口重试
 @property (nonatomic, assign) BOOL stopped;
 @property (nonatomic, strong) NSMutableArray<nw_connection_t> *connections;
+//保持打开的事件流连接, 用于推送事件
+@property (nonatomic, strong) NSMutableArray<nw_connection_t> *eventConnections;
 @property (nonatomic, assign, readwrite) uint16_t port;
+//最近一次启动的参数, 监听失效后按原参数重新监听
+@property (nonatomic, assign) BOOL loopbackOnly;
+@property (nonatomic, assign) uint16_t startPort;
+@property (nonatomic, assign) NSInteger attempts;
+@property (nonatomic, copy, nullable) void (^startCompletion)(uint16_t, NSError *);
 
 @end
 
@@ -33,6 +40,7 @@
         _router = router;
         _queue = dispatch_queue_create("com.layerlens.server", DISPATCH_QUEUE_SERIAL);
         _connections = [NSMutableArray array];
+        _eventConnections = [NSMutableArray array];
     }
     return self;
 }
@@ -46,6 +54,10 @@
 - (void)startWithLoopbackOnly:(BOOL)loopbackOnly startPort:(uint16_t)startPort attempts:(NSInteger)attempts completion:(void (^)(uint16_t, NSError *))completion {
     dispatch_async(self.queue, ^{
         self.stopped = NO;
+        self.loopbackOnly = loopbackOnly;
+        self.startPort = startPort;
+        self.attempts = attempts;
+        self.startCompletion = completion;
         [self tryListenWithLoopbackOnly:loopbackOnly port:startPort remaining:attempts completion:completion];
     });
 }
@@ -89,6 +101,19 @@
     nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
         __strong typeof(weakSelf) self = weakSelf;
         if (finished) {
+            // 就绪后失效(如挂起期间被系统回收): 丢弃监听器并重新监听, 已有连接不受影响.
+            // 该回调可能晚于回到前台的通知, 所以这里也要重新监听; 延迟一下, 避免连续失效时空转
+            if ((state == nw_listener_state_failed || state == nw_listener_state_cancelled) && self.listener == listener) {
+                NSLog(@"[LayerLens] Listener invalidated: %@", error ? @(nw_error_get_error_code(error)) : @"cancelled");
+                self.listener = nil;
+                self.port = 0;
+                if (state == nw_listener_state_failed) {
+                    nw_listener_cancel(listener);
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC)), self.queue, ^{
+                    [weakSelf resumeIfNeeded];
+                });
+            }
             return;
         }
         //服务已释放或已停止: 取消这个监听器, 不再占用端口
@@ -121,6 +146,15 @@
     nw_listener_start(listener);
 }
 
+- (void)resumeIfNeeded {
+    dispatch_async(self.queue, ^{
+        if (self.stopped || self.listener || self.pendingListener || self.attempts <= 0) {
+            return;
+        }
+        [self tryListenWithLoopbackOnly:self.loopbackOnly port:self.startPort remaining:self.attempts completion:self.startCompletion];
+    });
+}
+
 - (void)stop {
     dispatch_async(self.queue, ^{
         self.stopped = YES;
@@ -136,6 +170,7 @@
             nw_connection_cancel(connection);
         }
         [self.connections removeAllObjects];
+        [self.eventConnections removeAllObjects];
         self.port = 0;
     });
 }
@@ -149,6 +184,7 @@
     nw_connection_set_state_changed_handler(connection, ^(nw_connection_state_t state, nw_error_t error) {
         if (state == nw_connection_state_cancelled || state == nw_connection_state_failed) {
             [weakSelf.connections removeObject:connection];
+            [weakSelf.eventConnections removeObject:connection];
         }
     });
     nw_connection_start(connection);
@@ -205,11 +241,26 @@
                 nw_connection_cancel(connection);
             }
         });
+        [self.eventConnections addObject:connection];
         [self waitCloseOnConnection:connection];
         return;
     }
     nw_connection_send(connection, content, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t error) {
         nw_connection_cancel(connection);
+    });
+}
+
+- (void)broadcastEvent:(NSString *)name object:(id)object {
+    NSData *data = [LayerLensHTTPResponse eventDataWithName:name object:object];
+    dispatch_async(self.queue, ^{
+        for (nw_connection_t connection in [self.eventConnections copy]) {
+            dispatch_data_t content = dispatch_data_create(data.bytes, data.length, self.queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+            nw_connection_send(connection, content, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, false, ^(nw_error_t error) {
+                if (error) {
+                    nw_connection_cancel(connection);
+                }
+            });
+        }
     });
 }
 

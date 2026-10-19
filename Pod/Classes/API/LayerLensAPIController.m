@@ -12,6 +12,7 @@
 #import "LayerLensHTTPResponse.h"
 #import "LayerLensLookinBridge.h"
 #import "LayerLensRuntimeReader.h"
+#import <UIKit/UIKit.h>
 
 @implementation LayerLensAPIController
 
@@ -23,7 +24,11 @@
     }];
 
     [router addRoute:@"GET" path:@"/api/events" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
-        responder([LayerLensHTTPResponse eventStreamResponseWithRetry:2000]);
+        // 连上时带上当前前后台状态, 之后的变化由 LayerLens 推送
+        [self onMain:^{
+            BOOL foreground = UIApplication.sharedApplication.applicationState != UIApplicationStateBackground;
+            responder([LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"state" object:@{@"foreground": @(foreground)}]);
+        }];
     }];
 
     [router addRoute:@"GET" path:@"/api/app" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {

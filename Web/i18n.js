@@ -165,6 +165,8 @@ const EN = {
   '端口 {0}': 'Port {0}',
   '无法连接 LayerLens: {0}': 'Cannot reach LayerLens: {0}',
   '无法连接 LayerLens': 'Cannot reach LayerLens',
+  '在后台': 'In background',
+  'App 在后台, 回到前台后自动连接': 'App is in the background, will reconnect when it returns to the foreground',
   'Xcode 中没有当前设备的运行目标, 将运行到 Xcode 当前选择的设备': 'Xcode has no run destination for this device, running on the destination selected in Xcode',
   '需要允许 LayerLens 控制 Xcode': 'LayerLens needs permission to control Xcode',
   '请在系统弹窗中允许 LayerLens 控制 Xcode': 'Allow LayerLens to control Xcode in the system dialog',
@@ -173,6 +175,7 @@ const EN = {
   '请确认已安装 Xcode, 并用 xcode-select 选中它': 'Make sure Xcode is installed and selected with xcode-select',
   '可用': 'Available',
   '向左旋转': 'Rotate Left',
+  '多任务': 'App Switcher',
   '不可用': 'Unavailable',
   '模拟器画面采集与输入注入的实现参考': 'Reference for simulator capture and input injection',
   // 面板与状态提示

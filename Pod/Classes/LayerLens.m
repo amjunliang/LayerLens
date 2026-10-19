@@ -62,16 +62,26 @@ static const NSInteger kLayerLensPortAttempts = 10;
 
 - (void)start {
 #if DEBUG
-    // 挂起期间系统会回收监听端口, 回到前台时重新监听
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(restart) name:UIApplicationWillEnterForegroundNotification object:nil];
+    // 挂起期间系统可能回收监听端口, 回到前台时检查并按需重新监听; 不重启服务, 以免断开网页的事件流
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(willEnterForeground) name:UIApplicationWillEnterForegroundNotification object:nil];
+    // 进入后台后很快被挂起, 事件流不会断开, 主动告知网页 App 不在前台
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(didEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(didBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [self startServer];
 #endif
 }
 
 #if DEBUG
-- (void)restart {
-    [self.server stop];
-    [self startServer];
+- (void)willEnterForeground {
+    [self.server resumeIfNeeded];
+}
+
+- (void)didEnterBackground {
+    [self.server broadcastEvent:@"state" object:@{@"foreground": @NO}];
+}
+
+- (void)didBecomeActive {
+    [self.server broadcastEvent:@"state" object:@{@"foreground": @YES}];
 }
 
 - (void)startServer {

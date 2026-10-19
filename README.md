@@ -79,8 +79,9 @@ The app is ad-hoc signed by default, so macOS may ask for the Automation permiss
 
 Pick an app on a simulator and switch to Live. The Mac app captures the simulator screen itself, encodes it as H.264 for the page, and forwards touches, keys and paste to the simulator. Nothing else needs to be installed.
 
-- Drag to scroll and swipe in the app; ⌥-click to select a view and switch to 2D.
-- The toolbar has Home, Rotate and Copy Screenshot.
+- Drag to scroll and swipe in the app; ⌥-click to select a view and switch to 2D. Selecting needs the integrated app connected and in the foreground; otherwise ⌥-click is a normal tap, so Live also works as a plain simulator.
+- The toolbar has Home, App Switcher, Rotate and Copy Screenshot.
+- When the app goes to the background the status dot turns orange; the page keeps the connection and picks up again when it returns.
 - Windows watching the same simulator share one capture and encoder.
 
 **Taps and drags do nothing**: after a reboot, a simulator sometimes stops accepting injected touches. The page offers a fix when repeated drags don't change the screen, or choose Fix Simulator Touch… in the View options menu. This restarts backboardd and SpringBoard in the simulator, quitting the foreground app; it is back in about 10 seconds.

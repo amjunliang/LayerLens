@@ -476,23 +476,31 @@ async function refresh() {
   try {
     const roots = await api('/api/hierarchy');
     if (seq !== refreshSeq) return;
-    state.stamp = Date.now();
-    images.pending = [];
-    images.loaded.clear();
-    prepare(roots);
-    if (state.selected && !state.nodes.has(state.selected)) state.selected = null;
-    if (!state.selected) {
-      const win = keyWindow();
-      if (win) state.selected = win.key;
-    }
-    renderTree();
-    renderCanvas();
-    loadDetail();
-    setStatus(true);
+    applyHierarchy(roots);
   } catch (e) {
-    if (appState.value === 'online') setStatus(false, t('连接失败: {0}', e.message));
-    toast(t('获取层级失败: {0}', e.message), true);
+    showRefreshError(e);
   }
+}
+
+function showRefreshError(e) {
+  if (appState.value === 'online') setStatus(false, t('连接失败: {0}', e.message));
+  toast(t('获取层级失败: {0}', e.message), true);
+}
+
+function applyHierarchy(roots) {
+  state.stamp = Date.now();
+  images.pending = [];
+  images.loaded.clear();
+  prepare(roots);
+  if (state.selected && !state.nodes.has(state.selected)) state.selected = null;
+  if (!state.selected) {
+    const win = keyWindow();
+    if (win) state.selected = win.key;
+  }
+  renderTree();
+  renderCanvas();
+  loadDetail();
+  setStatus(true);
 }
 
 // MARK: - Status
@@ -743,9 +751,24 @@ function select(key, fromTree) {
 }
 
 // 离开实时模式时刷新一次层级, 画面期间不同步
+let modeSeq = 0;
+
 async function setMode(mode) {
+  // 每次调用都作废还在取层级的切换, 如取层级期间又点回实时
+  const seq = ++modeSeq;
   if (mode === state.mode) return;
   const fromLive = state.mode === 'live';
+  // 从实时画面切出时层级已过期: 先取到新层级再切换, 只绘制一次, 避免先画旧层级再刷新
+  let roots = null;
+  if (fromLive) {
+    ++refreshSeq;
+    try {
+      roots = await api('/api/hierarchy');
+    } catch (e) {
+      showRefreshError(e);
+    }
+    if (seq !== modeSeq || state.mode !== 'live') return;
+  }
   // 2D 与实时画面共用一套视角, 3D 单独一套; 切换时各自保留上次的缩放和平移
   const kind = (m) => (m === '3d' ? 'depth' : 'plan');
   const fromKind = kind(state.mode);
@@ -772,10 +795,10 @@ async function setMode(mode) {
     return;
   }
   liveStop();
-  renderCanvas();
+  if (roots) applyHierarchy(roots);
+  else renderCanvas();
   if (keepView) applyStageTransform();
   else fitView();
-  if (fromLive) await refresh();
 }
 
 function isNarrow() {
@@ -1758,6 +1781,9 @@ function renderTargetMenu() {
   if (!targets.devices.length) {
     children.push(el('div', 'target-empty', t('没有发现设备')));
   }
+  // 挂起的 App 不响应探测, 会从列表消失; 在后台时沿用最后一次的信息显示
+  const background = appState.value === 'background';
+  if (currentApp()) targets.lastApp = currentApp();
   targets.devices.forEach((device) => {
     // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
     const selectable = device.kind === 'simulator';
@@ -1774,13 +1800,18 @@ function renderTargetMenu() {
       });
     }
     children.push(head);
-    if (!device.apps.length) children.push(el('div', 'target-empty', t('没有运行中的已集成 App')));
-    device.apps.forEach((app) => {
+    const apps = [...device.apps];
+    const last = targets.lastApp;
+    if (background && device.id === targets.deviceId && last?.bundleId === targets.bundleId && !apps.some((a) => a.bundleId === last.bundleId)) apps.push(last);
+    if (!apps.length) children.push(el('div', 'target-empty', t('没有运行中的已集成 App')));
+    apps.forEach((app) => {
       const row = el('button', 'target-app');
-      row.classList.toggle('current', device.id === targets.deviceId && app.bundleId === targets.bundleId);
+      const current = device.id === targets.deviceId && app.bundleId === targets.bundleId;
+      row.classList.toggle('current', current);
+      row.classList.toggle('background', current && background);
       row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
       if (!appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
-      row.append(el('span', 'target-app-meta', app.version || ''));
+      row.append(el('span', 'target-app-meta', current && background ? t('在后台') : app.version || ''));
       row.title = `${app.bundleId} · ${t('端口 {0}', app.port)}`;
       row.addEventListener('click', () => {
         hidePopovers();
@@ -1853,22 +1884,36 @@ function pollTargets() {
 // 通过不关闭的事件流感知 App: 断开即离线, 浏览器自动重连成功即 App 已重新启动
 
 // instanceId: 页面加载时 App 的启动标识, 重连后不变说明 App 没有重启(如 USB 短暂断开)
-const appState = { value: 'online', connected: false, dropped: false, warning: '', instanceId: '' };
+const appState = { value: 'online', connected: false, dropped: false, warning: '', instanceId: '', offlineTimer: 0 };
+const OFFLINE_GRACE_MS = 4000;
 
 function watchApp() {
   const source = new EventSource(targetBase() + '/api/events');
   source.onopen = () => {
     appState.connected = true;
+    clearTimeout(appState.offlineTimer);
+    appState.offlineTimer = 0;
     if (!appState.dropped) {
       setAppState('online');
       return;
     }
     reconnected();
   };
+  // App 进入后台后被挂起, 事件流不断开, 由 App 推送前后台状态; 旧版 Pod 不推送, 视为前台
+  source.addEventListener('state', (e) => {
+    const { foreground } = JSON.parse(e.data || '{}');
+    if (foreground === false && appState.value === 'online') setAppState('background');
+    else if (foreground !== false && appState.value === 'background') setAppState('online');
+  });
   source.onerror = () => {
     appState.connected = false;
     appState.dropped = true;
-    if (appState.value !== 'restarting') setAppState('offline');
+    if (appState.value === 'restarting' || appState.offlineTimer) return;
+    // 回到前台时 App 会重启监听, 事件流短暂断开后约 2s 重连; 宽限一段时间再显示离线, 避免提示条闪现
+    appState.offlineTimer = setTimeout(() => {
+      appState.offlineTimer = 0;
+      if (!appState.connected && appState.value !== 'restarting') setAppState('offline');
+    }, OFFLINE_GRACE_MS);
   };
 }
 
@@ -1911,13 +1956,17 @@ async function reconnected() {
 function setAppState(value, message, link) {
   appState.value = value;
   document.body.classList.toggle('app-restarting', value === 'restarting');
-  document.body.classList.toggle('app-offline', value === 'offline');
+  // 在后台时同样不能选择元素; 实时画面下只用状态点提示, 不挡住画面
+  document.body.classList.toggle('app-offline', value === 'offline' || value === 'background');
+  document.body.classList.toggle('app-background', value === 'background');
+  syncLiveCursor();
   // 版本不兼容时仍可使用, 在线状态下常驻提示
   const shown = value === 'online' && appState.warning ? 'warn' : value;
   const canRun = document.body.classList.contains('has-live') && !!targets.bundleId;
   const texts = {
     restarting: t('正在编译并重启 App, 完成后自动刷新'),
     offline: canRun ? t('App 未运行或在后台') : t('App 未运行或在后台, 启动后会自动连接'),
+    background: t('App 在后台, 回到前台后自动连接'),
     back: t('已连接, 正在刷新…'),
     warn: appState.warning,
   };
@@ -1932,6 +1981,11 @@ function setAppState(value, message, link) {
   else delete $('appBannerLink').dataset.panel;
   $('appBanner').hidden = shown === 'online';
   setStatus(value !== 'offline' && value !== 'restarting', text, false);
+  if (value === 'background') {
+    $('statusDot').className = 'status-dot warn';
+    $('statusDot').title = text;
+  }
+  renderTargetMenu();
 }
 
 // 画布中央的引导, 实时模式下不显示
@@ -2061,7 +2115,13 @@ function setLiveInspect(on) {
 }
 
 function syncLiveCursor() {
-  $('liveWrap').classList.toggle('inspecting', live.inspect || live.altHeld);
+  $('liveWrap').classList.toggle('inspecting', canInspect() && (live.inspect || live.altHeld));
+}
+
+// 选择元素需要连上已集成的 App; 否则实时画面当普通模拟器用, ⌥ + 点击按普通点击处理
+function canInspect() {
+  const body = document.body.classList;
+  return body.contains('has-app') && !body.contains('app-offline');
 }
 
 // 刷新层级后选中该点最上层的视图, 并切到 2D 查看
@@ -2101,7 +2161,7 @@ function setupLiveEvents() {
       // pointerId 无效时忽略
     }
     const point = livePoint(e);
-    if (live.inspect || e.altKey) {
+    if (canInspect() && (live.inspect || e.altKey)) {
       live.touch = { inspect: true, point };
       return;
     }
@@ -2203,6 +2263,8 @@ function setupLiveEvents() {
 
   $('liveInspect').addEventListener('click', () => setLiveInspect(!live.inspect));
   $('liveHome').addEventListener('click', liveHome);
+  // 多任务: 从底部上滑并停顿, 与真机手势一致
+  $('liveSwitcher').addEventListener('click', () => liveSend({ type: 'button', button: 'app-switcher' }));
   $('liveRotate').addEventListener('click', liveRotate);
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);

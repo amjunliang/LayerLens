@@ -259,6 +259,18 @@ final class SimulatorStream {
                 touch.send(phase: .move, x: 0.5, y: 0.995 - 0.05 * Double(step), edge: 0x01)
             }
             touch.send(phase: .up, x: 0.5, y: 0.5, edge: 0x01)
+        case "button" where message["button"] as? String == "app-switcher":
+            // 上滑到屏幕中部时先快后慢(缓出), 末速度接近 0 即被识别为停顿而进入多任务, 不必久停
+            touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
+            let steps = 6
+            for step in 1...steps {
+                usleep(16_000)
+                let progress = Double(step) / Double(steps)
+                let eased = 1 - pow(1 - progress, 3)
+                touch.send(phase: .move, x: 0.5, y: 0.995 - 0.4 * eased, edge: 0x01)
+            }
+            usleep(80_000)
+            touch.send(phase: .up, x: 0.5, y: 0.595, edge: 0x01)
         case "key":
             guard let code = message["code"] as? String else { return }
             SimulatorKeyboard.press(code: code, modifiers: message["modifiers"] as? [String] ?? [], on: touch)

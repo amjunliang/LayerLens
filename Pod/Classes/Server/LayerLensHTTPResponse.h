@@ -26,6 +26,10 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)PNGResponse:(NSData *)data;
 /// 不关闭的事件流, 网页据此即时感知 App 停止; retry 为浏览器断线后的重连间隔(毫秒)
 + (instancetype)eventStreamResponseWithRetry:(NSInteger)retry;
+/// 带首个事件的事件流, 用于连上时同步当前状态
++ (instancetype)eventStreamResponseWithRetry:(NSInteger)retry event:(NSString *)name object:(id)object;
+/// 单个事件的报文: event: name, data: object 的 JSON
++ (NSData *)eventDataWithName:(NSString *)name object:(id)object;
 
 - (NSData *)serializedData;
 

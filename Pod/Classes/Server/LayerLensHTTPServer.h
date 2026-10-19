@@ -25,6 +25,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)stop;
 
+/// 监听已失效(如挂起期间被系统回收)时按原参数重新监听, 正常时不做任何处理, 已有连接保持不变
+- (void)resumeIfNeeded;
+
+/// 向所有打开的事件流推送一个事件
+- (void)broadcastEvent:(NSString *)name object:(id)object;
+
 @end
 
 NS_ASSUME_NONNULL_END

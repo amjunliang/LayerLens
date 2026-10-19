@@ -47,6 +47,22 @@
     return response;
 }
 
++ (instancetype)eventStreamResponseWithRetry:(NSInteger)retry event:(NSString *)name object:(id)object {
+    LayerLensHTTPResponse *response = [self eventStreamResponseWithRetry:retry];
+    NSMutableData *data = [response.body mutableCopy];
+    [data appendData:[self eventDataWithName:name object:object]];
+    response.body = data;
+    return response;
+}
+
++ (NSData *)eventDataWithName:(NSString *)name object:(id)object {
+    NSData *json = [NSJSONSerialization dataWithJSONObject:object ?: @{} options:0 error:nil] ?: [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *data = [[[NSString stringWithFormat:@"event: %@\ndata: ", name] dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    [data appendData:json];
+    [data appendData:[@"\n\n" dataUsingEncoding:NSUTF8StringEncoding]];
+    return data;
+}
+
 - (NSData *)serializedData {
     NSDictionary<NSNumber *, NSString *> *reasons = @{
         @200: @"OK", @302: @"Found", @400: @"Bad Request", @401: @"Unauthorized",

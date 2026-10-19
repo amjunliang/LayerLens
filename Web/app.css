@@ -182,6 +182,7 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status-dot.ok { background: var(--success); }
 .status-dot.error { background: var(--danger); }
+.status-dot.warn { background: var(--warning, #e6a23c); }
 .app-name { font-weight: 600; font-size: 14px; }
 /* 设备 / App 切换 */
 .target-btn { display: inline-flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 6px; margin-left: -6px; border: none; background: none; border-radius: var(--r-control); color: var(--text); }
@@ -203,6 +204,7 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 .target-app:hover { background: var(--hover); }
 .target-app.current { background: var(--selected, var(--hover)); }
 .target-app .status-dot { background: var(--success); }
+.target-app.background .status-dot { background: var(--warning, #e6a23c); }
 .target-app-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .target-app-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .target-badge { padding: 0 5px; border-radius: 3px; background: var(--danger); color: #fff; font-size: 11px; line-height: 16px; }
@@ -604,7 +606,10 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 /* App 状态提示条优先, 显示时隐藏触摸修复提示 */
 /* 没有已集成 App 时实时画面可当普通模拟器用, 不显示 App 状态提示 (左上角状态点仍在), 修复触摸的提示照常显示 */
 body.mode-live:not(.has-app) #appBanner { display: none; }
-body:is(.has-app, :not(.mode-live)) #appBanner:not([hidden]) ~ #liveHeal { display: none; }
+body:not(.has-app) #liveInspect, body.app-offline #liveInspect { display: none; }
+/* App 在后台时实时画面仍可操作, 只用工具栏状态点(橙色)提示 */
+body.mode-live.app-background #appBanner { display: none; }
+body:is(.has-app, :not(.mode-live)):not(.mode-live.app-background) #appBanner:not([hidden]) ~ #liveHeal { display: none; }
 .app-banner-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-banner-text::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--accent); vertical-align: 1px; }
 /* 绿色已连接, 红色离线; 重启中圆点换成转圈 */
