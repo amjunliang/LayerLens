@@ -663,7 +663,8 @@ function visibleRowKeys() {
   return [...$('tree').querySelectorAll('.row')].map((row) => row.dataset.key);
 }
 
-function handleTreeKey(key) {
+// ← 直接选中父节点, 不收起(在画布上按时收起树看不到变化, 像是按了没反应); ⌥ + ← 收起
+function handleTreeKey(key, alt = false) {
   const node = state.nodes.get(state.selected);
   if (!node) return false;
   const rows = visibleRowKeys();
@@ -681,14 +682,18 @@ function handleTreeKey(key) {
       select(rows[index + 1], true);
     }
   } else if (key === 'ArrowLeft') {
-    if (hasChildren && expanded && !state.query.trim()) {
-      state.expanded.delete(node.key);
-      renderTree();
-    } else {
-      // 选中树中可见的父节点(跳过被隐藏的 CALayer 等)
-      let p = node.parent;
-      while (p && !rows.includes(p.key)) p = p.parent;
-      if (p) select(p.key, true);
+    // 选中树中可见的父节点(跳过被隐藏的 CALayer 等)
+    let p = node.parent;
+    while (p && !rows.includes(p.key)) p = p.parent;
+    if (alt && !state.query.trim()) {
+      // 收起当前节点; 没有可收起的则收起父节点并选中它
+      const target = hasChildren && expanded ? node : p;
+      if (!target) return true;
+      state.expanded.delete(target.key);
+      if (target === node) renderTree();
+      else select(target.key, true);
+    } else if (p) {
+      select(p.key, true);
     }
   } else {
     return false;
@@ -3000,7 +3005,8 @@ const SHORTCUT_GROUPS = [
   ]],
   ['层级树', false, [
     [['↑', '↓'], '上一个 / 下一个节点'],
-    [['←'], '收起, 再按选中父节点'],
+    [['←'], '选中父节点'],
+    [['⌥', '←'], '收起'],
     [['→'], '展开, 再按进入子节点'],
   ]],
   ['画布', false, [
@@ -3250,7 +3256,7 @@ function setup() {
       return;
     }
     if (e.key === 'r' && !e.metaKey && !e.ctrlKey) refresh();
-    if (!e.metaKey && !e.ctrlKey && !e.altKey && handleTreeKey(e.key)) e.preventDefault();
+    if (!e.metaKey && !e.ctrlKey && (!e.altKey || e.key === 'ArrowLeft') && handleTreeKey(e.key, e.altKey)) e.preventDefault();
     // 未选中页面文本时, ⌘C 复制选中节点路径
     if (e.key === 'c' && (e.metaKey || e.ctrlKey) && !window.getSelection().toString()) {
       const node = state.nodes.get(state.selected);
