@@ -38,6 +38,7 @@
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
     <symbol id="i-inspect" viewBox="0 0 24 24"><path d="M10 3H5a2 2 0 0 0-2 2v5M3 14v5a2 2 0 0 0 2 2h5M14 3h5a2 2 0 0 1 2 2v5"/><path d="M12 12l9 3.2-4 1.3-1.3 4z"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-picker" viewBox="0 0 24 24"><path d="M2 22l1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="M15 6l3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4z"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   </defs>
 </svg>
@@ -127,6 +128,7 @@
       </div>
       <div class="float-group">
         <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
+        <button class="icon-btn flat-only toggle" id="colorPick" title="取色 (C)" aria-label="取色" aria-pressed="false"><svg class="icon"><use href="#i-picker"/></svg></button>
         <button class="icon-btn three-only toggle" id="subtreeOnly" title="只看选中子树" aria-label="只看选中子树" aria-pressed="false"><svg class="icon"><use href="#i-focus"/></svg></button>
       </div>
       <div class="float-group three-only">
@@ -145,6 +147,10 @@
       <div class="stage" id="stage"></div>
     </div>
     <div class="hover-tip" id="hoverTip" hidden></div>
+    <div class="loupe" id="loupe" hidden>
+      <canvas class="loupe-canvas" id="loupeCanvas"></canvas>
+      <div class="loupe-info"><span class="loupe-swatch" id="loupeSwatch"></span><span class="loupe-hex" id="loupeHex"></span><span class="loupe-rgb" id="loupeRgb"></span></div>
+    </div>
     <div class="app-banner" id="appBanner" hidden>
       <span class="app-banner-text" id="appBannerText"></span>
       <button class="app-banner-link" id="appBannerLink" hidden></button>

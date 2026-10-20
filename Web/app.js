@@ -896,6 +896,7 @@ function syncModeUI() {
   document.body.classList.toggle('mode-3d', state.mode === '3d');
   document.body.classList.toggle('mode-live', state.mode === 'live');
   $('liveWrap').hidden = state.mode !== 'live';
+  if (picker.on && !pickerAvailable()) setColorPicker(false);
   $('modeSeg').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
 }
 
@@ -2180,6 +2181,7 @@ async function xcodeRun() {
 
 function setLiveInspect(on) {
   live.inspect = on;
+  if (on && picker.on) setColorPicker(false);
   $('liveInspect').classList.toggle('on', on);
   $('liveInspect').setAttribute('aria-pressed', String(on));
   syncLiveCursor();
@@ -2347,6 +2349,168 @@ function setupLiveEvents() {
     if (value) copyText(value, '复制');
   });
   new ResizeObserver(layoutLive).observe(wrap);
+}
+
+// MARK: - Color picker
+
+// 取色: 2D 取窗口截图的像素, 与 App 渲染一致; 实时取画面像素, 视频编码可能有轻微色差. 3D 有透视和叠层, 不提供
+const LOUPE_CELLS = 11;
+// 放大镜尺寸固定, 与样式中的宽高一致, 每格 15px
+const LOUPE_SIZE = 165;
+const picker = { on: false, source: null, sourceURL: '', color: null, swallow: false };
+
+function pickerAvailable() {
+  return state.mode === '2d' || state.mode === 'live';
+}
+
+function setColorPicker(on) {
+  picker.on = on && pickerAvailable();
+  $('colorPick').classList.toggle('on', picker.on);
+  $('colorPick').setAttribute('aria-pressed', String(picker.on));
+  document.body.classList.toggle('picking', picker.on);
+  if (!picker.on) {
+    hideLoupe();
+    return;
+  }
+  if (live.inspect) setLiveInspect(false);
+  hideHoverTip();
+  if (state.hover) {
+    state.hover = null;
+    updateHighlights();
+  }
+}
+
+// 指针处的像素位置(设备像素)和可读取的画面, 不在画面内时为 null
+function pickerPixel(e) {
+  if (state.mode === 'live') {
+    const canvas = $('liveCanvas');
+    const [sw] = live.screen;
+    if (!canvas.width || !sw) return null;
+    const point = livePoint(e);
+    if (!point.inside) return null;
+    const scale = canvas.width / sw;
+    return { ctx: canvas.getContext('2d'), x: Math.floor(point.x * scale), y: Math.floor(point.y * scale) };
+  }
+  const win = currentWindow();
+  const img = $('stage').querySelector('img.shot');
+  if (!win || !img || !img.complete || !img.naturalWidth) return null;
+  const [x, y] = stagePoint(e);
+  if (x < 0 || y < 0 || x >= win.rect[2] || y >= win.rect[3]) return null;
+  // 截图变化(刷新层级)时才重新绘制到离屏画布
+  if (picker.sourceURL !== img.src) {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    picker.source = canvas.getContext('2d', { willReadFrequently: true });
+    picker.source.drawImage(img, 0, 0);
+    picker.sourceURL = img.src;
+  }
+  const scale = img.naturalWidth / win.rect[2];
+  return { ctx: picker.source, x: Math.floor(x * scale), y: Math.floor(y * scale) };
+}
+
+function colorHex(color) {
+  return toHex([color.r / 255, color.g / 255, color.b / 255]).toUpperCase();
+}
+
+function updateLoupe(e) {
+  const pixel = pickerPixel(e);
+  if (!pixel) {
+    hideLoupe();
+    return;
+  }
+  const half = LOUPE_CELLS >> 1;
+  let data;
+  try {
+    data = pixel.ctx.getImageData(pixel.x - half, pixel.y - half, LOUPE_CELLS, LOUPE_CELLS);
+  } catch (err) {
+    hideLoupe();
+    return;
+  }
+  const cells = picker.cells || (picker.cells = document.createElement('canvas'));
+  cells.width = LOUPE_CELLS;
+  cells.height = LOUPE_CELLS;
+  cells.getContext('2d').putImageData(data, 0, 0);
+  const canvas = $('loupeCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(LOUPE_SIZE * dpr);
+  if (canvas.width !== size) {
+    canvas.width = size;
+    canvas.height = size;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, size, size);
+  ctx.drawImage(cells, 0, 0, size, size);
+  // 中心格黑白双线框, 在任何底色上都可见
+  const cell = size / LOUPE_CELLS;
+  ctx.lineWidth = Math.max(1, dpr);
+  ctx.strokeStyle = '#000';
+  ctx.strokeRect(half * cell, half * cell, cell, cell);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(half * cell + ctx.lineWidth, half * cell + ctx.lineWidth, cell - 2 * ctx.lineWidth, cell - 2 * ctx.lineWidth);
+
+  const i = (half * LOUPE_CELLS + half) * 4;
+  const [r, g, b, a] = data.data.slice(i, i + 4);
+  picker.color = { r, g, b, a };
+  const hex = colorHex(picker.color);
+  $('loupeSwatch').style.background = `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+  $('loupeHex').textContent = hex;
+  // 补齐 3 位, 数值变化时文字宽度不变
+  const rgb = [r, g, b].map((v) => String(v).padStart(3)).join(' ');
+  $('loupeRgb').textContent = a < 255 ? `${rgb} α${round(a / 255)}` : rgb;
+
+  // 放在指针右下方, 超出画布时翻到另一侧
+  const loupe = $('loupe');
+  loupe.hidden = false;
+  const pane = $('canvasPane').getBoundingClientRect();
+  const gap = 18;
+  let left = e.clientX - pane.left + gap;
+  let top = e.clientY - pane.top + gap;
+  if (left + loupe.offsetWidth > pane.width) left = e.clientX - pane.left - gap - loupe.offsetWidth;
+  if (top + loupe.offsetHeight > pane.height) top = e.clientY - pane.top - gap - loupe.offsetHeight;
+  loupe.style.transform = `translate(${Math.max(0, left)}px, ${Math.max(0, top)}px)`;
+}
+
+function hideLoupe() {
+  $('loupe').hidden = true;
+  picker.color = null;
+}
+
+// 在捕获阶段拦截画布上的指针事件, 取色期间不触发选中、悬停和模拟器触摸; 平移(中键 / 空格拖动)和缩放照常
+function setupColorPicker() {
+  const pane = $('canvasPane');
+  const onCanvas = (e) => e.target instanceof Element && !!e.target.closest('#stageWrap, #liveCanvas');
+  pane.addEventListener('pointermove', (e) => {
+    if (!picker.on || e.buttons) return;
+    if (!onCanvas(e)) {
+      hideLoupe();
+      return;
+    }
+    e.stopPropagation();
+    updateLoupe(e);
+  }, true);
+  pane.addEventListener('pointerdown', (e) => {
+    if (!picker.on || e.button !== 0 || panKey.held || !onCanvas(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    picker.swallow = true;
+    updateLoupe(e);
+    if (!picker.color) return;
+    copyText(colorHex(picker.color), '复制颜色');
+    setColorPicker(false);
+  }, true);
+  // 吞掉取色点击后续的抬起和 click, click 与 pointerup 在同一轮事件中派发
+  pane.addEventListener('pointerup', (e) => {
+    if (!picker.swallow) return;
+    e.stopPropagation();
+    setTimeout(() => (picker.swallow = false));
+  }, true);
+  pane.addEventListener('click', (e) => {
+    if (picker.swallow) e.stopPropagation();
+  }, true);
+  pane.addEventListener('pointerleave', hideLoupe);
+  $('colorPick').addEventListener('click', () => setColorPicker(!picker.on));
 }
 
 // MARK: - Layout
@@ -2868,6 +3032,10 @@ function handleViewKey(key) {
     case '3':
       requestMode('3d');
       return true;
+    case 'c':
+      if (!pickerAvailable()) return false;
+      setColorPicker(!picker.on);
+      return true;
     case '[':
     case ']':
       if (!three) return false;
@@ -3082,6 +3250,7 @@ const SHORTCUT_GROUPS = [
     [['F'], '放大选中元素'],
     [['0'], '适应窗口'],
     [['1', '2', '3'], '实时 / 2D / 3D'],
+    [['C'], '取色, 点击复制色值'],
   ]],
   ['3D', false, [
     [['拖动'], '旋转'],
@@ -3300,6 +3469,7 @@ function setup() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      setColorPicker(false);
       hideMenu();
       hidePopovers();
       closePanel();
@@ -3338,6 +3508,7 @@ function setup() {
   window.addEventListener('blur', () => setPanKey(false));
   setupCanvasEvents();
   setupLiveEvents();
+  setupColorPicker();
   setupLayout();
 
   applyTheme(loadTheme(), false);
