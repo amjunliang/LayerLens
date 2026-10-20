@@ -58,6 +58,8 @@
         @"scale": @(screen.scale),
         // 仅模拟器有值, Mac App 据此匹配模拟器和实时画面
         @"simulatorUDID": environment[@"SIMULATOR_UDID"] ?: @"",
+        // 在后台但没被挂起(如 Xcode 调试中)时仍能响应, 网页据此标记在后台
+        @"foreground": @(UIApplication.sharedApplication.applicationState != UIApplicationStateBackground),
 #if TARGET_OS_SIMULATOR
         // 编译时的源文件路径, 模拟器与 Mac 共用文件系统, Mac App 据此找到对应的 Xcode 工作区
         @"sourceFile": @(__FILE__),

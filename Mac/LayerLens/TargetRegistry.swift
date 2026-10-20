@@ -10,7 +10,7 @@ import Foundation
 import Network
 
 /// 与 iOS App 建立连接的方式
-enum TargetEndpoint {
+enum TargetEndpoint: Equatable {
     /// 模拟器与 Mac 共用回环地址
     case local(port: UInt16)
     /// USB 真机, 经 usbmuxd 连接设备回环地址上的端口
@@ -53,6 +53,8 @@ struct AppRecord {
     let endpoint: TargetEndpoint
     /// iOS 端 /api/app 的原始内容
     let info: [String: Any]
+    /// 本次扫描端口超时(进程在但不响应), 即 App 在后台被挂起, 沿用上次的信息
+    var suspended = false
 }
 
 /// 定时发现模拟器和集成了 LayerLens 的 App, 所有状态只在 queue 上读写
@@ -60,8 +62,6 @@ final class TargetRegistry {
     /// 与 iOS 端 Pod 的端口范围保持一致
     static let appPorts: ClosedRange<UInt16> = 9527...9536
     static let refreshInterval: TimeInterval = 2
-    /// 真机 App 连续偶发失败(超时等)达到该次数才移除, 明确拒绝连接时立即移除
-    static let usbMissLimit = 3
 
     private let queue = DispatchQueue(label: "com.layerlens.registry")
     private let session: URLSession
@@ -72,8 +72,6 @@ final class TargetRegistry {
     private var deviceDetails: [String: (name: String, os: String, model: String)] = [:]
     private var detailsLoading: Set<String> = []
     private var apps: [AppRecord] = []
-    /// "UDID|Bundle ID" -> 真机 App 连续偶发失败的次数
-    private var usbMisses: [String: Int] = [:]
     private var scanning = false
     private var scanWaiters: [() -> Void] = []
     /// Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
@@ -106,14 +104,48 @@ final class TargetRegistry {
     }
 
     /// 找到 App 当前的连接方式; 未找到时立即重新扫描一次, 以便 App 刚重启时不必等下个周期
-    func resolve(deviceId: String, bundleId: String, completion: @escaping (TargetEndpoint?) -> Void) {
+    /// - Parameter rescan: 已知记录过期(如端口连不上)时强制重新扫描
+    func resolve(deviceId: String, bundleId: String, rescan: Bool = false, completion: @escaping (TargetEndpoint?) -> Void) {
         queue.async { [self] in
-            if let app = findApp(deviceId: deviceId, bundleId: bundleId) {
+            if !rescan, let app = findApp(deviceId: deviceId, bundleId: bundleId) {
                 completion(app.endpoint)
                 return
             }
             scanApps { [self] in
                 completion(findApp(deviceId: deviceId, bundleId: bundleId)?.endpoint)
+            }
+        }
+    }
+
+    /// 等 App 回到前台并响应: 挂起期间端口可能被系统回收, 回到前台后会换端口重新监听, 重新扫描直到找到
+    func waitForApp(deviceId: String, bundleId: String, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
+        let deadline = Date().addingTimeInterval(timeout)
+        func attempt() {
+            scanApps { [self] in
+                // 新版 Pod 上报 foreground, 等到真正在前台; 旧版只能等到能响应
+                if let app = findApp(deviceId: deviceId, bundleId: bundleId), !app.suspended, app.info["foreground"] as? Bool != false {
+                    completion(true)
+                } else if Date() >= deadline {
+                    completion(false)
+                } else {
+                    queue.asyncAfter(deadline: .now() + 0.3, execute: attempt)
+                }
+            }
+        }
+        queue.async(execute: attempt)
+    }
+
+    /// 设备类型, 未找到时为 nil
+    func deviceKind(deviceId: String, completion: @escaping (DeviceKind?) -> Void) {
+        queue.async { [self] in
+            if simulators.contains(where: { $0.id == deviceId }) {
+                completion(.simulator)
+            } else if usbDevices.contains(where: { $0.udid == deviceId }) {
+                completion(.device)
+            } else if let app = apps.first(where: { $0.deviceId == deviceId }) {
+                if case .local = app.endpoint { completion(.simulator) } else { completion(.device) }
+            } else {
+                completion(nil)
             }
         }
     }
@@ -141,6 +173,9 @@ final class TargetRegistry {
                         var info = app.info
                         info["port"] = app.endpoint.port
                         info["connection"] = app.endpoint.connectionType
+                        if app.suspended {
+                            info["suspended"] = true
+                        }
                         return info
                     }
                 return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "model": device.model, "apps": deviceApps]
@@ -253,7 +288,7 @@ final class TargetRegistry {
         let group = DispatchGroup()
         let lock = NSLock()
         var found: [AppRecord] = []
-        // 偶发失败(非明确拒绝)的真机端口, 用于判断是否保留上次结果
+        // 连接成功但没有响应的端口, 即挂起的 App; 明确拒绝表示 App 已退出
         var transientPorts: Set<String> = []
         let devices = usbDevices
         for device in devices {
@@ -276,8 +311,14 @@ final class TargetRegistry {
         for port in Self.appPorts {
             guard let url = URL(string: "http://127.0.0.1:\(port)/api/app") else { continue }
             group.enter()
-            session.dataTask(with: url) { data, response, _ in
+            session.dataTask(with: url) { data, response, error in
                 defer { group.leave() }
+                if (error as? URLError)?.code == .timedOut {
+                    lock.lock()
+                    transientPorts.insert("local|\(port)")
+                    lock.unlock()
+                    return
+                }
                 guard (response as? HTTPURLResponse)?.statusCode == 200,
                       let data, let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let bundleId = info["bundleId"] as? String,
@@ -290,7 +331,7 @@ final class TargetRegistry {
             }.resume()
         }
         group.notify(queue: queue) { [self] in
-            apps = found + retainedUSBApps(found: found, devices: devices, transientPorts: transientPorts)
+            apps = found + suspendedApps(found: found, devices: devices, transientPorts: transientPorts)
             rememberSourceFiles()
             scanning = false
             let waiters = scanWaiters
@@ -299,26 +340,27 @@ final class TargetRegistry {
         }
     }
 
-    /// 上次找到但本次偶发失败的真机 App 暂时保留, 避免列表闪烁
-    private func retainedUSBApps(found: [AppRecord], devices: [Usbmux.Device], transientPorts: Set<String>) -> [AppRecord] {
-        var retained: [AppRecord] = []
-        var misses: [String: Int] = [:]
-        for app in apps {
-            guard case .usb(let deviceId, let port) = app.endpoint,
-                  devices.contains(where: { $0.id == deviceId }),
-                  !found.contains(where: { $0.deviceId == app.deviceId && $0.bundleId == app.bundleId }),
-                  transientPorts.contains("\(app.deviceId)|\(port)") else {
-                continue
+    /// 挂起的 App 端口仍在监听但不响应, 保留上次的信息并标记为挂起, 回到前台后恢复;
+    /// 端口被拒绝(App 已退出)、被其他 App 占用或设备已断开时移除
+    private func suspendedApps(found: [AppRecord], devices: [Usbmux.Device], transientPorts: Set<String>) -> [AppRecord] {
+        apps.compactMap { app in
+            let key: String
+            switch app.endpoint {
+            case .local(let port):
+                guard simulators.contains(where: { $0.id == app.deviceId }) else { return nil }
+                key = "local|\(port)"
+            case .usb(let deviceId, let port):
+                guard devices.contains(where: { $0.id == deviceId }) else { return nil }
+                key = "\(app.deviceId)|\(port)"
             }
-            let key = "\(app.deviceId)|\(app.bundleId)"
-            let count = (usbMisses[key] ?? 0) + 1
-            if count < Self.usbMissLimit {
-                misses[key] = count
-                retained.append(app)
+            guard transientPorts.contains(key),
+                  !found.contains(where: { $0.deviceId == app.deviceId && ($0.bundleId == app.bundleId || $0.endpoint.port == app.endpoint.port) }) else {
+                return nil
             }
+            var app = app
+            app.suspended = true
+            return app
         }
-        usbMisses = misses
-        return retained
     }
 
     private func rememberSourceFiles() {

@@ -142,34 +142,41 @@ final class HubServer {
         let upstreamTarget = rest.isEmpty ? "/" : String(rest)
         // 事件流断开表示 App 停止, 目标不可用时直接断开连接让浏览器按网络错误重连, 返回错误码会使其停止重连
         let isEventStream = upstreamTarget.hasPrefix("/api/events")
-        registry.resolve(deviceId: deviceId, bundleId: bundleId) { [weak self] endpoint in
-            guard let self else { return }
-            self.queue.async {
-                guard let endpoint else {
-                    isEventStream ? connection.abort() : connection.respond(.error(503, "App is not running"))
-                    return
-                }
-                switch endpoint {
-                case .local(let port):
-                    var data = head.forwarded(target: upstreamTarget, host: "127.0.0.1:\(port)", keepConnection: false)
-                    data.append(leftover)
-                    let upstream = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
-                    connection.tunnel(to: upstream, initialData: data) {
-                        isEventStream ? connection.abort() : connection.respond(.error(503, "App is not running"))
+        let unavailable = {
+            isEventStream ? connection.abort() : connection.respond(.error(503, "App is not running"))
+        }
+        // 挂起期间监听可能被系统回收, App 回到前台后换端口重新监听, 记录过期前连不上旧端口:
+        // 连接失败时重新扫描, 端口变了就再试一次
+        func forward(rescan: Bool, previous: TargetEndpoint?) {
+            registry.resolve(deviceId: deviceId, bundleId: bundleId, rescan: rescan) { [weak self] endpoint in
+                guard let self else { return }
+                self.queue.async {
+                    guard let endpoint, endpoint != previous else {
+                        unavailable()
+                        return
                     }
-                case .usb(let usbDeviceId, let port):
-                    var data = head.forwarded(target: upstreamTarget, host: "127.0.0.1:\(port)", keepConnection: false)
-                    data.append(leftover)
-                    Usbmux.connect(deviceId: usbDeviceId, port: port, queue: self.queue) { upstream, _ in
-                        guard let upstream else {
-                            isEventStream ? connection.abort() : connection.respond(.error(503, "App is not running"))
-                            return
+                    let retry = { rescan ? unavailable() : forward(rescan: true, previous: endpoint) }
+                    switch endpoint {
+                    case .local(let port):
+                        var data = head.forwarded(target: upstreamTarget, host: "127.0.0.1:\(port)", keepConnection: false)
+                        data.append(leftover)
+                        let upstream = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+                        connection.tunnel(to: upstream, initialData: data, onFailure: retry)
+                    case .usb(let usbDeviceId, let port):
+                        var data = head.forwarded(target: upstreamTarget, host: "127.0.0.1:\(port)", keepConnection: false)
+                        data.append(leftover)
+                        Usbmux.connect(deviceId: usbDeviceId, port: port, queue: self.queue) { upstream, _ in
+                            guard let upstream else {
+                                retry()
+                                return
+                            }
+                            connection.tunnel(toReady: upstream, initialData: data)
                         }
-                        connection.tunnel(toReady: upstream, initialData: data)
                     }
                 }
             }
         }
+        forward(rescan: false, previous: nil)
     }
 
     private func handlePost(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
@@ -194,6 +201,31 @@ final class HubServer {
             workQueue.async {
                 let ok = TargetRegistry.run("/usr/bin/xcrun", ["simctl", "launch", device, "com.apple.springboard"]) != nil
                 connection.respond(ok ? .json(["ok": true]) : .error(500, "simctl launch failed"))
+            }
+        case "/api/hub/activate":
+            // 把在后台的 App 切到前台; 已在运行时只激活, 不重启
+            guard let device = json["device"] as? String, let app = json["app"] as? String, !device.isEmpty, !app.isEmpty else {
+                connection.respond(.error(400, "Invalid target"))
+                return
+            }
+            registry.deviceKind(deviceId: device) { [self] kind in
+                guard let kind else {
+                    connection.respond(.error(404, "Device not found"))
+                    return
+                }
+                workQueue.async { [self] in
+                    let arguments = kind == .simulator
+                        ? ["simctl", "launch", device, app]
+                        : ["devicectl", "device", "process", "launch", "--device", device, app]
+                    guard TargetRegistry.run("/usr/bin/xcrun", arguments) != nil else {
+                        connection.respond(.error(500, "Launch failed"))
+                        return
+                    }
+                    // 等 App 在(可能换了的)端口上响应后再返回, 网页随后加载时不会连到旧端口
+                    registry.waitForApp(deviceId: device, bundleId: app, timeout: 5) { ready in
+                        connection.respond(.json(["ok": true, "ready": ready]))
+                    }
+                }
             }
         default:
             connection.respond(.error(404, "Not Found"))

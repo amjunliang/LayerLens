@@ -1791,7 +1791,30 @@ function pickTarget() {
   // 没有运行中的 App 时也选中第一台设备, 以便使用实时画面
   const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
   targets.deviceId = first ? first.id : '';
-  targets.bundleId = first?.apps.length ? first.apps[0].bundleId : '';
+  targets.bundleId = firstAppId(first);
+}
+
+// 挂起的 App 由 Mac App 标记 suspended; 在后台但未挂起(如 Xcode 调试中)的由 App 上报 foreground
+function appInBackground(app) {
+  return !!app.suspended || app.foreground === false;
+}
+
+// 自动选择时优先前台的 App, 挂起的 App 现在也会留在列表里
+function firstAppId(device) {
+  return (device?.apps.find((a) => !appInBackground(a)) || device?.apps[0])?.bundleId || '';
+}
+
+// 选择在后台的 App 时先把它切到前台, 否则层级和实时画面都不是它
+async function activateApp(deviceId, bundleId) {
+  try {
+    await fetch('/api/hub/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device: deviceId, app: bundleId }),
+    });
+  } catch (e) {
+    // 失败时仍切换, 由页面提示在后台
+  }
 }
 
 function switchTarget(deviceId, bundleId) {
@@ -1836,15 +1859,23 @@ function renderTargetMenu() {
     apps.forEach((app) => {
       const row = el('button', 'target-app');
       const current = device.id === targets.deviceId && app.bundleId === targets.bundleId;
+      const inBackground = (current && background) || appInBackground(app);
       row.classList.toggle('current', current);
-      row.classList.toggle('background', current && background);
+      row.classList.toggle('background', inBackground);
       row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
       if (!appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
-      row.append(el('span', 'target-app-meta', current && background ? t('在后台') : app.version || ''));
+      row.append(el('span', 'target-app-meta', inBackground ? t('在后台') : app.version || ''));
       row.title = `${app.bundleId} · ${t('端口 {0}', app.port)}`;
-      row.addEventListener('click', () => {
+      row.addEventListener('click', async () => {
         hidePopovers();
-        if (device.id !== targets.deviceId || app.bundleId !== targets.bundleId) switchTarget(device.id, app.bundleId);
+        // 切换到其他 App 时总是先激活: 旧版 Pod 不上报 foreground, 在后台也看不出来; 已在前台时无影响
+        if (inBackground || !current) {
+          // 激活要等 App 响应, 最多几秒
+          toast(t('正在切换到 {0}…', app.appName || app.bundleId));
+          await activateApp(device.id, app.bundleId);
+        }
+        // 当前 App 回到前台后由事件流恢复, 不必重新加载
+        if (!current) switchTarget(device.id, app.bundleId);
       });
       children.push(row);
     });
@@ -1860,19 +1891,19 @@ function nextTarget() {
   if (targets.idle) {
     if (!targets.devices.length) return null;
     const back = currentDevice();
-    if (back) return [back.id, targets.bundleId || back.apps[0]?.bundleId || ''];
+    if (back) return [back.id, targets.bundleId || firstAppId(back)];
     const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
-    return [first.id, first.apps[0]?.bundleId || ''];
+    return [first.id, firstAppId(first)];
   }
   const device = currentDevice();
   if (device) {
-    if (!targets.hadDevice) return [device.id, targets.bundleId || device.apps[0]?.bundleId || ''];
-    if (!targets.bundleId && device.apps.length) return [device.id, device.apps[0].bundleId];
+    if (!targets.hadDevice) return [device.id, targets.bundleId || firstAppId(device)];
+    if (!targets.bundleId && device.apps.length) return [device.id, firstAppId(device)];
     return null;
   }
   if (targets.deviceId || !targets.devices.length) return null;
   const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
-  return [first.id, first.apps[0]?.bundleId || ''];
+  return [first.id, firstAppId(first)];
 }
 
 // 设备全部断开持续一段时间后回到默认页, 短暂中断(重新插拔, 模拟器重启)不切换
@@ -1896,6 +1927,11 @@ function pollTargets() {
       if (devicesGone()) {
         location.reload();
         return;
+      }
+      // 回到前台的通知可能早于事件流连上而错过, 列表里显示已在前台时恢复
+      if (appState.value === 'background' && currentApp()?.foreground === true && !currentApp().suspended) {
+        setAppState('online');
+        if (state.mode !== 'live') refresh();
       }
       const next = nextTarget();
       if (next) {
@@ -1932,7 +1968,11 @@ function watchApp() {
   source.addEventListener('state', (e) => {
     const { foreground } = JSON.parse(e.data || '{}');
     if (foreground === false && appState.value === 'online') setAppState('background');
-    else if (foreground !== false && appState.value === 'background') setAppState('online');
+    else if (foreground !== false && appState.value === 'background') {
+      setAppState('online');
+      // 在后台期间页面可能已变化, 实时画面之外重新获取层级
+      if (state.mode !== 'live') refresh();
+    }
   });
   source.onerror = () => {
     appState.connected = false;
@@ -3361,7 +3401,12 @@ function loadAppInfo() {
     updateAppMeta();
     document.title = `${info.appName} - LayerLens`;
     setupLive(info);
-  }).catch((e) => toast(e.message, true));
+  }).catch((e) => {
+    // App 刚换端口等情况下取不到, 仍显示名称并启用实时画面, 事件流重连后会重新加载
+    $('appName').textContent = currentApp()?.appName || targets.bundleId;
+    setupLive(null);
+    toast(e.message, true);
+  });
 }
 
 setup();
