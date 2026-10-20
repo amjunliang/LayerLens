@@ -53,6 +53,10 @@
 
 - (void)startWithLoopbackOnly:(BOOL)loopbackOnly startPort:(uint16_t)startPort attempts:(NSInteger)attempts completion:(void (^)(uint16_t, NSError *))completion {
     dispatch_async(self.queue, ^{
+        // 已在监听或正在启动时忽略, 重复调用不会再占一个端口
+        if (!self.stopped && (self.listener || self.pendingListener)) {
+            return;
+        }
         self.stopped = NO;
         self.loopbackOnly = loopbackOnly;
         self.startPort = startPort;

@@ -331,12 +331,22 @@ final class TargetRegistry {
             }.resume()
         }
         group.notify(queue: queue) { [self] in
+            found = Self.uniqueInstances(found)
             apps = found + suspendedApps(found: found, devices: devices, transientPorts: transientPorts)
             rememberSourceFiles()
             scanning = false
             let waiters = scanWaiters
             scanWaiters = []
             waiters.forEach { $0() }
+        }
+    }
+
+    /// 同一进程监听了多个端口时(旧版 Pod 被热重载注入的动态库重复启动)只保留端口最小的一个
+    private static func uniqueInstances(_ records: [AppRecord]) -> [AppRecord] {
+        var seen: Set<String> = []
+        return records.sorted { $0.endpoint.port < $1.endpoint.port }.filter { record in
+            guard let instanceId = record.info["instanceId"] as? String else { return true }
+            return seen.insert(record.deviceId + "|" + instanceId).inserted
         }
     }
 

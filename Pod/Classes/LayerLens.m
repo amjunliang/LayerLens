@@ -36,6 +36,14 @@ static const NSInteger kLayerLensPortAttempts = 10;
 + (void)load {
     // 与 Lookin 一致, 集成即启动; 延后到主线程以免在 +load 阶段创建网络对象
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 热重载注入的动态库会再带一份本类并再次执行 +load, 各镜像的静态变量互不相通;
+        // 用主线程字典做进程级标记, 整个进程只启动一个服务, 避免占用多个端口在 Mac 端出现重复的 App
+        NSMutableDictionary *store = NSThread.mainThread.threadDictionary;
+        static NSString * const startedKey = @"LayerLensServerStarted";
+        if ([store[startedKey] boolValue]) {
+            return;
+        }
+        store[startedKey] = @YES;
         [[LayerLens sharedInstance] start];
     });
 }
