@@ -54,8 +54,10 @@
     [router addRoute:@"GET" path:@"/api/screenshot" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         unsigned long oid = [self oidFromString:request.query[@"oid"]];
         BOOL solo = [request.query[@"type"] isEqualToString:@"solo"];
+        // 旧版网页不传 layers, 按原行为排除所有子层
+        BOOL soloLayers = ![request.query[@"layers"] isEqualToString:@"0"];
         [self onMain:^{
-            NSData *data = [LayerLensLookinBridge screenshotWithOid:oid solo:solo];
+            NSData *data = [LayerLensLookinBridge screenshotWithOid:oid solo:solo soloLayers:soloLayers];
             // 无内容的容器返回透明图, 避免浏览器报 404 并触发前端重试
             responder([LayerLensHTTPResponse PNGResponse:data ?: [self transparentPNG]]);
         }];

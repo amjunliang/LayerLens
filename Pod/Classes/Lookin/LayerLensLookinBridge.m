@@ -98,7 +98,7 @@
     };
 }
 
-+ (NSData *)screenshotWithOid:(unsigned long)oid solo:(BOOL)solo {
++ (NSData *)screenshotWithOid:(unsigned long)oid solo:(BOOL)solo soloLayers:(BOOL)soloLayers {
     CALayer *layer = [self layerWithOid:oid];
     if (!layer || CGRectIsEmpty(layer.bounds)) {
         return nil;
@@ -109,9 +109,7 @@
     if (hostView && ![hostView isKindOfClass:UIWindow.class] && !hostView.window) {
         return nil;
     }
-    // Lookin 的 solo 截图在没有 sublayer 时返回 nil, 此时 solo 与 group 等价
-    BOOL useSolo = solo && layer.sublayers.count > 0;
-    UIImage *image = useSolo ? [layer lks_soloScreenshotWithLowQuality:NO] : [layer lks_groupScreenshotWithLowQuality:NO];
+    UIImage *image = solo ? [self soloScreenshotOfLayer:layer hideLayers:soloLayers] : [layer lks_groupScreenshotWithLowQuality:NO];
     return image ? UIImagePNGRepresentation(image) : nil;
 }
 
@@ -166,6 +164,22 @@
 }
 
 #pragma mark - Private
+
+// 与 Lookin 的 solo 截图相同: 临时隐藏单独绘制的子层后整体截图; 没有要隐藏的子层时与 group 等价
++ (UIImage *)soloScreenshotOfLayer:(CALayer *)layer hideLayers:(BOOL)hideLayers {
+    NSMutableArray<CALayer *> *hiddenSublayers = [NSMutableArray array];
+    for (CALayer *sublayer in [layer.sublayers copy]) {
+        if (!sublayer.hidden && (hideLayers || sublayer.lks_hostView)) {
+            sublayer.hidden = YES;
+            [hiddenSublayers addObject:sublayer];
+        }
+    }
+    UIImage *image = [layer lks_groupScreenshotWithLowQuality:NO];
+    for (CALayer *sublayer in hiddenSublayers) {
+        sublayer.hidden = NO;
+    }
+    return image;
+}
 
 + (CALayer *)layerWithOid:(unsigned long)oid {
     NSObject *object = [NSObject lks_objectWithOid:oid];

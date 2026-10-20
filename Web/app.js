@@ -45,7 +45,7 @@ const state = {
   hover: null,
   // 展开的节点(oid): 选中节点的祖先 + 手动展开的, 不做持久化
   expanded: new Set(),
-  mode: '2d',
+  mode: '3d',
   showLayers: false,
   showHidden: true,
   showImages: true,
@@ -359,8 +359,10 @@ async function api(path, options) {
   return data;
 }
 
+// 不显示 CALayer 时这些层不单独绘制, solo 截图保留它们(如视频播放层), 否则视频区域为空
 function shotURL(oid, type) {
-  return `${targetBase()}/api/screenshot?oid=${oid}&type=${type}&t=${state.stamp}`;
+  const layers = type === 'solo' ? `&layers=${state.showLayers ? 1 : 0}` : '';
+  return `${targetBase()}/api/screenshot?oid=${oid}&type=${type}${layers}&t=${state.stamp}`;
 }
 
 // 截图并发控制与缓存: App 端截图在主线程串行执行, 并发过高只会排队超时
@@ -674,12 +676,10 @@ function scrollToSelected() {
   const tree = $('tree');
   const row = tree.querySelector('.row.selected');
   if (!row) return;
-  row.scrollIntoView({ block: 'nearest' });
-  // 横向保证缩进后的箭头与类名可见
-  const indent = parseFloat(row.style.getPropertyValue('--indent')) || 0;
-  if (indent < tree.scrollLeft || indent > tree.scrollLeft + tree.clientWidth - 160) {
-    tree.scrollLeft = Math.max(0, indent - 24);
-  }
+  // 只在纵向滚到可见, 不改横向位置; 缩进较深显示不下时由用户自己横向滚动
+  const top = row.getBoundingClientRect().top - tree.getBoundingClientRect().top + tree.scrollTop;
+  if (top < tree.scrollTop) tree.scrollTop = top;
+  else if (top + row.offsetHeight > tree.scrollTop + tree.clientHeight) tree.scrollTop = top + row.offsetHeight - tree.clientHeight;
 }
 
 // 当前树中可见行的顺序, 用于键盘导航
@@ -936,7 +936,9 @@ function renderCanvas() {
       // 先挂载再加载: 命中缓存时回调是同步的
       stage.appendChild(slab);
       if (state.showImages && node.oid) {
-        loadImage(shotURL(node.oid, 'solo'), (url) => {
+        // 不显示 CALayer 且只有 CALayer 子节点时, 子层不单独绘制, 取整体截图; 旧版 Pod 也能显示视频播放层等内容
+        const onlyLayers = !state.showLayers && node.children.length > 0 && node.children.every((child) => child.isLayer);
+        loadImage(shotURL(node.oid, onlyLayers ? 'group' : 'solo'), (url) => {
           if (slab.isConnected) slab.style.backgroundImage = `url("${url}")`;
         });
       }
@@ -2538,20 +2540,16 @@ function setupLayout() {
       }
       splitter.classList.add('dragging');
       const name = splitter.dataset.split;
-      const medium = window.matchMedia('(max-width: 1180px)').matches;
       let prop = null;
       let value = null;
       const move = (ev) => {
         const box = layout.getBoundingClientRect();
         if (name === 's1') {
-          prop = medium ? '--side-w' : '--tree-w';
+          prop = '--tree-w';
           value = clamp(ev.clientX - box.left, 180, box.width * 0.6) + 'px';
-        } else if (name === 's2') {
+        } else {
           prop = '--detail-w';
           value = clamp(box.right - ev.clientX, 260, box.width * 0.6) + 'px';
-        } else {
-          prop = '--tree-h';
-          value = clamp(ev.clientY - box.top, 80, box.height - 120) + 'px';
         }
         layout.style.setProperty(prop, value);
       };

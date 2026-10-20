@@ -697,16 +697,8 @@ body:is(.has-app, :not(.mode-live)):not(.mode-live.app-background) #appBanner:no
 
 /* 中屏 */
 @media (max-width: 1180px) {
-  .layout {
-    grid-template-columns: var(--side-w, 320px) 1px minmax(0, 1fr);
-    grid-template-rows: var(--tree-h, 42%) 1px minmax(0, 1fr);
-    grid-template-areas:
-      "tree s1 canvas"
-      "s3 s1 canvas"
-      "detail s1 canvas";
-  }
-  .splitter[data-split="s2"] { display: none; }
-  .splitter.horizontal { display: block; }
+  /* 详情始终在右侧, 左侧整列留给层级树; 默认宽度收窄给画布让出空间 */
+  .layout { grid-template-columns: var(--tree-w, 260px) 1px minmax(0, 1fr) 1px var(--detail-w, 280px); }
   .app-meta { display: none; }
 }
 
