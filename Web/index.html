@@ -38,6 +38,8 @@
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
     <symbol id="i-inspect" viewBox="0 0 24 24"><path d="M10 3H5a2 2 0 0 0-2 2v5M3 14v5a2 2 0 0 0 2 2h5M14 3h5a2 2 0 0 1 2 2v5"/><path d="M12 12l9 3.2-4 1.3-1.3 4z"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+    <symbol id="i-sidebar-left" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol>
     <symbol id="i-picker" viewBox="0 0 24 24"><path d="M2 22l1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="M15 6l3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4z"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   </defs>
@@ -45,6 +47,7 @@
 
 <header class="toolbar">
   <div class="toolbar-left">
+    <button class="icon-btn toggle on" id="treeToggle" title="层级面板 (T)" aria-label="层级面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar-left"/></svg></button>
     <span class="status-dot" id="statusDot" title="未连接"></span>
     <div class="popover-anchor">
       <button class="target-btn" id="targetBtn" title="切换设备 / App"><span class="app-name" id="appName">LayerLens</span><svg class="icon target-caret"><use href="#i-chevron"/></svg></button>
@@ -94,8 +97,11 @@
     <div class="popover-anchor help-anchor">
       <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
     </div>
+    <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
 </header>
+
+<div class="popover-anchor event-anchor"><div class="popover event-pop" id="eventPop" hidden></div></div>
 
 <main class="layout" id="layout">
   <section class="pane tree-pane">

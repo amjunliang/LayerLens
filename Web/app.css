@@ -139,6 +139,8 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 @keyframes icon-spin { to { transform: rotate(360deg); } }
 .icon-btn.active, .icon-btn.toggle.on { color: var(--accent); }
 .icon-btn.toggle.on { background: var(--accent); color: #fff; }
+/* 工具栏的开关只用强调色, 与筛选等按钮一致 */
+.toolbar .icon-btn.toggle.on { background: none; color: var(--accent); }
 
 /* segmented */
 .segmented { display: inline-flex; background: var(--input); border-radius: var(--r-control); padding: 2px; gap: 2px; }
@@ -166,7 +168,7 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
   align-items: center;
   gap: 12px;
   height: 44px;
-  padding: 0 10px 0 14px;
+  padding: 0 6px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
@@ -267,12 +269,15 @@ kbd {
   background: var(--panel);
 }
 
-/* layout: 宽屏三栏 / 中屏左侧上下分栏 / 窄屏单栏 + 底部切换 */
+/* layout: 桌面三栏, 侧栏可收起 / 触屏小屏单栏 + 底部切换 */
 .layout {
   flex: 1;
   display: grid;
   min-height: 0;
-  grid-template-columns: var(--tree-w, 300px) 1px minmax(0, 1fr) 1px var(--detail-w, 340px);
+  /* 侧栏默认宽度, 中屏收窄; 拖动分隔条后由 --tree-w / --detail-w 覆盖 */
+  --tree-d: 300px;
+  --detail-d: 340px;
+  grid-template-columns: var(--tree-w, var(--tree-d)) 1px minmax(0, 1fr) 1px var(--detail-w, var(--detail-d));
   grid-template-rows: minmax(0, 1fr);
   grid-template-areas: "tree s1 canvas s2 detail";
 }
@@ -310,37 +315,48 @@ kbd {
   display: flex;
   align-items: center;
   height: 24px;
-  padding-left: calc(var(--indent) + 4px);
+  position: relative;
+  /* 左侧 10px 留给事件标记 */
+  padding-left: calc(var(--indent) + 12px);
   padding-right: 8px;
   white-space: nowrap;
   cursor: default;
   /* 缩进参考线: 每层一条竖线 */
   background-image: repeating-linear-gradient(90deg, var(--guide) 0 1px, transparent 1px 10px);
   background-size: var(--indent) 100%;
-  background-position: 11px 0;
+  background-position: 19px 0;
   background-repeat: no-repeat;
 }
 .row:hover, .row.hover { background-color: var(--hover); }
 .row.selected { background-color: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
 .row.selected .cls { color: var(--accent); }
 .row.dim .cls { opacity: 0.55; }
+/* 隐藏的视图和系统私有类(下划线开头)淡化, 突出业务视图 */
+.row.dim .cls, .row.private .cls { font-style: italic; }
+.row.private:not(.selected) .cls { color: var(--muted); }
 .row .arrow { width: 16px; height: 16px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); cursor: pointer; }
 .row .arrow .icon { width: 11px; height: 11px; stroke-width: 2.4; transition: transform 0.12s ease; }
 .row .arrow.expanded .icon { transform: rotate(90deg); }
 .row .cls { flex: none; }
 .row .cls.layer { color: var(--muted); }
 .row .meta { color: var(--muted); margin-left: 6px; flex: none; }
-.row .vc {
-  margin-left: 6px;
-  flex: none;
-  font-size: 11px;
-  line-height: 16px;
-  padding: 0 5px;
-  color: var(--vc);
-  border: 1px solid currentColor;
-  border-radius: var(--r-control);
-  opacity: 0.85;
-}
+/* 控制器的根视图: 类名前圆点, 行尾显示 "控制器.view" */
+/* 事件标记: 行首蓝色竖条, 点击区域覆盖整个左侧留白 */
+.row .ev-bar { position: absolute; left: 2px; top: 0; bottom: 0; width: 10px; padding: 0; border: none; background: none; cursor: pointer; }
+.row .ev-bar::before { content: ""; position: absolute; left: 3px; top: 5px; bottom: 5px; width: 4px; border-radius: 2px; background: var(--accent); opacity: 0.8; }
+.row .ev-bar:hover::before { opacity: 1; }
+.event-anchor { position: fixed; left: 0; top: 0; z-index: 60; }
+.event-pop { position: fixed; width: max-content; max-width: min(460px, calc(100vw - 8px)); max-height: calc(100vh - 8px); overflow: auto; padding: 4px 12px; font-size: 12px; transform-origin: top left; }
+.ev-item { padding: 8px 0; }
+.ev-item + .ev-item { border-top: 1px solid var(--border); }
+.ev-name { font-family: var(--mono); font-weight: 600; font-size: 13px; }
+.ev-sub { color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+.ev-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 24px; margin-top: 8px; }
+.ev-kv > span:nth-child(odd) { color: var(--muted); }
+.ev-kv .ev-value { text-align: right; font-family: var(--mono); word-break: break-all; }
+.ev-kv input { justify-self: end; margin: 0; pointer-events: none; accent-color: var(--accent); }
+.row .vc-dot { width: 7px; height: 7px; margin-right: 5px; flex: none; border-radius: 50%; background: var(--vc); }
+.row .vc { margin-left: 6px; flex: none; color: var(--vc); }
 .row mark { background: #ffd54a; color: #000; border-radius: 2px; }
 .row .copy {
   position: sticky;
@@ -623,13 +639,9 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .app-banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 128px); padding: 6px 6px 6px 12px; border-radius: var(--r-float); background: var(--panel); box-shadow: var(--shadow); font-size: 12px; }
 .crumbs:not(:empty) ~ .app-banner { top: 38px; }
 .app-banner[hidden] { display: none; }
-/* App 状态提示条优先, 显示时隐藏触摸修复提示 */
-/* 没有已集成 App 时实时画面可当普通模拟器用, 不显示 App 状态提示 (左上角状态点仍在), 修复触摸的提示照常显示 */
-body.mode-live:not(.has-app) #appBanner { display: none; }
+/* 实时画面可直接操作模拟器, 不显示 App 状态提示, 只用工具栏状态点提示; 修复触摸的提示照常显示 */
+body.mode-live #appBanner { display: none; }
 body:not(.has-app) #liveInspect, body.app-offline #liveInspect { display: none; }
-/* App 在后台时实时画面仍可操作, 只用工具栏状态点(橙色)提示 */
-body.mode-live.app-background #appBanner { display: none; }
-body:is(.has-app, :not(.mode-live)):not(.mode-live.app-background) #appBanner:not([hidden]) ~ #liveHeal { display: none; }
 .app-banner-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-banner-text::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--accent); vertical-align: 1px; }
 /* 绿色已连接, 红色离线; 重启中圆点换成转圈 */
@@ -695,23 +707,37 @@ body:is(.has-app, :not(.mode-live)):not(.mode-live.app-background) #appBanner:no
 .about-kv span:nth-child(odd) { color: var(--muted); }
 .about-kv span:nth-child(even) { font-family: var(--mono); word-break: break-all; }
 
+/* 收起侧栏, 画布占满; 小屏用底部导航切换, 不受影响 */
+@media (min-width: 761px), (min-width: 601px) and (pointer: fine) {
+  body.tree-hidden .layout { grid-template-columns: 0 0 minmax(0, 1fr) 1px var(--detail-w, var(--detail-d)); }
+  body.detail-hidden .layout { grid-template-columns: var(--tree-w, var(--tree-d)) 1px minmax(0, 1fr) 0 0; }
+  body.tree-hidden.detail-hidden .layout { grid-template-columns: 0 0 minmax(0, 1fr) 0 0; }
+  body.tree-hidden .tree-pane, body.tree-hidden .splitter[data-split="s1"],
+  body.detail-hidden .detail-pane, body.detail-hidden .splitter[data-split="s2"] { display: none; }
+}
+
 /* 中屏 */
 @media (max-width: 1180px) {
-  /* 详情始终在右侧, 左侧整列留给层级树; 默认宽度收窄给画布让出空间 */
-  .layout { grid-template-columns: var(--tree-w, 260px) 1px minmax(0, 1fr) 1px var(--detail-w, 280px); }
+  .layout { --tree-d: 260px; --detail-d: 280px; }
   .app-meta { display: none; }
 }
 
-/* 窄屏 */
+/* 桌面窄窗口: 工具栏紧凑 */
 @media (max-width: 760px) {
+  .toolbar { padding: 0 6px; gap: 8px; }
+  .app-name { display: none; }
+}
+
+/* 小屏: 触屏窄屏, 或桌面窗口窄到工具栏放不下 */
+@media (max-width: 760px) and (pointer: coarse), (max-width: 600px) {
   .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main"; }
   .pane { grid-area: main; display: none; }
+  #treeToggle, #detailToggle { display: none; }
   body[data-view="tree"] .tree-pane,
   body[data-view="canvas"] .canvas-pane,
   body[data-view="detail"] .detail-pane { display: flex; }
   .splitter { display: none !important; }
-  .toolbar { padding: 0 6px 0 12px; gap: 8px; }
-  .app-name { display: none; }
+  .toolbar { padding: 0 6px 0 12px; }
   .attr .name { flex-basis: 96px; }
   /* 触屏: 更大的字号与点按区域 */
   body { font-size: 14px; }

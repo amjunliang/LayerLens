@@ -600,6 +600,7 @@ function matches(node, q) {
   if (node.cls.toLowerCase().includes(q)) return true;
   if (node.address.toLowerCase().includes(q)) return true;
   if (node.title && node.title.toLowerCase().includes(q)) return true;
+  if (node.specialTrace && node.specialTrace.toLowerCase().includes(q)) return true;
   return node.ivarTraces.some((t) => t.toLowerCase().includes(q));
 }
 
@@ -643,19 +644,32 @@ function makeRow(node, level, hasChildren, expanded, q) {
   row.style.setProperty('--indent', level * TREE_INDENT + 'px');
   if (node.key === state.selected) row.classList.add('selected');
   if (node.effHidden) row.classList.add('dim');
+  if (node.cls.startsWith('_')) row.classList.add('private');
   const arrow = el('span', 'arrow' + (hasChildren && expanded ? ' expanded' : ''));
   if (hasChildren) {
     arrow.dataset.toggle = '1';
     arrow.appendChild(icon('chevron'));
   }
   row.appendChild(arrow);
+  // 与 Lookin 一致: 有手势 / 控件事件时左侧显示蓝条, 点击查看事件
+  if (node.events?.length) {
+    const bar = el('button', 'ev-bar');
+    bar.title = t('事件') + ' (' + node.events.length + ')';
+    row.appendChild(bar);
+  }
+  if (node.vcClass) row.appendChild(el('span', 'vc-dot'));
   const cls = el('span', 'cls' + (node.isLayer ? ' layer' : ''));
   appendHighlighted(cls, node.cls, q);
   row.appendChild(cls);
-  const meta = node.title || (node.ivarTraces[0] ? node.ivarTraces[0].split('.').pop() : '');
-  if (meta) row.appendChild(el('span', 'meta', meta));
-  if (node.vcClass && (!node.parent || node.parent.vcClass !== node.vcClass)) row.appendChild(el('span', 'vc', node.vcClass));
-  if (node.keyWindow) row.appendChild(el('span', 'meta', 'key'));
+  if (node.title) row.appendChild(el('span', 'meta', node.title));
+  // 与 Lookin 一致: 有特殊标记(控制器的 view / Cell 位置 / KeyWindow)时显示它, 否则显示引用它的所有成员变量名
+  if (node.vcClass) {
+    row.appendChild(el('span', 'vc', node.specialTrace || node.vcClass + '.view'));
+  } else if (node.specialTrace) {
+    row.appendChild(el('span', 'meta', node.specialTrace));
+  } else {
+    [...new Set(node.ivarTraces.map((trace) => trace.split('.').pop()))].forEach((name) => row.appendChild(el('span', 'meta', name)));
+  }
   const copy = el('button', 'copy');
   copy.appendChild(icon('copy'));
   copy.title = t('复制路径');
@@ -682,6 +696,20 @@ function scrollToSelected() {
   else if (top + row.offsetHeight > tree.scrollTop + tree.clientHeight) tree.scrollTop = top + row.offsetHeight - tree.clientHeight;
 }
 
+// 选中路径记忆: 父节点 key -> 上次经过的子节点 key, → 时原路返回
+const childTrail = new Map();
+
+function rememberTrail(node) {
+  for (let n = node; n && n.parent; n = n.parent) childTrail.set(n.parent.key, n.key);
+}
+
+// 记住的子节点; 中间层在树中不可见(如被隐藏的 CALayer)时继续向下找
+function rememberedChild(node, rows) {
+  let key = childTrail.get(node.key);
+  while (key && !rows.includes(key)) key = childTrail.get(key);
+  return key || null;
+}
+
 // 当前树中可见行的顺序, 用于键盘导航
 function visibleRowKeys() {
   return [...$('tree').querySelectorAll('.row')].map((row) => row.dataset.key);
@@ -703,7 +731,7 @@ function handleTreeKey(key, alt = false) {
       state.expanded.add(node.key);
       renderTree();
     } else if (hasChildren) {
-      select(rows[index + 1], true);
+      select(rememberedChild(node, rows) || rows[index + 1], true);
     }
   } else if (key === 'ArrowLeft') {
     // 选中树中可见的父节点(跳过被隐藏的 CALayer 等)
@@ -722,6 +750,7 @@ function handleTreeKey(key, alt = false) {
   } else {
     return false;
   }
+  showSelectionTip();
   return true;
 }
 
@@ -762,6 +791,7 @@ function select(key, fromTree) {
   const previousWindow = currentWindow();
   state.selected = key;
   state.classTarget = null;
+  rememberTrail(state.nodes.get(key));
   if (!fromTree) {
     expandToSelected();
   }
@@ -830,8 +860,11 @@ async function setMode(mode) {
   else fitView();
 }
 
+// 小屏用单栏 + 底部切换: 触屏窄屏, 或桌面窗口窄到工具栏放不下; 其余按宽度自动收起侧栏
+const NARROW_QUERY = '(max-width: 760px) and (pointer: coarse), (max-width: 600px)';
+
 function isNarrow() {
-  return window.matchMedia('(max-width: 760px)').matches;
+  return window.matchMedia(NARROW_QUERY).matches;
 }
 
 // 画布可用尺寸: 去掉内边距(窄屏右侧为浮动工具列预留的位置)
@@ -1110,7 +1143,8 @@ function updateHighlights() {
 // MARK: - Hover tip
 // 画布悬停标签(类似 Chrome 检查元素): 只显示类名, 带箭头贴在悬停元素顶部, 元素不变则位置不变
 
-const hoverTip = { pendingKey: null, contentTimer: 0 };
+// selection: 键盘切换选中时标签贴在选中元素上, 鼠标移动后恢复跟随悬停
+const hoverTip = { pendingKey: null, contentTimer: 0, selection: false };
 
 function showHoverTip(event, node) {
   if (!node) {
@@ -1118,6 +1152,10 @@ function showHoverTip(event, node) {
     return;
   }
   const tip = $('hoverTip');
+  if (hoverTip.selection) {
+    hoverTip.selection = false;
+    delete tip.dataset.key;
+  }
   // 内容防抖: 鼠标在新目标上停留片刻再切换, 快速划过重叠层时不闪烁
   if (tip.hidden || !tip.dataset.key) {
     tip.hidden = false;
@@ -1136,6 +1174,20 @@ function showHoverTip(event, node) {
   }
 }
 
+// 键盘切换选中后, 等画布更新完再定位到选中元素
+function showSelectionTip() {
+  const node = state.nodes.get(state.selected);
+  if (!node) return;
+  requestAnimationFrame(() => {
+    if (state.selected !== node.key) return;
+    clearTimeout(hoverTip.contentTimer);
+    hoverTip.pendingKey = null;
+    hoverTip.selection = true;
+    $('hoverTip').hidden = false;
+    setHoverTipContent(node);
+  });
+}
+
 function setHoverTipContent(node) {
   const tip = $('hoverTip');
   tip.dataset.key = node.key;
@@ -1149,10 +1201,14 @@ function positionHoverTip() {
   const key = tip.dataset.key;
   if (tip.hidden || !key) return;
   const target = state.mode === '2d'
-    ? $('stage').querySelector('.box.hover')
+    ? $('stage').querySelector(hoverTip.selection ? '.box.selected' : '.box.hover')
     : $('stage').querySelector(`.slab[data-key="${CSS.escape(key)}"]`);
-  if (!target) return;
-  const rect = target.getBoundingClientRect();
+  const rect = target && target.getBoundingClientRect();
+  // 选中元素在画布上不可见(不在当前 window / 实时模式等)时不显示
+  if (!rect || (!rect.width && !rect.height)) {
+    if (hoverTip.selection) hideHoverTip();
+    return;
+  }
   const pane = $('canvasPane').getBoundingClientRect();
   const top = $('crumbs').getBoundingClientRect().bottom - pane.top;
   const arrow = 5;
@@ -1176,6 +1232,7 @@ function positionHoverTip() {
 function hideHoverTip() {
   const tip = $('hoverTip');
   tip.hidden = true;
+  hoverTip.selection = false;
   delete tip.dataset.key;
   clearTimeout(hoverTip.contentTimer);
   hoverTip.pendingKey = null;
@@ -2517,6 +2574,66 @@ function setupColorPicker() {
 
 // MARK: - Layout
 
+const PANEL_HIDDEN_KEYS = { tree: 'layerlens_tree_hidden', detail: 'layerlens_detail_hidden' };
+// 画布至少保留的宽度; 窗口变窄时先收起详情, 再收起层级树, 最后才压缩画布
+const CANVAS_MIN_W = 360;
+// hidden: 用户手动收起(持久化); auto: 宽度不足自动收起; forced: 自动收起状态下用户手动展开
+const panels = {
+  tree: { hidden: false, auto: false, forced: false },
+  detail: { hidden: false, auto: false, forced: false },
+};
+
+function panelHidden(name) {
+  const panel = panels[name];
+  return panel.hidden || (panel.auto && !panel.forced);
+}
+
+function syncPanels() {
+  ['tree', 'detail'].forEach((name) => {
+    const hidden = panelHidden(name);
+    document.body.classList.toggle(name + '-hidden', hidden);
+    $(name + 'Toggle').classList.toggle('on', !hidden);
+    $(name + 'Toggle').setAttribute('aria-pressed', String(!hidden));
+  });
+}
+
+function togglePanel(name) {
+  const panel = panels[name];
+  if (panelHidden(name)) {
+    panel.hidden = false;
+    panel.forced = panel.auto;
+  } else {
+    panel.hidden = true;
+    panel.forced = false;
+  }
+  try {
+    localStorage.setItem(PANEL_HIDDEN_KEYS[name], panel.hidden ? '1' : '0');
+  } catch (e) {
+    // 无痕模式等场景下不可用, 忽略
+  }
+  syncPanels();
+}
+
+// 按布局宽度计算自动收起: 三栏放不下先收详情, 两栏放不下再收层级树
+function updateAutoPanels() {
+  const layout = $('layout');
+  const width = layout.clientWidth;
+  if (!width) return;
+  const style = getComputedStyle(layout);
+  const size = (prop, fallback) => parseFloat(style.getPropertyValue(prop)) || fallback;
+  const treeW = size('--tree-w', size('--tree-d', 300)) + 1;
+  const detailW = size('--detail-w', size('--detail-d', 340)) + 1;
+  const autoDetail = width < treeW + detailW + CANVAS_MIN_W;
+  const autoTree = width < treeW + CANVAS_MIN_W;
+  [['tree', autoTree], ['detail', autoDetail]].forEach(([name, auto]) => {
+    const panel = panels[name];
+    // 宽度恢复后清掉手动展开标记, 下次变窄仍自动收起
+    if (!auto) panel.forced = false;
+    panel.auto = auto;
+  });
+  syncPanels();
+}
+
 const LAYOUT_KEY = 'layerlens_layout';
 
 function setupLayout() {
@@ -2581,6 +2698,17 @@ function setupLayout() {
       }
     });
   });
+
+  Object.keys(panels).forEach((name) => {
+    try {
+      panels[name].hidden = localStorage.getItem(PANEL_HIDDEN_KEYS[name]) === '1';
+    } catch (e) {
+      // ignore
+    }
+    $(name + 'Toggle').addEventListener('click', () => togglePanel(name));
+  });
+  updateAutoPanels();
+  new ResizeObserver(updateAutoPanels).observe(layout);
 
   setView('canvas');
   $('mobileNav').addEventListener('click', (e) => {
@@ -2848,6 +2976,50 @@ function colorEditor(v, commit) {
   return wrap;
 }
 
+// 事件浮窗: 每个手势 / 控件事件一组, 显示类名、来源、开关、代理与 target-action
+function showEventPop(node, anchor) {
+  const pop = $('eventPop');
+  if (!node || !node.events?.length) return;
+  if (!pop.hidden && pop.dataset.key === node.key && !pop.classList.contains('closing')) {
+    hideLayer(pop, 120);
+    return;
+  }
+  hidePopovers();
+  pop.dataset.key = node.key;
+  pop.replaceChildren(...node.events.map((event) => {
+    const item = el('div', 'ev-item');
+    item.appendChild(el('div', 'ev-name', event.name));
+    if (event.inherited) item.appendChild(el('div', 'ev-sub', t('继承自') + ' ' + event.inherited));
+    event.ivarTraces.forEach((trace) => item.appendChild(el('div', 'ev-sub', trace)));
+    const kv = el('div', 'ev-kv');
+    const add = (name, value) => kv.append(el('span', null, name), value instanceof Node ? value : el('span', 'ev-value', value));
+    if (event.type === 'gesture') {
+      const box = el('input');
+      box.type = 'checkbox';
+      box.checked = !!event.enabled;
+      // 只读展示, 不用 disabled 以免变灰看不清
+      box.tabIndex = -1;
+      add('Enabled', box);
+      if (event.delegate) add('Delegate', event.delegate);
+    }
+    event.targetActions.forEach(([target, action]) => {
+      add('Target', target);
+      add('Action', action);
+    });
+    item.appendChild(kv);
+    return item;
+  }));
+  showLayer(pop);
+  // 贴在蓝条右侧, 放不下时向上 / 向左收
+  const rect = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth;
+  const h = pop.offsetHeight;
+  const x = Math.max(4, Math.min(rect.right + 6, window.innerWidth - w - 4));
+  const y = Math.max(4, Math.min(rect.top - 6, window.innerHeight - h - 4));
+  pop.style.left = x + 'px';
+  pop.style.top = y + 'px';
+}
+
 function eventsCard(events) {
   const body = el('div');
   events.forEach((event) => {
@@ -3033,6 +3205,12 @@ function handleViewKey(key) {
     case 'c':
       if (!pickerAvailable()) return false;
       setColorPicker(!picker.on);
+      return true;
+    case 't':
+      togglePanel('tree');
+      return true;
+    case 'd':
+      togglePanel('detail');
       return true;
     case '[':
     case ']':
@@ -3233,6 +3411,8 @@ const SHORTCUT_GROUPS = [
     [['R'], '刷新'],
     [['⌘', 'C'], '复制选中节点路径'],
     [['右键'], '复制菜单'],
+    [['T'], '显示 / 隐藏层级面板'],
+    [['D'], '显示 / 隐藏详情面板'],
     [['?'], '显示此面板'],
   ]],
   ['层级树', false, [
@@ -3343,6 +3523,11 @@ function setup() {
       copyText(nodePath(state.nodes.get(key)), '复制路径');
       return;
     }
+    const bar = e.target.closest('.ev-bar');
+    if (bar) {
+      showEventPop(state.nodes.get(key), bar);
+      return;
+    }
     if (e.target.closest('.arrow')?.dataset.toggle) {
       if (e.altKey) {
         // Alt + 点击: 展开/收起整个子树
@@ -3390,9 +3575,10 @@ function setup() {
   });
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest('.context-menu')) hideMenu();
-    if (!e.target.closest('.popover-anchor')) hidePopovers();
+    if (!e.target.closest('.popover-anchor, .ev-bar')) hidePopovers();
   });
   document.addEventListener('scroll', hideMenu, true);
+  $('tree').addEventListener('scroll', () => hideLayer($('eventPop'), 120));
   window.addEventListener('blur', hideMenu);
   $('tree').addEventListener('mouseover', (e) => {
     const row = e.target.closest('.row');

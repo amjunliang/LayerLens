@@ -62,6 +62,10 @@
     node[@"hidden"] = @(item.isHidden);
     node[@"alpha"] = [self safeNumber:item.alpha];
     node[@"keyWindow"] = @(item.representedAsKeyWindow);
+    // 手势与 UIControl 事件, 树中据此显示事件标记
+    if (item.eventHandlers.count) {
+        node[@"events"] = [self eventHandlersFromHandlers:item.eventHandlers];
+    }
     node[@"children"] = children;
     return node;
 }
