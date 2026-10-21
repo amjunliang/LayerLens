@@ -2187,6 +2187,13 @@ function switchTargetInPlace(bundleId) {
   if (state.mode !== 'live') refresh();
 }
 
+function connectAppInPlace(bundleId) {
+  $('emptyState').hidden = true;
+  document.body.classList.remove('has-empty');
+  document.body.classList.add('has-app');
+  switchTargetInPlace(bundleId);
+}
+
 // 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
 // 切回 2D / 3D 或选择元素时会重新获取
 function clearHierarchy() {
@@ -2312,7 +2319,10 @@ function pollTargets() {
         if (state.mode !== 'live') refresh();
       }
       const next = nextTarget();
-      if (next) {
+      // 只选了设备时其上的 App 启动: 原地连接, 不重新加载页面, 实时画面不中断
+      if (next && next[0] === targets.deviceId && !targets.bundleId && next[1] && currentDevice()) {
+        connectAppInPlace(next[1]);
+      } else if (next) {
         switchTarget(...next);
         return;
       }

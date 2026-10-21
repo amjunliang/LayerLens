@@ -436,7 +436,8 @@ kbd {
   scrollbar-width: none;
   flex: none;
 }
-.crumbs:empty { display: none; }
+/* 没有面包屑时也占住这一行, 连接 App 后出现不会挤压画布, 画面不跳动 */
+.crumbs:empty { visibility: hidden; }
 .crumbs::-webkit-scrollbar { display: none; }
 /* 宽度不足时的压缩顺序: ivar 名 > 父视图类名 > 当前节点类名 */
 .crumb { flex: 0 1 auto; min-width: 32px; display: inline-flex; align-items: baseline; gap: 4px; border: none; background: none; padding: 1px 4px; color: var(--stage-text-2); overflow: hidden; }
@@ -536,8 +537,8 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 .slab.hover { border-color: var(--accent); box-shadow: inset 0 0 0 9999px rgba(47, 107, 255, 0.12); }
 .slab.selected { border: 2px solid var(--accent); box-shadow: inset 0 0 0 9999px rgba(47, 107, 255, 0.2); }
 .zoom-label { min-width: 46px; font-variant-numeric: tabular-nums; text-align: center; font: 12px var(--mono); color: var(--text-2); }
-/* 画布工具: 右上角一条竖向胶囊, 比画布高一档的底色, 描边和阴影浮在内容之上; 面包屑出现时下移让位 */
-.canvas-float { position: absolute; top: 12px; right: 12px; z-index: 6; display: flex; flex-direction: column; padding: 2px; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 999px; box-shadow: var(--float-shadow); }
+/* 画布工具: 右上角一条竖向胶囊, 比画布高一档的底色, 描边和阴影浮在内容之上; 放在面包屑一行下方 */
+.canvas-float { position: absolute; top: 38px; right: 12px; z-index: 6; display: flex; flex-direction: column; padding: 2px; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 999px; box-shadow: var(--float-shadow); }
 .float-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .canvas-float .icon-btn { border-radius: 50%; }
 /* 分组间短分隔线: 中间分组总是显示, 实时分组在它之前、3D 分组在它之后, 各自只画靠近中间的一侧 */
@@ -677,11 +678,9 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--muted); }
 .toast.show { opacity: 1; transform: translateX(-50%); }
 .toast.error { background: var(--danger); }
 
-.crumbs:not(:empty) ~ .canvas-float { top: 38px; }
 
 /* App 重启中或未运行: 画布顶部提示条, 右侧面板置灰 */
-.app-banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 128px); padding: 6px 6px 6px 12px; border-radius: var(--r-float); background: var(--panel); box-shadow: var(--shadow); font-size: 12px; }
-.crumbs:not(:empty) ~ .app-banner { top: 38px; }
+.app-banner { position: absolute; top: 38px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 128px); padding: 6px 6px 6px 12px; border-radius: var(--r-float); background: var(--panel); box-shadow: var(--shadow); font-size: 12px; }
 .app-banner[hidden] { display: none; }
 /* 实时画面可直接操作模拟器, 不显示 App 状态提示, 只用工具栏状态点提示; 修复触摸的提示照常显示 */
 body.mode-live #appBanner { display: none; }
@@ -797,7 +796,7 @@ body:not(.has-app) #liveInspect, body.app-offline #liveInspect { display: none; 
   .crumb:not(.current) .crumb-ivar { display: none; }
   /* 窄屏画面受宽度限制: 浮动工具横排到底部居中, 左右只留 8px, 底部让出工具条, 画面可以更大 */
   .stage-wrap, .live-wrap { padding: 8px 8px calc(60px + env(safe-area-inset-bottom)); }
-  .canvas-float, .crumbs:not(:empty) ~ .canvas-float { top: auto; right: auto; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom)); transform: translateX(-50%); flex-direction: row; }
+  .canvas-float { top: auto; right: auto; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom)); transform: translateX(-50%); flex-direction: row; }
   .float-group { flex-direction: row; }
   .float-group.live-only::after, .float-group.three-only::before { width: 1px; height: auto; margin: 6px 4px; }
   /* 层间距弹层向上弹出, 以整个工具条为参照水平居中, 不超出窗口 */
