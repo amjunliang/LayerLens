@@ -26,6 +26,12 @@ final class SimulatorStream {
     private let captureQueue: DispatchQueue
     private let touchQueue: DispatchQueue
     private var touch: SimTouch?
+    /// 尚未注入的最新一条移动, 任意线程写入, moveLock 保护
+    private let moveLock = NSLock()
+    private var pendingMove: (id: ObjectIdentifier, text: String)?
+    // touchQueue 上访问: 正在按下的观看者和位置, 断开时据此补发抬起
+    private var touchOwner: ObjectIdentifier?
+    private var lastTouch = (x: 0.5, y: 0.5)
 
     // queue 上访问
     private var viewers: [ObjectIdentifier: Viewer] = [:]
@@ -71,7 +77,7 @@ final class SimulatorStream {
     func add(_ socket: WebSocketConnection) {
         let id = ObjectIdentifier(socket)
         socket.onText = { [weak self] text in
-            self?.touchQueue.async { self?.handle(text) }
+            self?.receive(text, from: id)
         }
         socket.onClose = { [weak self] in
             self?.queue.async { self?.remove(id) }
@@ -118,6 +124,7 @@ final class SimulatorStream {
 
     private func remove(_ id: ObjectIdentifier) {
         viewers[id] = nil
+        touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
         guard viewers.isEmpty, running else { return }
         running = false
         config = nil
@@ -261,7 +268,38 @@ final class SimulatorStream {
 
     // MARK: - Input
 
-    private func handle(_ text: String) {
+    /// 移动只保留最新一条: 注入跟不上输入时丢弃中间位置, 不会越积越多导致拖动滞后; 其他消息照常排队, 顺序不变
+    private func receive(_ text: String, from id: ObjectIdentifier) {
+        guard text.contains("\"touch1-move\"") else {
+            touchQueue.async { [weak self] in self?.handle(text, from: id) }
+            return
+        }
+        moveLock.lock()
+        let scheduled = pendingMove != nil
+        pendingMove = (id, text)
+        moveLock.unlock()
+        guard !scheduled else { return }
+        touchQueue.async { [weak self] in
+            guard let self else { return }
+            self.moveLock.lock()
+            let move = self.pendingMove
+            self.pendingMove = nil
+            self.moveLock.unlock()
+            if let move {
+                self.handle(move.text, from: move.id)
+            }
+        }
+    }
+
+    /// 页面断开时手指可能还按着(拖动中关闭页面、网络中断), 补发抬起, 否则模拟器后续的点击会异常
+    private func releaseTouch(of id: ObjectIdentifier) {
+        guard touchOwner == id, let touch else { return }
+        touchOwner = nil
+        touch.send(phase: .up, x: lastTouch.x, y: lastTouch.y)
+        LiveLog.write("release touch of closed viewer")
+    }
+
+    private func handle(_ text: String, from id: ObjectIdentifier) {
         guard let data = text.data(using: .utf8),
               let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = message["type"] as? String else { return }
@@ -282,7 +320,11 @@ final class SimulatorStream {
                   width > 0, height > 0 else { return }
             let phase: SimTouch.Phase = type == "touch1-down" ? .down : type == "touch1-move" ? .move : .up
             let edge = Self.edges[message["edge"] as? String ?? ""] ?? 0
-            touch.send(phase: phase, x: x / width, y: y / height, edge: edge)
+            // 拖出画面时停在屏幕边缘, 与手指滑出屏幕一致
+            let point = (x: min(max(x / width, 0), 1), y: min(max(y / height, 0), 1))
+            touch.send(phase: phase, x: point.x, y: point.y, edge: edge)
+            touchOwner = phase == .up ? nil : id
+            lastTouch = point
         case "button" where message["button"] as? String == "swipe-to-home":
             touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
             for step in 1...10 {

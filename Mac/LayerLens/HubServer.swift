@@ -38,7 +38,10 @@ final class HubServer {
     }
 
     func start(completion: @escaping (Error?) -> Void) {
-        let parameters = NWParameters.tcp
+        // 关闭 Nagle: 实时画面静止时的小帧不必等待合并, 立即发出
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: Self.port)!)
         parameters.allowLocalEndpointReuse = true
         let listener: NWListener
