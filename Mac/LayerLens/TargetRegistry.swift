@@ -67,6 +67,8 @@ final class TargetRegistry {
     private let session: URLSession
     private var timer: DispatchSourceTimer?
     private var simulators: [DeviceRecord] = []
+    /// 未启动(或正在启动 / 关闭)的模拟器, 网页列出后可以启动
+    private var offlineSimulators: [(record: DeviceRecord, state: String)] = []
     private var usbDevices: [Usbmux.Device] = []
     /// UDID -> devicectl 查到的名称和系统版本, 每台设备只查一次
     private var deviceDetails: [String: (name: String, os: String, model: String)] = [:]
@@ -150,8 +152,20 @@ final class TargetRegistry {
         }
     }
 
-    /// 设备列表, 供网页展示; 每台设备附带其上运行的 App
-    func snapshot(completion: @escaping ([[String: Any]]) -> Void) {
+    /// 立即重新获取模拟器列表, 用于启动或关闭模拟器之后
+    func refreshSimulatorsNow(completion: @escaping () -> Void) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let list = Self.listSimulators()
+            self?.queue.async {
+                self?.simulators = list.booted
+                self?.offlineSimulators = list.offline
+                completion()
+            }
+        }
+    }
+
+    /// 设备列表, 供网页展示; 每台设备附带其上运行的 App. 另外返回未启动的模拟器
+    func snapshot(completion: @escaping ([[String: Any]], [[String: Any]]) -> Void) {
         queue.async { [self] in
             var devices = simulators + usbDevices.map { usbRecord($0) }
             // 未出现在 simctl / usbmuxd 结果中的设备(刷新时机不同)补上
@@ -180,7 +194,8 @@ final class TargetRegistry {
                     }
                 return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "model": device.model, "apps": deviceApps]
             }
-            completion(result)
+            let offline: [[String: Any]] = offlineSimulators.map { ["id": $0.record.id, "name": $0.record.name, "os": $0.record.os, "state": $0.state] }
+            completion(result, offline)
         }
     }
 
@@ -188,30 +203,40 @@ final class TargetRegistry {
 
     private func refreshSimulators() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let devices = Self.bootedSimulators()
+            let list = Self.listSimulators()
             self?.queue.async {
-                self?.simulators = devices
+                self?.simulators = list.booted
+                self?.offlineSimulators = list.offline
             }
         }
     }
 
-    /// 解析 `simctl list devices booted -j`, 运行时标识形如 com.apple.CoreSimulator.SimRuntime.iOS-26-5
-    private static func bootedSimulators() -> [DeviceRecord] {
-        guard let data = run("/usr/bin/xcrun", ["simctl", "list", "devices", "booted", "-j"]),
+    /// 解析 `simctl list devices available -j`, 运行时标识形如 com.apple.CoreSimulator.SimRuntime.iOS-26-5
+    private static func listSimulators() -> (booted: [DeviceRecord], offline: [(record: DeviceRecord, state: String)]) {
+        guard let data = run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "-j"]),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let runtimes = json["devices"] as? [String: [[String: Any]]] else {
-            return []
+            return ([], [])
         }
-        var result: [DeviceRecord] = []
+        var booted: [DeviceRecord] = []
+        var offline: [(record: DeviceRecord, state: String)] = []
         for (runtime, devices) in runtimes {
             let parts = (runtime.components(separatedBy: "SimRuntime.").last ?? runtime).split(separator: "-")
             let os = parts.isEmpty ? runtime : "\(parts[0]) \(parts.dropFirst().joined(separator: "."))"
-            for device in devices where device["state"] as? String == "Booted" {
+            for device in devices {
                 guard let udid = device["udid"] as? String else { continue }
-                result.append(DeviceRecord(id: udid, kind: .simulator, name: device["name"] as? String ?? udid, os: os))
+                let record = DeviceRecord(id: udid, kind: .simulator, name: device["name"] as? String ?? udid, os: os)
+                let state = device["state"] as? String ?? ""
+                if state == "Booted" {
+                    booted.append(record)
+                } else {
+                    offline.append((record, state))
+                }
             }
         }
-        return result.sorted { $0.name < $1.name }
+        // 未启动的按系统版本从新到旧, 同版本按名称
+        offline.sort { $0.record.os == $1.record.os ? $0.record.name < $1.record.name : $0.record.os.compare($1.record.os, options: .numeric) == .orderedDescending }
+        return (booted.sorted { $0.name < $1.name }, offline)
     }
 
     // MARK: - USB devices

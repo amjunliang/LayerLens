@@ -106,8 +106,8 @@ final class HubServer {
         case "/api/targets":
             var hubInfo: [String: Any] = ["version": Self.version, "apiVersion": Self.apiVersion, "live": SimulatorLive.isAvailable]
             hubInfo["liveError"] = SimBridge.loadError
-            registry.snapshot { devices in
-                connection.respond(.json(["hub": hubInfo, "devices": devices]))
+            registry.snapshot { devices, simulators in
+                connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators]))
             }
         case "/api/hub/run-status":
             let sourceFile = registry.sourceFile(bundleId: head.query["app"] ?? "")
@@ -201,6 +201,23 @@ final class HubServer {
             workQueue.async {
                 let ok = TargetRegistry.run("/usr/bin/xcrun", ["simctl", "launch", device, "com.apple.springboard"]) != nil
                 connection.respond(ok ? .json(["ok": true]) : .error(500, "simctl launch failed"))
+            }
+        case "/api/hub/simulator":
+            // 启动(同时打开 Simulator 窗口)或关闭模拟器, 完成后立即刷新列表, 网页下次轮询即可看到
+            guard let device = json["device"] as? String, UUID(uuidString: device) != nil,
+                  let action = json["action"] as? String, action == "boot" || action == "shutdown" else {
+                connection.respond(.error(400, "Invalid request"))
+                return
+            }
+            workQueue.async { [self] in
+                let ok = TargetRegistry.run("/usr/bin/xcrun", ["simctl", action, device]) != nil
+                if ok && action == "boot" {
+                    _ = TargetRegistry.run("/usr/bin/open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", device])
+                }
+                LiveLog.write("simulator \(action) \(device): \(ok)")
+                registry.refreshSimulatorsNow {
+                    connection.respond(ok ? .json(["ok": true]) : .error(500, "simctl \(action) failed"))
+                }
             }
         case "/api/hub/logs":
             // 在访达中定位日志文件, 排查问题时方便拿到

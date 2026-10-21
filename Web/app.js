@@ -805,8 +805,6 @@ function select(key, fromTree) {
   }
   clearTimeout(select.detailTimer);
   select.detailTimer = setTimeout(loadDetail, 120);
-  // 窄屏在层级页选中时, 提示画布内容已变化
-  if (isNarrow() && document.body.dataset.view === 'tree') $('mobileNav').querySelector('[data-view="canvas"]').classList.add('dot');
 }
 
 // 离开实时模式时刷新一次层级, 画面期间不同步
@@ -860,14 +858,14 @@ async function setMode(mode) {
   else fitView();
 }
 
-// 小屏用单栏 + 底部切换: 触屏窄屏, 或桌面窗口窄到工具栏放不下; 其余按宽度自动收起侧栏
+// 小屏用单栏 + 工具栏两端开关切换面板: 触屏窄屏, 或桌面窗口窄到工具栏放不下; 其余按宽度自动收起侧栏
 const NARROW_QUERY = '(max-width: 760px) and (pointer: coarse), (max-width: 600px)';
 
 function isNarrow() {
   return window.matchMedia(NARROW_QUERY).matches;
 }
 
-// 画布可用尺寸: 去掉内边距(窄屏右侧为浮动工具列预留的位置)
+// 画布可用尺寸: 去掉内边距(窄屏底部为浮动工具条预留的位置)
 function contentSize(wrap) {
   const style = getComputedStyle(wrap);
   return [
@@ -881,12 +879,14 @@ function planFitRatio() {
   return isNarrow() ? 1 : 0.92;
 }
 
+// 小屏一次只显示一个面板: 层级 / 详情盖住画布, 再点一次收起回到画布
 function setView(view) {
   document.body.dataset.view = view;
-  $('mobileNav').querySelectorAll('button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.view === view);
-    if (b.dataset.view === view) b.classList.remove('dot');
-  });
+  syncPanels();
+}
+
+function toggleView(view) {
+  setView(document.body.dataset.view === view ? 'canvas' : view);
 }
 
 // MARK: - Canvas
@@ -1859,6 +1859,69 @@ async function loadTargets() {
   const data = await res.json();
   targets.hub = data.hub;
   targets.devices = data.devices || [];
+  targets.simulators = data.simulators || [];
+  settleSimPending();
+}
+
+// 模拟器启动 / 关闭: 等列表反映出结果(出现在或离开已启动设备中)再清除进行中状态, 超时也清除
+const SIM_PENDING_TIMEOUT_MS = 90000;
+const SIM_CONFIRM_MS = 3000;
+const simPending = new Map();
+let simConfirm = null;
+
+function settleSimPending() {
+  simPending.forEach((pending, id) => {
+    const booted = targets.devices.some((d) => d.id === id);
+    if ((pending.action === 'boot') === booted || Date.now() - pending.since > SIM_PENDING_TIMEOUT_MS) {
+      simPending.delete(id);
+      if (pending.action === 'boot' && booted && pending.select) switchTarget(id, '');
+    }
+  });
+}
+
+async function simulatorAction(id, action, select) {
+  simPending.set(id, { action, since: Date.now(), select });
+  renderTargetMenu();
+  try {
+    const res = await fetch('/api/hub/simulator', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device: id, action }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await loadTargets();
+  } catch (e) {
+    simPending.delete(id);
+    toast(t(action === 'boot' ? '启动失败: {0}' : '关机失败: {0}', e.message), true);
+  }
+  renderTargetMenu();
+  syncLive();
+}
+
+// 关闭会结束模拟器上的 App, 第一次点击变为「确认关机」, 几秒内再点才执行
+function simPowerButton(id, booted) {
+  const pending = simPending.get(id);
+  const confirming = booted && simConfirm?.id === id && Date.now() < simConfirm.until;
+  // 平时只显示图标, 确认和进行中显示文字
+  const label = pending ? (pending.action === 'boot' ? t('启动中…') : t('关机中…')) : confirming ? t('确认关机') : '';
+  const button = el('button', 'target-power' + (confirming ? ' danger' : '') + (label ? ' text' : ''), label);
+  if (!label) button.append(icon(booted ? 'power' : 'play'));
+  button.title = booted ? t('关机') : t('启动');
+  button.disabled = !!pending;
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!booted) {
+      simulatorAction(id, 'boot', false);
+    } else if (confirming) {
+      simConfirm = null;
+      simulatorAction(id, 'shutdown', false);
+    } else {
+      simConfirm = { id, until: Date.now() + SIM_CONFIRM_MS };
+      setTimeout(renderTargetMenu, SIM_CONFIRM_MS);
+      renderTargetMenu();
+    }
+  });
+  return button;
 }
 
 function savedTarget() {
@@ -1880,10 +1943,14 @@ function pickTarget() {
     targets.bundleId = saved.bundleId || '';
     return;
   }
-  // 没有运行中的 App 时也选中第一台设备, 以便使用实时画面
-  const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
+  const first = defaultDevice();
   targets.deviceId = first ? first.id : '';
   targets.bundleId = firstAppId(first);
+}
+
+// 优先有运行中 App 的设备; 都没有时选第一台已启动的模拟器, 以便直接显示实时画面
+function defaultDevice() {
+  return targets.devices.find((d) => d.apps.length) || targets.devices.find((d) => d.kind === 'simulator') || targets.devices[0];
 }
 
 // 挂起的 App 由 Mac App 标记 suspended; 在后台但未挂起(如 Xcode 调试中)的由 App 上报 foreground
@@ -1926,65 +1993,113 @@ function switchTarget(deviceId, bundleId) {
   location.search = params.toString();
 }
 
+const targetMenuUi = { offlineOpen: false };
+
 function renderTargetMenu() {
   const menu = $('targetMenu');
   const children = [];
-  if (!targets.devices.length) {
-    children.push(el('div', 'target-empty', t('没有发现设备')));
-  }
   // 挂起的 App 不响应探测, 会从列表消失; 在后台时沿用最后一次的信息显示
   const background = appState.value === 'background';
   if (currentApp()) targets.lastApp = currentApp();
-  targets.devices.forEach((device) => {
-    // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
-    const selectable = device.kind === 'simulator';
-    const head = el(selectable ? 'button' : 'div', 'target-device', device.name);
-    // 真机名称是用户自定义的, 附上机型; 与名称相同(如模拟器)时不重复
-    const model = device.model && device.model !== device.name ? device.model : '';
-    head.append(el('span', null, [model, device.os].filter(Boolean).join(' · ')), el('span', 'target-kind ' + (selectable ? 'kind-simulator' : 'kind-device'), selectable ? t('模拟器') : t('设备 (USB)')));
-    if (selectable) {
-      head.classList.toggle('current', device.id === targets.deviceId && !targets.bundleId);
-      head.title = t('只使用实时画面');
-      head.addEventListener('click', () => {
-        hidePopovers();
-        if (device.id !== targets.deviceId || targets.bundleId) switchTarget(device.id, '');
+  // 按类型分组: 模拟器(已启动在前, 未启动的灰色显示在后), 真机
+  const simulators = targets.devices.filter((d) => d.kind === 'simulator');
+  const offline = targets.simulators || [];
+  const devices = targets.devices.filter((d) => d.kind !== 'simulator');
+  if (simulators.length || offline.length) {
+    children.push(el('div', 'target-section', t('模拟器')));
+    simulators.forEach((device) => children.push(...targetDeviceRows(device, background)));
+    if (offline.length) {
+      // 未启动的模拟器默认折叠, 有正在启动的时保持展开
+      const open = targetMenuUi.offlineOpen || offline.some((sim) => simPending.has(sim.id));
+      const toggle = el('button', 'target-fold' + (open ? ' open' : ''));
+      toggle.append(icon('chevron'), el('span', null, t('未启动 ({0})', offline.length)));
+      toggle.addEventListener('click', () => {
+        targetMenuUi.offlineOpen = !open;
+        renderTargetMenu();
       });
+      children.push(toggle);
+      if (open) offline.forEach((sim) => children.push(offlineSimulatorRow(sim)));
     }
-    children.push(head);
-    const apps = [...device.apps];
-    const last = targets.lastApp;
-    if (background && device.id === targets.deviceId && last?.bundleId === targets.bundleId && !apps.some((a) => a.bundleId === last.bundleId)) apps.push(last);
-    if (!apps.length) children.push(el('div', 'target-empty', t('没有运行中的已集成 App')));
-    apps.forEach((app) => {
-      const row = el('button', 'target-app');
-      const current = device.id === targets.deviceId && app.bundleId === targets.bundleId;
-      const inBackground = (current && background) || appInBackground(app);
-      row.classList.toggle('current', current);
-      row.classList.toggle('background', inBackground);
-      row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
-      if (!appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
-      row.append(el('span', 'target-app-meta', inBackground ? t('在后台') : app.version || ''));
-      row.title = `${app.bundleId} · ${t('端口 {0}', app.port)}`;
-      row.addEventListener('click', async () => {
-        hidePopovers();
-        // 切换到其他 App 时总是先激活: 旧版 Pod 不上报 foreground, 在后台也看不出来; 已在前台时无影响
-        if (inBackground || !current) {
-          // 激活要等 App 响应, 最多几秒
-          toast(t('正在切换到 {0}…', app.appName || app.bundleId));
-          await activateApp(device.id, app.bundleId);
-        }
-        // 当前 App 回到前台后由事件流恢复, 不必重新加载; 同一设备上换 App 原地切换, 实时画面不中断
-        if (current) return;
-        if (device.id === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
-        else switchTarget(device.id, app.bundleId);
-      });
-      children.push(row);
-    });
-  });
+  }
+  if (devices.length) {
+    children.push(el('div', 'target-section', t('真机 (USB)')));
+    devices.forEach((device) => children.push(...targetDeviceRows(device, background)));
+  }
+  if (children.length === 0) children.push(el('div', 'target-empty', t('没有发现设备')));
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
   footer.dataset.panel = 'integration';
   children.push(el('div', 'menu-sep'), footer);
   menu.replaceChildren(...children);
+}
+
+// 已启动的设备及其上运行的 App
+function targetDeviceRows(device, background) {
+  const rows = [];
+  // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
+  const selectable = device.kind === 'simulator';
+  const head = el(selectable ? 'button' : 'div', 'target-device');
+  // 真机名称是用户自定义的, 附上机型; 与名称相同(如模拟器)时不重复
+  const model = device.model && device.model !== device.name ? device.model : '';
+  head.append(el('span', 'status-dot ok'), el('span', 'target-device-name', device.name), el('span', 'target-device-os', [model, device.os].filter(Boolean).join(' · ')));
+  if (selectable) {
+    head.classList.toggle('current', device.id === targets.deviceId && !targets.bundleId);
+    head.title = t('只使用实时画面');
+    head.addEventListener('click', () => {
+      hidePopovers();
+      if (device.id !== targets.deviceId || targets.bundleId) switchTarget(device.id, '');
+    });
+    const row = el('div', 'target-device-row');
+    row.append(head, simPowerButton(device.id, true));
+    rows.push(row);
+  } else {
+    rows.push(head);
+  }
+  const apps = [...device.apps];
+  const last = targets.lastApp;
+  if (background && device.id === targets.deviceId && last?.bundleId === targets.bundleId && !apps.some((a) => a.bundleId === last.bundleId)) apps.push(last);
+  // App 缩进在设备下方, 左侧竖线表示归属
+  const group = el('div', 'target-apps');
+  rows.push(group);
+  if (!apps.length) group.append(el('div', 'target-empty', t('没有运行中的已集成 App')));
+  apps.forEach((app) => {
+    const row = el('button', 'target-app');
+    const current = device.id === targets.deviceId && app.bundleId === targets.bundleId;
+    const inBackground = (current && background) || appInBackground(app);
+    row.classList.toggle('current', current);
+    row.classList.toggle('background', inBackground);
+    row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
+    if (!appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
+    row.append(el('span', 'target-app-meta', inBackground ? t('在后台') : app.version || ''));
+    row.title = `${app.bundleId} · ${t('端口 {0}', app.port)}`;
+    row.addEventListener('click', async () => {
+      hidePopovers();
+      // 切换到其他 App 时总是先激活: 旧版 Pod 不上报 foreground, 在后台也看不出来; 已在前台时无影响
+      if (inBackground || !current) {
+        // 激活要等 App 响应, 最多几秒
+        toast(t('正在切换到 {0}…', app.appName || app.bundleId));
+        await activateApp(device.id, app.bundleId);
+      }
+      // 当前 App 回到前台后由事件流恢复, 不必重新加载; 同一设备上换 App 原地切换, 实时画面不中断
+      if (current) return;
+      if (device.id === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
+      else switchTarget(device.id, app.bundleId);
+    });
+    group.append(row);
+  });
+  return rows;
+}
+
+// 未启动的模拟器: 点名称启动并在启动后选中, 点按钮只启动
+function offlineSimulatorRow(sim) {
+  const head = el('button', 'target-device offline');
+  head.append(el('span', 'status-dot'), el('span', 'target-device-name', sim.name), el('span', 'target-device-os', sim.os));
+  head.title = t('启动并选中');
+  head.addEventListener('click', () => {
+    if (!simPending.has(sim.id)) simulatorAction(sim.id, 'boot', true);
+  });
+  const row = el('div', 'target-device-row');
+  row.append(head, simPowerButton(sim.id, false));
+  return row;
 }
 
 // 跟随模拟器前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
@@ -2108,7 +2223,7 @@ function nextTarget() {
     if (!targets.devices.length) return null;
     const back = currentDevice();
     if (back) return [back.id, targets.bundleId || firstAppId(back)];
-    const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
+    const first = defaultDevice();
     return [first.id, firstAppId(first)];
   }
   const device = currentDevice();
@@ -2118,7 +2233,7 @@ function nextTarget() {
     return null;
   }
   if (targets.deviceId || !targets.devices.length) return null;
-  const first = targets.devices.find((d) => d.apps.length) || targets.devices[0];
+  const first = defaultDevice();
   return [first.id, firstAppId(first)];
 }
 
@@ -2758,12 +2873,18 @@ function syncPanels() {
   ['tree', 'detail'].forEach((name) => {
     const hidden = panelHidden(name);
     document.body.classList.toggle(name + '-hidden', hidden);
-    $(name + 'Toggle').classList.toggle('on', !hidden);
-    $(name + 'Toggle').setAttribute('aria-pressed', String(!hidden));
+    // 小屏的开关表示该面板是否正盖在画布上
+    const on = isNarrow() ? document.body.dataset.view === name : !hidden;
+    $(name + 'Toggle').classList.toggle('on', on);
+    $(name + 'Toggle').setAttribute('aria-pressed', String(on));
   });
 }
 
 function togglePanel(name) {
+  if (isNarrow()) {
+    toggleView(name);
+    return;
+  }
   const panel = panels[name];
   if (panelHidden(name)) {
     panel.hidden = false;
@@ -2873,14 +2994,9 @@ function setupLayout() {
     }
     $(name + 'Toggle').addEventListener('click', () => togglePanel(name));
   });
+  document.body.dataset.view = 'canvas';
   updateAutoPanels();
   new ResizeObserver(updateAutoPanels).observe(layout);
-
-  setView('canvas');
-  $('mobileNav').addEventListener('click', (e) => {
-    const button = e.target.closest('button');
-    if (button) setView(button.dataset.view);
-  });
 }
 
 // MARK: - Detail
@@ -3875,6 +3991,8 @@ async function start() {
   }
   if (!targets.bundleId) {
     $('appName').textContent = device.name;
+    // 只选了模拟器(没有运行中的 App)时直接显示实时画面
+    if (device.kind === 'simulator' && liveAvailable()) setMode('live');
     const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
     showEmptyState(t('没有运行中的已集成 App'), body);
     setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
