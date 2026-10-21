@@ -202,6 +202,12 @@ final class HubServer {
                 let ok = TargetRegistry.run("/usr/bin/xcrun", ["simctl", "launch", device, "com.apple.springboard"]) != nil
                 connection.respond(ok ? .json(["ok": true]) : .error(500, "simctl launch failed"))
             }
+        case "/api/hub/logs":
+            // 在访达中定位日志文件, 排查问题时方便拿到
+            workQueue.async {
+                let ok = LiveLog.reveal()
+                connection.respond(ok ? .json(["ok": true]) : .error(500, "Open failed"))
+            }
         case "/api/hub/activate":
             // 把在后台的 App 切到前台; 已在运行时只激活, 不重启
             guard let device = json["device"] as? String, let app = json["app"] as? String, !device.isEmpty, !app.isEmpty else {

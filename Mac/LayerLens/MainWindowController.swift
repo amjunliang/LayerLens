@@ -123,20 +123,34 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     private var pendingPanel: String?
 
     private func makeReloadAccessory() -> NSTitlebarAccessoryViewController {
-        let title = L("重新加载页面", "Reload Page")
-        let image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: title)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
-        let button = NSButton(image: image ?? NSImage(), target: self, action: #selector(reload))
-        button.bezelStyle = .accessoryBarAction
-        button.showsBorderOnlyWhileMouseInside = true
-        button.toolTip = title + " (⇧⌘R)"
-        button.frame = NSRect(x: 0, y: 3, width: 28, height: 22)
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 36, height: 28))
-        container.addSubview(button)
+        let browser = makeTitlebarButton(symbol: "safari", title: L("在浏览器打开", "Open in Browser"), action: #selector(openInBrowser))
+        browser.frame = NSRect(x: 0, y: 3, width: 28, height: 22)
+        let reload = makeTitlebarButton(symbol: "arrow.clockwise", title: L("重新加载页面", "Reload Page"), action: #selector(reload))
+        reload.toolTip = L("重新加载页面", "Reload Page") + " (⇧⌘R)"
+        reload.frame = NSRect(x: 30, y: 3, width: 28, height: 22)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 66, height: 28))
+        container.addSubview(browser)
+        container.addSubview(reload)
         let accessory = NSTitlebarAccessoryViewController()
         accessory.view = container
         accessory.layoutAttribute = .trailing
         return accessory
+    }
+
+    private func makeTitlebarButton(symbol: String, title: String, action: Selector) -> NSButton {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        let button = NSButton(image: image ?? NSImage(), target: self, action: action)
+        button.bezelStyle = .accessoryBarAction
+        button.showsBorderOnlyWhileMouseInside = true
+        button.toolTip = title
+        return button
+    }
+
+    /// 用系统浏览器打开当前页面, 网页地址中带着当前设备与 App
+    @objc func openInBrowser() {
+        let target = webView.url.flatMap { $0.host == url.host && $0.port == url.port ? $0 : nil } ?? url
+        NSWorkspace.shared.open(target)
     }
 
     // MARK: - WKNavigationDelegate
@@ -165,16 +179,10 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
 
     // MARK: - WKScriptMessageHandler
 
-    /// 网页发来的消息: {action: "openBrowser", url} / {action: "theme", theme}
+    /// 网页发来的消息: {action: "theme", theme}
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
-        case "openBrowser":
-            let target = (body["url"] as? String).flatMap(URL.init(string:)) ?? url
-            // 只打开本服务的地址
-            if target.host == url.host && target.port == url.port {
-                NSWorkspace.shared.open(target)
-            }
         case "theme":
             applyTheme(body["theme"] as? String ?? "auto")
         default:

@@ -109,8 +109,41 @@
     if (hostView && ![hostView isKindOfClass:UIWindow.class] && !hostView.window) {
         return nil;
     }
-    UIImage *image = solo ? [self soloScreenshotOfLayer:layer hideLayers:soloLayers] : [layer lks_groupScreenshotWithLowQuality:NO];
+    UIImage *image = solo ? [self soloScreenshotOfLayer:layer hideLayers:soloLayers] : [self groupScreenshotOfLayer:layer];
     return image ? UIImagePNGRepresentation(image) : nil;
+}
+
+/// App 不在前台(切换 App、进入后台)时 drawViewHierarchyInRect:afterScreenUpdates:YES 会把视图挪到临时的 _UISnapshotWindow,
+/// 触发 willMoveToSuperview 等回调, 遇到 MJRefresh 这类在回调里移除 KVO 的视图会直接崩溃; 此时改用 renderInContext, 不移动视图
++ (UIImage *)groupScreenshotOfLayer:(CALayer *)layer {
+    if ([self canDrawHierarchyOfLayer:layer]) {
+        return [layer lks_groupScreenshotWithLowQuality:NO];
+    }
+    CGSize size = layer.frame.size;
+    if (size.width <= 0 || size.height <= 0 || size.width > 20000 || size.height > 20000) {
+        return nil;
+    }
+    UIGraphicsBeginImageContextWithOptions(size, NO, 0);
+    [layer renderInContext:UIGraphicsGetCurrentContext()];
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
++ (BOOL)canDrawHierarchyOfLayer:(CALayer *)layer {
+    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+        return NO;
+    }
+    UIView *view = layer.lks_hostView;
+    UIWindow *window = [view isKindOfClass:UIWindow.class] ? (UIWindow *)view : view.window;
+    if (!window) {
+        // 纯 CALayer 由 Lookin 走 renderInContext, 不受影响
+        return YES;
+    }
+    if (@available(iOS 13.0, *)) {
+        return window.windowScene.activationState == UISceneActivationStateForegroundActive;
+    }
+    return YES;
 }
 
 + (void)modifyWithOid:(unsigned long)oid attrId:(NSString *)attrId attrType:(NSInteger)attrType value:(id)value completion:(void (^)(NSDictionary *, NSString *))completion {
@@ -174,7 +207,7 @@
             [hiddenSublayers addObject:sublayer];
         }
     }
-    UIImage *image = [layer lks_groupScreenshotWithLowQuality:NO];
+    UIImage *image = [self groupScreenshotOfLayer:layer];
     for (CALayer *sublayer in hiddenSublayers) {
         sublayer.hidden = NO;
     }

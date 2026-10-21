@@ -52,7 +52,7 @@ enum SimBridge {
         loaded = true
         guard dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW | RTLD_GLOBAL) != nil else {
             loadError = "CoreSimulator: " + String(cString: dlerror())
-            NSLog("[live] %@", loadError ?? "")
+            LiveLog.write(loadError ?? "")
             return false
         }
         let dirs = candidateDeveloperDirs()
@@ -67,14 +67,14 @@ enum SimBridge {
                 if let handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL) {
                     simKit = handle
                     developerDir = dir
-                    NSLog("[live] SimulatorKit loaded from %@", path)
+                    LiveLog.write("SimulatorKit loaded from \(path)")
                     return true
                 }
                 errors.append(String(cString: dlerror()))
             }
         }
         loadError = "SimulatorKit: " + (errors.isEmpty ? "not found in " + dirs.joined(separator: ", ") : errors.joined(separator: "; "))
-        NSLog("[live] %@", loadError ?? "")
+        LiveLog.write(loadError ?? "")
         return false
     }
 
@@ -89,7 +89,7 @@ enum SimBridge {
         typealias CtxFn = @convention(c) (AnyClass, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>) -> AnyObject?
         guard let meta = object_getClass(cls), let ctxImp = class_getMethodImplementation(meta, ctxSel),
               let ctx = unsafeBitCast(ctxImp, to: CtxFn.self)(cls, ctxSel, developerDir as NSString, &err) as? NSObject else {
-            NSLog("[live] service context failed: %@", String(describing: err))
+            LiveLog.write("service context failed: \(String(describing: err))")
             return nil
         }
         let setSel = NSSelectorFromString("defaultDeviceSetWithError:")
@@ -232,7 +232,7 @@ final class SimTouch {
               let a = dlsym(dyld, "IOHIDEventAppendEvent"),
               let w = SimBridge.symbol("IndigoHIDMessageForTrackpadEventFromHIDEventRef"),
               let cls = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
-            NSLog("[live] touch symbols missing")
+            LiveLog.write("touch symbols missing")
             return nil
         }
         createDigitizer = unsafeBitCast(d, to: CreateDigitizerFn.self)
@@ -250,7 +250,7 @@ final class SimTouch {
               let initImp = class_getMethodImplementation(cls, initSel) else { return nil }
         var err: NSError?
         guard let c = unsafeBitCast(initImp, to: InitFn.self)(allocated, initSel, device, &err) else {
-            NSLog("[live] HID client init failed: %@", String(describing: err))
+            LiveLog.write("HID client init failed: \(String(describing: err))")
             return nil
         }
         client = c

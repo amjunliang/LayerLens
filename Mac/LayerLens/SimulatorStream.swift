@@ -95,7 +95,7 @@ final class SimulatorStream {
 
     private func start() -> Bool {
         guard let device = SimBridge.device(udid: udid), let screen = SimScreen(device: device, queue: captureQueue) else {
-            NSLog("[live] simulator %@ not available", udid)
+            LiveLog.write("simulator \(udid) not available")
             return false
         }
         self.device = device
@@ -191,6 +191,33 @@ final class SimulatorStream {
         }
     }
 
+    /// 网页点击「重新连接画面」时重建采集与编码: 有页面一直连着时推流不会自然重建, 卡住(如锁屏、休眠后)只能这样恢复
+    private func restartCapture() {
+        guard running else { return }
+        LiveLog.write("restart capture \(udid) by request")
+        guard let device, let screen = SimScreen(device: device, queue: captureQueue) else {
+            LiveLog.write("simulator \(udid) not available")
+            return
+        }
+        captureQueue.async { [self] in
+            self.screen?.stop()
+            pendingSurface = nil
+            encoding = false
+            encoder.invalidate()
+            self.screen = screen
+            screen.onFrame = { [weak self] surface in
+                self?.capture(surface, trailing: false)
+            }
+            screen.start()
+        }
+        // 新的编码会话会重新输出解码配置和关键帧
+        config = nil
+        for viewer in viewers.values {
+            viewer.waitingKeyFrame = true
+        }
+        requestKeyFrame()
+    }
+
     // MARK: - Capture
 
     private func capture(_ surface: IOSurface, trailing: Bool) {
@@ -243,6 +270,10 @@ final class SimulatorStream {
             queue.async { [weak self] in self?.setOrientation(value) }
             return
         }
+        if type == "restart" {
+            queue.async { [weak self] in self?.restartCapture() }
+            return
+        }
         guard let touch else { return }
         switch type {
         case "touch1-down", "touch1-move", "touch1-up":
@@ -280,7 +311,7 @@ final class SimulatorStream {
             DispatchQueue.global().async { [weak self] in
                 guard let self else { return }
                 guard SimulatorKeyboard.setPasteboard(text, udid: self.udid) else {
-                    NSLog("[live] set pasteboard failed")
+                    LiveLog.write("set pasteboard failed")
                     return
                 }
                 self.touchQueue.async {
@@ -288,7 +319,7 @@ final class SimulatorStream {
                 }
             }
         default:
-            NSLog("[live] unsupported message: %@", type)
+            LiveLog.write("unsupported message: \(type)")
         }
     }
 }

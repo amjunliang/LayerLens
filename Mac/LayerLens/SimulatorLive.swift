@@ -40,11 +40,11 @@ final class SimulatorLive {
         do {
             try process.run()
         } catch {
-            NSLog("[live] heal failed: %@", error.localizedDescription)
+            LiveLog.write("heal failed: \(error.localizedDescription)")
             return false
         }
         process.waitUntilExit()
-        NSLog("[live] heal touch %@: %d", udid, process.terminationStatus)
+        LiveLog.write("heal touch \(udid): \(process.terminationStatus)")
         return process.terminationStatus == 0
     }
 
@@ -68,5 +68,49 @@ final class SimulatorLive {
         let stream = SimulatorStream(udid: udid)
         streams[udid] = stream
         return stream
+    }
+}
+
+/// 实时画面日志, 写入 ~/Library/Logs/LayerLens/live.log, 用于排查黑屏、触摸无效等问题.
+/// 超过 maxSize 时改名为 live.1.log(覆盖上一份)后重新开始, 两份合计不超过 2 * maxSize
+enum LiveLog {
+    static let maxSize: UInt64 = 1_000_000
+    static let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/LayerLens/live.log")
+    private static let queue = DispatchQueue(label: "com.layerlens.live.log")
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    /// 在访达中选中日志文件, 还没有日志时打开所在文件夹
+    static func reveal() -> Bool {
+        let folder = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        return TargetRegistry.run("/usr/bin/open", exists ? ["-R", url.path] : [folder.path]) != nil
+    }
+
+    static func write(_ message: String) {
+        let time = Date()
+        queue.async {
+            guard let data = "\(formatter.string(from: time)) \(message)\n".data(using: .utf8) else { return }
+            let manager = FileManager.default
+            let size = (try? manager.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
+            if size >= maxSize {
+                let previous = url.deletingLastPathComponent().appendingPathComponent("live.1.log")
+                try? manager.removeItem(at: previous)
+                try? manager.moveItem(at: url, to: previous)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                try? manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? data.write(to: url)
+            }
+        }
     }
 }

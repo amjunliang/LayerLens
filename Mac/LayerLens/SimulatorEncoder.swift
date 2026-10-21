@@ -45,9 +45,15 @@ final class SimulatorEncoder {
         let options: CFDictionary? = forceKeyFrame ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         forceKeyFrame = false
         let time = CMClockGetTime(CMClockGetHostTimeClock())
-        VTCompressionSessionEncodeFrame(session, imageBuffer: buffer, presentationTimeStamp: time, duration: .invalid, frameProperties: options, infoFlagsOut: nil) { [weak self] status, _, sample in
-            guard status == noErr, let sample else { return }
+        let status = VTCompressionSessionEncodeFrame(session, imageBuffer: buffer, presentationTimeStamp: time, duration: .invalid, frameProperties: options, infoFlagsOut: nil) { [weak self] status, _, sample in
+            guard status == noErr, let sample else {
+                LiveLog.write("encode frame failed: \(status)")
+                return
+            }
             self?.output(sample)
+        }
+        if status != noErr {
+            LiveLog.write("encode failed: \(status)")
         }
     }
 
@@ -65,7 +71,7 @@ final class SimulatorEncoder {
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_H264, encoderSpecification: specification, imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &created)
         guard status == noErr, let created else {
-            NSLog("[live] encoder create failed: %d", status)
+            LiveLog.write("encoder create failed: \(status)")
             return false
         }
         let properties: [CFString: Any] = [

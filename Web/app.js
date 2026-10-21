@@ -1466,8 +1466,6 @@ function setupCanvasEvents() {
 // 模拟器实时画面: Mac App 采集模拟器屏幕编码为 H.264 经 /sim/ 推送, 并注入触摸与按键, 页面只负责解码绘制与转发操作
 
 const LIVE_RETRY_MS = 2000;
-// 画面静止判定: 服务端只在画面变化时推帧, 超过该时长没有新帧即视为静止
-const LIVE_SETTLE_MS = 500;
 const LIVE_CORNER = 55;
 // 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向左旋转的下一个方向, 与 Simulator.app 的 ⌘← 一致
 const LIVE_ROTATION = { 1: 0, 3: -90, 2: 180, 4: 90 };
@@ -1486,7 +1484,6 @@ const live = {
   altHeld: false,
   touch: null,
   orientation: 1,
-  settle: null,
   // 收到的画面帧数, 用于判断拖动后画面是否变化; 连续无效拖动次数
   frames: 0,
   deadDrags: 0,
@@ -1502,28 +1499,40 @@ function liveSupported() {
   return targets.hub?.live !== false;
 }
 
-// 当前设备是模拟器时启用实时画面, App 未运行也可用; 屏幕尺寸优先取 App 上报的, 否则向 Mac App 查询
-async function setupLive(info) {
+// 实时画面只取决于当前设备是否为运行中的模拟器(在 Mac App 的设备列表中), 与 App 是否运行、是否响应无关;
+// 加载时和每次刷新设备列表后调用, 模拟器关闭时断开, 重新启动后自动连上
+async function syncLive() {
   const device = currentDevice();
-  live.udid = device?.kind === 'simulator' ? device.id : '';
-  if (info?.screen) live.screen = info.screen;
-  if (live.udid && !info?.screen) {
-    try {
-      const info = await fetch(`/sim/${encodeURIComponent(live.udid)}/info`).then((r) => r.json());
-      live.screen = [info.screen.width, info.screen.height];
-    } catch (e) {
-      // 查询失败时用常见尺寸, 只影响画面比例, 触摸按比例换算不受影响
-      live.screen = [402, 874];
-    }
-  }
+  const udid = device?.kind === 'simulator' ? device.id : '';
   // 真机也显示按钮, 置灰并说明原因
-  const realDevice = !!device && device.kind !== 'simulator';
-  $('liveModeBtn').hidden = !liveAvailable() && !realDevice;
+  const realDevice = !!device && !udid;
+  $('liveModeBtn').hidden = !udid && !realDevice;
   $('liveModeBtn').classList.toggle('unavailable', realDevice);
   $('liveModeBtn').title = realDevice ? t('真机不支持实时画面') : t('模拟器实时画面');
-  document.body.classList.toggle('has-live', liveAvailable());
-  // 恢复到实时模式但当前不可用(如真机)时回到 2D
-  if (state.mode === 'live') liveAvailable() ? liveStart() : setMode('2d');
+  document.body.classList.toggle('has-live', !!udid);
+  if (udid !== live.udid) {
+    liveStop();
+    live.udid = udid;
+    if (udid) {
+      try {
+        const info = await fetch(`/sim/${encodeURIComponent(udid)}/info`).then((r) => r.json());
+        live.screen = [info.screen.width, info.screen.height];
+      } catch (e) {
+        // 查询失败时用常见尺寸, 只影响画面比例, 触摸按比例换算不受影响
+        live.screen = [402, 874];
+      }
+      if (live.udid !== udid) return;
+    }
+  }
+  if (state.mode !== 'live') return;
+  if (udid) {
+    liveStart();
+  } else if (realDevice) {
+    // 真机不支持实时画面, 回到 2D
+    setMode('2d');
+  } else {
+    showLiveGuide(t('模拟器未运行'));
+  }
 }
 
 function liveStart() {
@@ -1544,16 +1553,18 @@ function liveStart() {
   ws.onopen = () => {
     live.connected = true;
     $('liveGuide').hidden = true;
+    if (live.restartOnOpen) {
+      live.restartOnOpen = false;
+      liveSend({ type: 'restart' });
+    }
   };
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
-      feedLiveFrame(new Uint8Array(e.data));
+      const buf = new Uint8Array(e.data);
+      feedLiveFrame(buf);
       live.frames++;
-      if (live.settle) {
-        clearTimeout(live.settle.timer);
-        live.settle.timer = setTimeout(liveSettled, LIVE_SETTLE_MS);
-        live.settle.changed = true;
-      }
+      // 0x02 关键帧: 手动修复后收到即画面已恢复
+      if (live.restoring && buf[0] === 0x02) liveRestored();
       return;
     }
     // 方向由 Mac App 记录并广播, 多个页面保持一致
@@ -1576,25 +1587,6 @@ function liveStart() {
     live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
   if (!live.raf) live.raf = requestAnimationFrame(paintLive);
-}
-
-// duration 内每当实时画面变化后重新静止就执行一次 run; 新的调用替换之前的
-function watchLiveSettle(run, duration) {
-  clearTimeout(live.settle?.timer);
-  clearTimeout(live.settle?.end);
-  const settle = { run, changed: false, timer: 0 };
-  settle.end = setTimeout(() => {
-    clearTimeout(settle.timer);
-    if (live.settle === settle) live.settle = null;
-  }, duration);
-  live.settle = settle;
-}
-
-function liveSettled() {
-  const settle = live.settle;
-  if (!settle?.changed) return;
-  settle.changed = false;
-  settle.run();
 }
 
 function liveStop() {
@@ -1748,6 +1740,16 @@ async function healLiveTouch() {
   hideLiveHeal();
 }
 
+async function revealLogs() {
+  hidePopovers();
+  try {
+    const res = await fetch('/api/hub/logs', { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    toast(t('打开失败: {0}', e.message), true);
+  }
+}
+
 function liveSend(message) {
   if (live.ws && live.ws.readyState === WebSocket.OPEN) live.ws.send(JSON.stringify(message));
 }
@@ -1770,6 +1772,36 @@ function livePoint(e) {
 
 function liveRotate() {
   liveSend({ type: 'orientation', value: LIVE_ROTATE_LEFT[live.orientation] || 1 });
+}
+
+// 画面黑屏或卡住(如锁屏、休眠后)时手动恢复: 让 LayerLens 重建采集与编码, 收到关键帧即恢复成功;
+// 不在实时模式时先切过去, 连接未建立时等连上再发送
+const LIVE_RESTORE_TIMEOUT_MS = 5000;
+
+async function liveRestart() {
+  hidePopovers();
+  clearTimeout(live.restoreTimer);
+  live.restoring = true;
+  live.restoreTimer = setTimeout(() => {
+    if (!live.restoring) return;
+    live.restoring = false;
+    toast(t('仍未收到画面, 可尝试重启 LayerLens'));
+  }, LIVE_RESTORE_TIMEOUT_MS);
+  toast(t('正在重新连接画面…'));
+  if (state.mode !== 'live') await setMode('live');
+  if (live.ws && live.ws.readyState === WebSocket.OPEN) {
+    liveSend({ type: 'restart' });
+  } else {
+    liveStop();
+    live.restartOnOpen = true;
+    liveStart();
+  }
+}
+
+function liveRestored() {
+  live.restoring = false;
+  clearTimeout(live.restoreTimer);
+  toast(t('实时画面已恢复'));
 }
 
 // Home: 由 LayerLens 启动 SpringBoard, 直接回桌面; 失败时退回上滑手势.
@@ -1855,8 +1887,13 @@ function pickTarget() {
 }
 
 // 挂起的 App 由 Mac App 标记 suspended; 在后台但未挂起(如 Xcode 调试中)的由 App 上报 foreground
+// foreground 由 Pod 上报, 可能是布尔值或 0 / 1; 旧版 Pod 不上报
 function appInBackground(app) {
-  return !!app.suspended || app.foreground === false;
+  return !!app.suspended || app.foreground === false || app.foreground === 0;
+}
+
+function appInForeground(app) {
+  return !app.suspended && (app.foreground === true || app.foreground === 1);
 }
 
 // 自动选择时优先前台的 App, 挂起的 App 现在也会留在列表里
@@ -1878,6 +1915,8 @@ async function activateApp(deviceId, bundleId) {
 }
 
 function switchTarget(deviceId, bundleId) {
+  // 重新加载后保持当前模式(如实时画面)和视角
+  saveViewState();
   try {
     localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId }));
   } catch (e) {
@@ -1934,8 +1973,10 @@ function renderTargetMenu() {
           toast(t('正在切换到 {0}…', app.appName || app.bundleId));
           await activateApp(device.id, app.bundleId);
         }
-        // 当前 App 回到前台后由事件流恢复, 不必重新加载
-        if (!current) switchTarget(device.id, app.bundleId);
+        // 当前 App 回到前台后由事件流恢复, 不必重新加载; 同一设备上换 App 原地切换, 实时画面不中断
+        if (current) return;
+        if (device.id === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
+        else switchTarget(device.id, app.bundleId);
       });
       children.push(row);
     });
@@ -1944,6 +1985,121 @@ function renderTargetMenu() {
   footer.dataset.panel = 'integration';
   children.push(el('div', 'menu-sep'), footer);
   menu.replaceChildren(...children);
+}
+
+// 跟随模拟器前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
+// 前台是未集成的 App(如设置)时保持不动. 旧版 Pod 不上报 foreground, 不参与跟随.
+// 事件流连着时以 App 实时推送的状态为准; Mac App 的列表每 2s 扫描一次, 刚切换后可能还是旧状态
+function currentAppAway() {
+  if (!currentDevice() || !targets.bundleId) return false;
+  if (appState.value === 'background') return true;
+  const app = currentApp();
+  if (appState.value === 'offline') return !app;
+  return !appState.connected && !!app && appInBackground(app);
+}
+
+function followForeground(next) {
+  const app = targets.devices.find((d) => d.id === next[0])?.apps.find((a) => a.bundleId === next[1]);
+  switchTargetInPlace(next[1]);
+  toast(t('已切换到前台 App {0}', app?.appName || next[1]));
+}
+
+// 同一设备上换 App: 只替换目标、事件流、App 信息和层级, 不重新加载页面, 实时画面不中断
+function switchTargetInPlace(bundleId) {
+  try {
+    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId: targets.deviceId, bundleId }));
+  } catch (e) {
+    // 不可用时只依赖地址参数
+  }
+  history.replaceState(null, '', '?' + new URLSearchParams({ device: targets.deviceId, app: bundleId }).toString());
+  targets.bundleId = bundleId;
+  clearTimeout(appState.offlineTimer);
+  appState.offlineTimer = 0;
+  appState.dropped = false;
+  appState.connected = false;
+  appState.instanceId = currentApp()?.instanceId || '';
+  appState.warning = compatibilityWarning(currentApp());
+  setAppState('online');
+  watchApp();
+  loadAppInfo();
+  clearHierarchy();
+  if (state.mode !== 'live') refresh();
+}
+
+// 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
+// 切回 2D / 3D 或选择元素时会重新获取
+function clearHierarchy() {
+  ++refreshSeq;
+  resetImages();
+  state.roots = [];
+  state.nodes = new Map();
+  state.selected = null;
+  state.expanded.clear();
+  renderTree();
+  loadDetail();
+  updateAppMeta();
+}
+
+// 直接询问同一设备上其他 App 当前是否在前台, 不等 Mac App 每 2s 一次的端口扫描; 挂起的 App 不响应, 超时跳过
+async function probeForeground() {
+  const device = currentDevice();
+  if (!device) return null;
+  const others = device.apps.filter((a) => a.bundleId !== targets.bundleId);
+  const found = await Promise.all(others.map(async (a) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 800);
+    try {
+      const res = await fetch(`/t/${encodeURIComponent(device.id)}/${encodeURIComponent(a.bundleId)}/api/app`, { cache: 'no-store', signal: controller.signal });
+      const info = await res.json();
+      return appInForeground(info) ? a.bundleId : null;
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }));
+  const bundleId = found.find(Boolean);
+  return bundleId ? [device.id, bundleId] : null;
+}
+
+// 当前 App 是否确实在后台: 以 App 实时返回的状态为准; 挂起不响应时沿用列表中的挂起标记
+async function probeCurrentBackground() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 800);
+  try {
+    const res = await fetch(targetBase() + '/api/app', { cache: 'no-store', signal: controller.signal });
+    return appInBackground(await res.json());
+  } catch (e) {
+    return !!currentApp()?.suspended;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 当前 App 不在前台时查找前台 App: 先看 Mac App 的列表, 没有再直接询问各 App; 每 400ms 一次, 约 6s 后交给定时刷新
+const foregroundCheck = { running: false };
+
+async function checkForeground() {
+  if (foregroundCheck.running) return;
+  foregroundCheck.running = true;
+  try {
+    for (let attempt = 0; attempt < 15 && currentAppAway(); attempt++) {
+      try {
+        await loadTargets();
+        // 只认直接询问得到的实时状态, 列表中的前台标记可能过期, 会在两个 App 间来回切换
+        const next = await probeForeground();
+        if (next && currentAppAway()) {
+          followForeground(next);
+          return;
+        }
+      } catch (e) {
+        // 下次再试
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  } finally {
+    foregroundCheck.running = false;
+  }
 }
 
 // 需要自动切换时返回 [设备 ID, Bundle ID]: 选中的设备启动了, 选中的设备上出现 App, 或未选设备时出现设备
@@ -1984,12 +2140,13 @@ function pollTargets() {
     try {
       await loadTargets();
       renderTargetMenu();
+      syncLive();
       if (devicesGone()) {
         location.reload();
         return;
       }
       // 回到前台的通知可能早于事件流连上而错过, 列表里显示已在前台时恢复
-      if (appState.value === 'background' && currentApp()?.foreground === true && !currentApp().suspended) {
+      if (appState.value === 'background' && currentApp() && appInForeground(currentApp())) {
         setAppState('online');
         if (state.mode !== 'live') refresh();
       }
@@ -1998,6 +2155,11 @@ function pollTargets() {
         switchTarget(...next);
         return;
       }
+      // 事件流里的后台通知可能丢失(如重连时被覆盖), 列表显示在后台时直接询问当前 App 确认
+      if (appState.value === 'online' && currentApp() && appInBackground(currentApp()) && await probeCurrentBackground()) {
+        setAppState('background');
+      }
+      if (currentAppAway()) checkForeground();
     } catch (e) {
       // Mac App 已退出, 下次再试
     }
@@ -2013,7 +2175,9 @@ const appState = { value: 'online', connected: false, dropped: false, warning: '
 const OFFLINE_GRACE_MS = 4000;
 
 function watchApp() {
+  appState.source?.close();
   const source = new EventSource(targetBase() + '/api/events');
+  appState.source = source;
   source.onopen = () => {
     appState.connected = true;
     clearTimeout(appState.offlineTimer);
@@ -2027,8 +2191,11 @@ function watchApp() {
   // App 进入后台后被挂起, 事件流不断开, 由 App 推送前后台状态; 旧版 Pod 不推送, 视为前台
   source.addEventListener('state', (e) => {
     const { foreground } = JSON.parse(e.data || '{}');
-    if (foreground === false && appState.value === 'online') setAppState('background');
-    else if (foreground !== false && appState.value === 'background') {
+    const away = foreground === false || foreground === 0;
+    if (away && appState.value === 'online') {
+      setAppState('background');
+      checkForeground();
+    } else if (!away && appState.value === 'background') {
       setAppState('online');
       // 在后台期间页面可能已变化, 实时画面之外重新获取层级
       if (state.mode !== 'live') refresh();
@@ -2058,26 +2225,23 @@ async function reconnected() {
   }
   if (appState.instanceId && currentApp()?.instanceId === appState.instanceId) {
     appState.dropped = false;
-    setAppState('online');
+    // 等待列表期间事件流可能已推送在后台, 不覆盖
+    if (appState.value !== 'background') setAppState('online');
     return;
   }
   const toLive = liveAvailable() && state.mode !== 'live';
   if (toLive) await setMode('live');
-  // 实时画面一直连着, 不整页重新加载, 原地更新 App 信息; 层级立即取一次,
-  // 之后几秒内启动遮罩等首屏变化每次结束(画面静止)时再取, 不必固定等待
+  // 实时画面一直连着, 不整页重新加载, 原地更新 App 信息; oid 已重新分配, 旧层级作废
   if (state.mode === 'live') {
     appState.dropped = false;
     appState.instanceId = currentApp()?.instanceId || '';
     appState.warning = compatibilityWarning(currentApp());
-    // 原来靠整页重新加载复位, 这里手动结束运行跟踪; oid 已重新分配, 旧的选中和展开作废
+    // 原来靠整页重新加载复位, 这里手动结束运行跟踪
     setRunning(false);
-    state.selected = null;
-    state.expanded.clear();
     setAppState('online');
     if (toLive) toast(t('App 已重启, 已切换到实时画面'));
     loadAppInfo();
-    refresh();
-    watchLiveSettle(refresh, 5000);
+    clearHierarchy();
     return;
   }
   setAppState('back');
@@ -2398,6 +2562,8 @@ function setupLiveEvents() {
   // 多任务: 从底部上滑并停顿, 与真机手势一致
   $('liveSwitcher').addEventListener('click', () => liveSend({ type: 'button', button: 'app-switcher' }));
   $('liveRotate').addEventListener('click', liveRotate);
+  $('menuLiveRestart').addEventListener('click', liveRestart);
+  $('menuLogs').addEventListener('click', revealLogs);
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
   $('menuHeal').addEventListener('click', () => openPanel('heal'));
@@ -3492,20 +3658,6 @@ function setupPanels() {
   $('modalClose').addEventListener('click', closePanel);
 }
 
-// 在 Mac App 窗口中显示"在浏览器打开", 由原生打开系统浏览器
-function setupAppBridge() {
-  if (!window.LAYERLENS_APP) return;
-  $('openBrowserBtn').hidden = false;
-  $('openBrowserBtn').addEventListener('click', () => {
-    const params = new URLSearchParams();
-    if (targets.deviceId) params.set('device', targets.deviceId);
-    if (targets.bundleId) params.set('app', targets.bundleId);
-    const query = params.toString();
-    const url = `${location.origin}/${query ? '?' + query : ''}`;
-    window.webkit?.messageHandlers?.layerlens?.postMessage({ action: 'openBrowser', url });
-  });
-}
-
 // MARK: - Setup
 
 function setup() {
@@ -3698,7 +3850,6 @@ function setup() {
   applyTheme(loadTheme(), false);
   $('targetBtn').addEventListener('click', () => togglePopover('targetMenu'));
   setupPanels();
-  setupAppBridge();
   start();
 }
 
@@ -3712,19 +3863,18 @@ async function start() {
   const device = currentDevice();
   targets.hadDevice = !!device;
   renderTargetMenu();
+  await syncLive();
   pollTargets();
   // 一台设备都没有时显示默认页, 保留选中的目标, 该设备回来时优先连接
   if (!targets.devices.length) {
     targets.idle = true;
     $('appName').textContent = t('未连接');
-    await setupLive(null);
     showGuide();
     setAppState('offline', t('没有发现设备'));
     return;
   }
   if (!targets.bundleId) {
     $('appName').textContent = device.name;
-    await setupLive(null);
     const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
     showEmptyState(t('没有运行中的已集成 App'), body);
     setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
@@ -3738,7 +3888,6 @@ async function start() {
   if (!currentApp()) {
     appState.dropped = true;
     $('appName').textContent = targets.bundleId;
-    await setupLive(null);
     setAppState('offline');
     return;
   }
@@ -3755,11 +3904,9 @@ function loadAppInfo() {
     menuInfo.replaceChildren(el('b', null, info.appName), el('div', null, `${info.bundleId} · ${info.version}`), el('div', null, `${info.device} · ${info.os}`));
     updateAppMeta();
     document.title = `${info.appName} - LayerLens`;
-    setupLive(info);
   }).catch((e) => {
-    // App 刚换端口等情况下取不到, 仍显示名称并启用实时画面, 事件流重连后会重新加载
+    // App 刚换端口等情况下取不到, 仍显示名称, 事件流重连后会重新加载
     $('appName').textContent = currentApp()?.appName || targets.bundleId;
-    setupLive(null);
     toast(e.message, true);
   });
 }
