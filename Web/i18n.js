@@ -26,6 +26,7 @@ const EN = {
   '刷新 (R)': 'Refresh (R)',
   '刷新': 'Refresh',
   '视图选项': 'View options',
+  '视图选项…': 'View Options…',
   '主题': 'Theme',
   '自动': 'Auto',
   '浅色': 'Light',

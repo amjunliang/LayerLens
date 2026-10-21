@@ -37,6 +37,8 @@ const SKIP_GROUPS = new Set(['Class', 'Relation']);
 
 const DEFAULT_ROT_X = -12;
 const DEFAULT_ROT_Y = 28;
+// 与 CSS 中 .mode-3d .stage-wrap 的 perspective 保持一致
+const PERSPECTIVE = 2400;
 
 const state = {
   roots: [],
@@ -329,15 +331,53 @@ function fitView() {
     state.rotY = DEFAULT_ROT_Y;
   }
   state.zoom = 1;
+  centerStage();
+  // 3D 按层叠旋转、透视后的实际范围缩放并居中, 与 2D 一样占满画布, 不随层数和间距忽大忽小
+  const bounds = state.mode === '3d' ? projectedBounds() : null;
+  if (bounds) {
+    const [width, height] = contentSize($('stageWrap'));
+    const fit = Math.min(width / (bounds.maxX - bounds.minX), height / (bounds.maxY - bounds.minY)) * planFitRatio();
+    state.zoom = Math.max(0.2, Math.min(6, fit));
+    centerStage();
+    const next = projectedBounds();
+    state.panX -= (next.minX + next.maxX) / 2;
+    state.panY -= (next.minY + next.maxY) / 2;
+  }
+  applyStageTransform();
+}
+
+// 舞台中心(0,0,0)映射到视口中心
+function centerStage() {
   state.panX = 0;
   state.panY = 0;
   state.panZ = 0;
-  // 舞台中心(0,0,0)映射到视口中心
   const center = projectToScreen({ x: 0, y: 0, z: 0 });
   state.panX = -center.x;
   state.panY = -center.y;
   state.panZ = -center.z;
-  applyStageTransform();
+}
+
+// 3D 画布区域(window 或只看的子树)从底层到顶层的立体框, 经旋转和透视后在屏幕上的范围(相对视口中心).
+// 超出 window 的内容(如滚动视图未显示的部分)不参与计算, 避免把主体缩得很小; 没有可绘制的层时返回 null
+function projectedBounds() {
+  const win = currentWindow();
+  if (!win) return null;
+  const nodes = drawableNodes(win);
+  if (!nodes.length) return null;
+  const [, , fw, fh] = canvasFrame(win);
+  const depth = Math.max(...nodes.map((node) => node.level)) * state.spacing;
+  const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  [0, depth].forEach((z) => {
+    [[-fw / 2, -fh / 2], [fw / 2, -fh / 2], [-fw / 2, fh / 2], [fw / 2, fh / 2]].forEach(([x, y]) => {
+      const p = projectToScreen({ x, y, z });
+      const k = PERSPECTIVE / Math.max(1, PERSPECTIVE - p.z);
+      bounds.minX = Math.min(bounds.minX, p.x * k);
+      bounds.maxX = Math.max(bounds.maxX, p.x * k);
+      bounds.minY = Math.min(bounds.minY, p.y * k);
+      bounds.maxY = Math.max(bounds.maxY, p.y * k);
+    });
+  });
+  return bounds.maxX > bounds.minX && bounds.maxY > bounds.minY ? bounds : null;
 }
 
 function hideMenu() {
@@ -2029,6 +2069,12 @@ function renderTargetMenu() {
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
   footer.dataset.panel = 'integration';
   children.push(el('div', 'menu-sep'), footer);
+  // 工具栏放不下时视图选项按钮折叠, 从这里打开
+  if (document.body.classList.contains('fold-options')) {
+    const options = el('button', 'menu-row menu-action target-footer', t('视图选项…'));
+    options.addEventListener('click', () => togglePopover('optionsMenu'));
+    children.push(options);
+  }
   menu.replaceChildren(...children);
 }
 
@@ -2997,6 +3043,22 @@ function setupLayout() {
   document.body.dataset.view = 'canvas';
   updateAutoPanels();
   new ResizeObserver(updateAutoPanels).observe(layout);
+  const toolbar = document.querySelector('.toolbar');
+  const observer = new ResizeObserver(updateToolbarFold);
+  [toolbar, ...toolbar.children].forEach((node) => observer.observe(node));
+}
+
+// 工具栏放不下时先折叠视图选项按钮(低频), 两端的面板开关保持可见; 先展开再量, 变宽后能恢复
+function updateToolbarFold() {
+  const toolbar = document.querySelector('.toolbar');
+  const folded = document.body.classList.contains('fold-options');
+  document.body.classList.remove('fold-options');
+  const fold = toolbar.scrollWidth > toolbar.clientWidth;
+  document.body.classList.toggle('fold-options', fold);
+  if (fold !== folded) {
+    hideLayer($('optionsMenu'), 120);
+    renderTargetMenu();
+  }
 }
 
 // MARK: - Detail
