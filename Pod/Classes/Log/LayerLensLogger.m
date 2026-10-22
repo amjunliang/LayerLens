@@ -7,12 +7,12 @@
 //
 
 #import "LayerLensLogger.h"
+#import "LayerLensStorage.h"
 
 // Mac 端连上前的日志只保留最近这些条, 内存有上限
 static const NSUInteger kLayerLensLogBufferLimit = 5000;
 // 单条日志的最大长度, 超出部分截断
 static const NSUInteger kLayerLensLogMessageLimit = 100 * 1024;
-static const NSUInteger kLayerLensLogFileKeep = 7;
 static const int64_t kLayerLensLogFlushDelay = 100 * NSEC_PER_MSEC;
 
 @interface LayerLensLogger ()
@@ -23,7 +23,7 @@ static const int64_t kLayerLensLogFlushDelay = 100 * NSEC_PER_MSEC;
 @property (nonatomic, assign) uint64_t seq;
 @property (nonatomic, assign) BOOL flushScheduled;
 @property (nonatomic, strong, nullable) NSFileHandle *fileHandle;
-@property (nonatomic, copy, nullable) NSString *fileDay;
+@property (nonatomic, copy, nullable) NSString *filePath;
 @property (nonatomic, strong) NSDateFormatter *dayFormatter;
 @property (nonatomic, strong) NSDateFormatter *timeFormatter;
 
@@ -45,8 +45,7 @@ static const int64_t kLayerLensLogFlushDelay = 100 * NSEC_PER_MSEC;
         _queue = dispatch_queue_create("com.layerlens.log", DISPATCH_QUEUE_SERIAL);
         _buffer = [NSMutableArray array];
         _pending = [NSMutableArray array];
-        NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject ?: NSTemporaryDirectory();
-        _directory = [caches stringByAppendingPathComponent:@"LayerLens/Logs"];
+        _directory = [LayerLensStorage directoryNamed:@"Logs"];
         _dayFormatter = [self formatterWithFormat:@"yyyy-MM-dd"];
         _timeFormatter = [self formatterWithFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
     }
@@ -134,19 +133,19 @@ static const int64_t kLayerLensLogFlushDelay = 100 * NSEC_PER_MSEC;
 
 - (void)writeText:(NSString *)text date:(NSDate *)date {
     NSString *day = [self.dayFormatter stringFromDate:date ?: [NSDate date]];
-    if (!self.fileHandle || ![self.fileDay isEqualToString:day]) {
+    NSString *path = [self.directory stringByAppendingPathComponent:[day stringByAppendingPathExtension:@"log"]];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    // 换天或文件已被缓存清理删除时重新打开
+    if (!self.fileHandle || ![self.filePath isEqualToString:path] || ![manager fileExistsAtPath:path]) {
         [self.fileHandle closeFile];
         self.fileHandle = nil;
-        NSFileManager *manager = NSFileManager.defaultManager;
         [manager createDirectoryAtPath:self.directory withIntermediateDirectories:YES attributes:nil error:nil];
-        NSString *path = [self.directory stringByAppendingPathComponent:[day stringByAppendingPathExtension:@"log"]];
         if (![manager fileExistsAtPath:path]) {
             [manager createFileAtPath:path contents:nil attributes:nil];
-            [self removeOldFiles];
         }
         self.fileHandle = [NSFileHandle fileHandleForWritingAtPath:path];
         [self.fileHandle seekToEndOfFile];
-        self.fileDay = day;
+        self.filePath = path;
     }
     NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
     if (!data) {
@@ -158,6 +157,7 @@ static const int64_t kLayerLensLogFlushDelay = 100 * NSEC_PER_MSEC;
         // 磁盘已满等情况下放弃本次写入, 下次重新打开文件
         self.fileHandle = nil;
     }
+    [LayerLensStorage didWrite];
 }
 
 - (NSArray<NSDictionary *> *)fileInfos {
@@ -175,13 +175,6 @@ static const int64_t kLayerLensLogFlushDelay = 100 * NSEC_PER_MSEC;
         return [b[@"modified"] compare:a[@"modified"]];
     }];
     return files;
-}
-
-- (void)removeOldFiles {
-    NSArray<NSDictionary *> *files = [self fileInfos];
-    for (NSUInteger i = kLayerLensLogFileKeep; i < files.count; i++) {
-        [NSFileManager.defaultManager removeItemAtPath:[self.directory stringByAppendingPathComponent:files[i][@"name"]] error:nil];
-    }
 }
 
 - (void)filesWithCompletion:(void (^)(NSArray<NSDictionary *> *))completion {

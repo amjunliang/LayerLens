@@ -7,6 +7,7 @@
 //
 
 #import "LLEListViewController.h"
+#import "LLENetworkDemo.h"
 #if DEBUG && __has_include(<LayerLens/LayerLens.h>)
 #import <LayerLens/LayerLens.h>
 #define LLELog(...) LayerLensLog(__VA_ARGS__)
@@ -19,6 +20,7 @@
 @property (nonatomic, strong) UIView *headerCard;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIButton *actionButton;
+@property (nonatomic, strong) UIButton *requestButton;
 @property (nonatomic, strong) UITableView *tableView;
 
 @end
@@ -46,7 +48,12 @@
     [self.actionButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [self.actionButton addTarget:self action:@selector(toggleColor) forControlEvents:UIControlEventTouchUpInside];
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[self.titleLabel, self.actionButton]];
+    self.requestButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.requestButton setTitle:@"Send requests" forState:UIControlStateNormal];
+    [self.requestButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [self.requestButton addTarget:self action:@selector(sendRequests) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[self.titleLabel, self.actionButton, self.requestButton]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.alignment = UIStackViewAlignmentLeading;
     stack.spacing = 8;
@@ -80,6 +87,11 @@
     self.headerCard.backgroundColor = indigo ? UIColor.systemTealColor : UIColor.systemIndigoColor;
     // 日志显示在 LayerLens 的日志面板中
     LLELog(@"Toggle color: %@", indigo ? @"teal" : @"indigo");
+}
+
+// 请求显示在 LayerLens 的网络面板中
+- (void)sendRequests {
+    [LLENetworkDemo sendRequests];
 }
 
 #pragma mark - UITableViewDataSource

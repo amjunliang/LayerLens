@@ -14,6 +14,7 @@
 #import "LayerLensRuntimeReader.h"
 #import "LayerLensLogger.h"
 #import "LayerLensSandbox.h"
+#import "LayerLensNetworkRecorder.h"
 #import <UIKit/UIKit.h>
 
 @implementation LayerLensAPIController
@@ -68,6 +69,7 @@
     }];
 
     [self registerSandboxRoutesToRouter:router];
+    [self registerNetworkRoutesToRouter:router];
 
     [router addRoute:@"GET" path:@"/api/app" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         [self onMain:^{
@@ -224,6 +226,68 @@
             BOOL ok = [LayerLensSandbox removeItem:path error:&error];
             responder(ok ? [LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}] : [self responseWithError:error]);
         }];
+    }];
+}
+
+#pragma mark - Network
+
+- (void)registerNetworkRoutesToRouter:(LayerLensRouter *)router {
+    // 网页据此判断 Pod 是否支持抓包
+    [router addRoute:@"GET" path:@"/api/network/status" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}]);
+    }];
+
+    // 请求流: 先补齐序号大于 since 的请求, 之后每批变化推送一次, 同一请求以 id 合并; 清空时推送 clear
+    [router addRoute:@"GET" path:@"/api/network" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        uint64_t since = strtoull(request.query[@"since"].UTF8String ?: "0", NULL, 10);
+        [LayerLensNetworkRecorder.sharedRecorder recordsSince:since completion:^(NSArray<NSDictionary *> *records) {
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"network" object:@{@"instanceId": [LayerLensLookinBridge instanceId], @"records": records}];
+            response.channel = @"network";
+            responder(response);
+        }];
+    }];
+
+    [router addRoute:@"GET" path:@"/api/network/detail" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        uint64_t identifier = strtoull(request.query[@"id"].UTF8String ?: "0", NULL, 10);
+        [LayerLensNetworkRecorder.sharedRecorder detailForIdentifier:identifier completion:^(NSDictionary *detail) {
+            responder(detail ? [LayerLensHTTPResponse JSONResponse:detail] : [LayerLensHTTPResponse errorResponse:404 message:@"Request not found"]);
+        }];
+    }];
+
+    // side 为 req 或 res, 返回原始内容; 没有内容时 404 并给出原因
+    [router addRoute:@"GET" path:@"/api/network/body" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        uint64_t identifier = strtoull(request.query[@"id"].UTF8String ?: "0", NULL, 10);
+        [LayerLensNetworkRecorder.sharedRecorder bodyForIdentifier:identifier side:request.query[@"side"] ?: @"res" completion:^(NSData *data, NSString *contentType, NSString *message) {
+            if (!data) {
+                responder([LayerLensHTTPResponse errorResponse:404 message:message ?: @"No content"]);
+                return;
+            }
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse responseWithStatus:200 contentType:contentType body:data];
+            response.headers[@"Cache-Control"] = @"no-store";
+            responder(response);
+        }];
+    }];
+
+    // ids 为逗号分隔的请求 id, 为空时导出全部
+    [router addRoute:@"GET" path:@"/api/network/har" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSMutableArray<NSNumber *> *identifiers = [NSMutableArray array];
+        for (NSString *item in [request.query[@"ids"] ?: @"" componentsSeparatedByString:@","]) {
+            uint64_t identifier = strtoull(item.UTF8String ?: "0", NULL, 10);
+            if (identifier > 0) {
+                [identifiers addObject:@(identifier)];
+            }
+        }
+        [LayerLensNetworkRecorder.sharedRecorder HARWithIdentifiers:identifiers completion:^(NSData *data) {
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse responseWithStatus:200 contentType:@"application/json; charset=utf-8" body:data];
+            NSString *name = request.query[@"name"].length > 0 ? request.query[@"name"] : @"LayerLens.har";
+            response.headers[@"Content-Disposition"] = [self attachmentHeaderWithName:name];
+            responder(response);
+        }];
+    }];
+
+    [router addRoute:@"POST" path:@"/api/network/clear" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [LayerLensNetworkRecorder.sharedRecorder clear];
+        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}]);
     }];
 }
 

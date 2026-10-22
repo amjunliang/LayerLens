@@ -53,6 +53,8 @@
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
     <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-dock" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 14h16"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
   </defs>
@@ -111,7 +113,7 @@
       <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
     </div>
     <button class="icon-btn" id="sandboxBtn" title="沙盒文件" aria-label="沙盒文件"><svg class="icon"><use href="#i-folder"/></svg></button>
-    <button class="icon-btn toggle" id="logToggle" title="日志面板 (L)" aria-label="日志面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
+    <button class="icon-btn toggle" id="logToggle" title="日志与网络面板 (L / N)" aria-label="日志与网络面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
     <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
 </header>
@@ -203,22 +205,43 @@
 
   <section class="pane log-pane" id="logPane">
     <div class="log-head">
-      <label class="search-box log-search" id="logSearch">
+      <div class="segmented small pane-tabs" id="paneTabs">
+        <button data-pane="log" class="active">日志</button>
+        <button data-pane="net">网络</button>
+      </div>
+      <label class="search-box log-search log-only" id="logSearch">
         <svg class="icon"><use href="#i-search"/></svg>
         <input id="logFilter" type="search" placeholder="过滤, 多个关键词用 | 分隔, 以 \ 开头为正则" spellcheck="false" autocomplete="off">
       </label>
-      <span class="log-count" id="logCount"></span>
-      <div class="log-source" id="logSource" hidden>
+      <span class="log-count log-only" id="logCount"></span>
+      <div class="log-source log-only" id="logSource" hidden>
         <span class="log-source-name" id="logSourceName"></span>
         <button class="log-source-back" id="logBackLive">返回实时日志</button>
       </div>
-      <button class="icon-btn toggle" id="logWrap" title="换行" aria-label="换行" aria-pressed="false"><svg class="icon"><use href="#i-wrap"/></svg></button>
-      <button class="icon-btn" id="logTop" title="跳到顶部" aria-label="跳到顶部"><svg class="icon"><use href="#i-to-top"/></svg></button>
-      <button class="icon-btn" id="logBottom" title="跳到底部, 跟随最新" aria-label="跳到底部"><svg class="icon"><use href="#i-to-bottom"/></svg></button>
-      <button class="icon-btn" id="logClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <button class="icon-btn toggle log-only" id="logWrap" title="换行" aria-label="换行" aria-pressed="false"><svg class="icon"><use href="#i-wrap"/></svg></button>
+      <button class="icon-btn log-only" id="logTop" title="跳到顶部" aria-label="跳到顶部"><svg class="icon"><use href="#i-to-top"/></svg></button>
+      <button class="icon-btn log-only" id="logBottom" title="跳到底部, 跟随最新" aria-label="跳到底部"><svg class="icon"><use href="#i-to-bottom"/></svg></button>
+      <button class="icon-btn log-only" id="logClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <label class="search-box log-search net-only" id="netSearch">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input id="netFilter" type="search" placeholder="过滤地址, 方法或状态码, 多个关键词用 | 分隔" spellcheck="false" autocomplete="off">
+      </label>
+      <select id="netType" class="net-type net-only" aria-label="类型">
+        <option value="">全部</option>
+        <option value="json">JSON</option>
+        <option value="image">图片</option>
+        <option value="doc">文档</option>
+        <option value="other">其他</option>
+        <option value="failed">失败</option>
+      </select>
+      <span class="log-count net-only" id="netCount"></span>
+      <button class="icon-btn toggle net-only" id="netPause" title="暂停" aria-label="暂停" aria-pressed="false"><svg class="icon"><use href="#i-pause"/></svg></button>
+      <button class="icon-btn net-only" id="netHar" title="导出 HAR" aria-label="导出 HAR"><svg class="icon"><use href="#i-download"/></svg></button>
+      <button class="icon-btn net-only" id="netClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
       <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
       <button class="icon-btn" id="logPopout" title="在独立窗口打开" aria-label="在独立窗口打开"><svg class="icon"><use href="#i-external"/></svg></button>
-      <div class="popover-anchor">
+      <button class="icon-btn" id="logDock" title="停靠回主窗口" aria-label="停靠回主窗口"><svg class="icon"><use href="#i-dock"/></svg></button>
+      <div class="popover-anchor log-only">
         <button class="icon-btn" id="logMore" title="更多" aria-label="更多"><svg class="icon"><use href="#i-more"/></svg></button>
         <div class="popover menu log-menu" id="logMenu" hidden>
           <div class="menu-row"><span>字体</span><select id="logFont" class="log-font-select"></select></div>
@@ -236,7 +259,7 @@
       <button class="icon-btn" id="logClose" title="关闭 (L)" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
       <input type="file" id="logFileInput" accept=".log,.txt,text/plain" hidden>
     </div>
-    <div class="log-body">
+    <div class="log-body log-only">
       <div class="log-list" id="logList" tabindex="0">
         <div class="log-spacer" id="logSpacer"></div>
         <div class="log-rows" id="logRows"></div>
@@ -244,7 +267,21 @@
       <div class="log-empty" id="logEmpty" hidden></div>
       <button class="log-new" id="logNew" hidden>新日志 ↓</button>
     </div>
-    <div class="log-detail" id="logDetail" hidden></div>
+    <div class="log-detail log-only" id="logDetail" hidden></div>
+    <div class="net-body net-only" id="netBody">
+      <div class="net-main">
+        <div class="net-cols">
+          <span class="net-status">状态</span><span class="net-method">方法</span><span class="net-url">地址</span><span class="net-kind">类型</span><span class="net-size">大小</span><span class="net-time">耗时</span>
+        </div>
+        <div class="net-list" id="netList" tabindex="0">
+          <div class="log-spacer" id="netSpacer"></div>
+          <div class="log-rows" id="netRows"></div>
+        </div>
+        <div class="log-empty" id="netEmpty" hidden></div>
+      </div>
+      <div class="net-splitter" id="netSplitter" hidden></div>
+      <div class="net-detail" id="netDetail" hidden></div>
+    </div>
   </section>
 
   <div class="splitter vertical" data-split="s2"></div>

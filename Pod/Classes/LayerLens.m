@@ -12,9 +12,11 @@
 #import "LayerLensAPIController.h"
 #import "LayerLensLookinBridge.h"
 #import "LayerLensLogger.h"
+#import "LayerLensNetworkHooks.h"
+#import "LayerLensNetworkRecorder.h"
 #import <UIKit/UIKit.h>
 
-NSString * const LayerLensVersion = @"0.5.0";
+NSString * const LayerLensVersion = @"0.6.0";
 const NSInteger LayerLensAPIVersion = 1;
 
 #if DEBUG
@@ -36,6 +38,8 @@ static const NSInteger kLayerLensPortAttempts = 10;
 
 #if DEBUG
 + (void)load {
+    // 尽早替换 NSURLSession 的实现, 以记录启动阶段的请求
+    [LayerLensNetworkHooks install];
     // 与 Lookin 一致, 集成即启动; 延后到主线程以免在 +load 阶段创建网络对象
     dispatch_async(dispatch_get_main_queue(), ^{
         // 热重载注入的动态库会再带一份本类并再次执行 +load, 各镜像的静态变量互不相通;
@@ -93,13 +97,25 @@ static const NSInteger kLayerLensPortAttempts = 10;
             return @{@"entries": entries};
         }];
     };
+    LayerLensNetworkRecorder.sharedRecorder.onFlush = ^(NSArray<NSDictionary *> *records) {
+        [weakSelf.server broadcastEvent:@"network" channel:@"network" objectBlock:^id{
+            return @{@"records": records};
+        }];
+    };
+    LayerLensNetworkRecorder.sharedRecorder.onClear = ^{
+        [weakSelf.server broadcastEvent:@"clear" channel:@"network" objectBlock:^id{
+            return @{};
+        }];
+    };
     // 日志流心跳: Mac 端据此发现静默失效的连接(如锁屏期间被系统回收)并重新连接; 没有连接时不发送
     self.heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_timer(self.heartbeatTimer, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), 15 * NSEC_PER_SEC, NSEC_PER_SEC);
     dispatch_source_set_event_handler(self.heartbeatTimer, ^{
-        [weakSelf.server broadcastEvent:@"ping" channel:@"logs" objectBlock:^id{
-            return @{};
-        }];
+        for (NSString *channel in @[@"logs", @"network"]) {
+            [weakSelf.server broadcastEvent:@"ping" channel:channel objectBlock:^id{
+                return @{};
+            }];
+        }
     });
     dispatch_resume(self.heartbeatTimer);
     [self startServer];

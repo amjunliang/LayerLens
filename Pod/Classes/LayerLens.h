@@ -21,7 +21,7 @@ FOUNDATION_EXPORT const NSInteger LayerLensAPIVersion;
 /// 记录一条日志: 实时显示在 Mac 端的日志面板, 同时写入设备上的日志文件. 任意线程可调用, 非 DEBUG 编译时不做任何事
 + (void)log:(NSString *)message;
 
-/// 设备上的日志目录, 每天一个文件, 保留最近 7 天, 可用于分享
+/// 设备上的日志目录, 每天一个文件, 可用于分享. LayerLens 的缓存共用 300MB 上限, 超出时先删最早的文件
 + (NSString *)logDirectory;
 
 @end

@@ -3654,7 +3654,10 @@ function handleViewKey(key) {
       togglePanel('detail');
       return true;
     case 'l':
-      toggleLogPanel();
+      showPaneTab('log');
+      return true;
+    case 'n':
+      showPaneTab('net');
       return true;
     case '[':
     case ']':
@@ -3858,6 +3861,7 @@ const SHORTCUT_GROUPS = [
     [['T'], '显示 / 隐藏层级面板'],
     [['D'], '显示 / 隐藏详情面板'],
     [['L'], '显示 / 隐藏日志面板'],
+    [['N'], '显示 / 隐藏网络面板'],
     [['?'], '显示此面板'],
   ]],
   ['层级树', false, [
@@ -4394,7 +4398,7 @@ const LOG_FILE_CHUNK = 1024 * 1024;
 const LOG_OPEN_KEY = 'layerlens_log_open';
 const LOG_WRAP_KEY = 'layerlens_log_wrap';
 const LOG_FONT_KEY = 'layerlens_log_font';
-const LOG_FONT_SIZE = { min: 10, max: 20, value: 12 };
+const LOG_FONT_SIZE = { min: 10, max: 20, value: 13 };
 // 候选字体, 只列出本机已安装的
 const LOG_FONTS = ['SF Mono', 'Menlo', 'Monaco', 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'Cascadia Code', 'IBM Plex Mono', 'Hack', 'Inconsolata', 'Roboto Mono', 'Courier New', 'PingFang SC', 'Helvetica Neue'];
 const LOG_LINE_RE = /^\[(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{3})\] ?/;
@@ -4457,6 +4461,7 @@ function syncLogPanel() {
     logs.file = null;
     resetLogLines();
   }
+  syncNetPanel();
 }
 
 function toggleLogPanel() {
@@ -4916,10 +4921,13 @@ function applyLogFont(save) {
   const list = $('logList');
   const first = logs.view[logIndexAt(list.scrollTop)]?.id;
   const pane = $('logPane');
-  logs.rowH = Math.round(size * 1.4);
+  logs.rowH = Math.round(size * 1.5);
+  // 网络列表与日志共用字体设置, 行距更宽便于逐行对照
+  net.rowH = Math.round(size * 2);
   pane.style.setProperty('--log-font', family ? `"${family}", var(--mono)` : 'var(--mono)');
   pane.style.setProperty('--log-size', size + 'px');
   pane.style.setProperty('--log-row-h', logs.rowH + 'px');
+  pane.style.setProperty('--net-row-h', net.rowH + 'px');
   $('logSizeLabel').textContent = size;
   $('logSizeDown').disabled = size <= LOG_FONT_SIZE.min;
   $('logSizeUp').disabled = size >= LOG_FONT_SIZE.max;
@@ -4928,6 +4936,7 @@ function applyLogFont(save) {
   $('logSpacer').style.height = logOffset(logs.view.length) + 'px';
   if (!logs.follow && first) list.scrollTop = logOffset(logIndexOf(logs.view, first));
   scheduleLogRender();
+  scheduleNetRender();
   if (!save) return;
   try {
     localStorage.setItem(LOG_FONT_KEY, JSON.stringify(logs.font));
@@ -5135,14 +5144,55 @@ function setLogMax(max) {
 
 // 独立窗口只显示当前 App 的日志, 当前页面的面板随之收起
 function openLogWindow() {
-  const params = new URLSearchParams({ view: 'logs', device: targets.deviceId || '', app: targets.bundleId || '' });
-  const win = window.open('/?' + params, 'layerlens-logs-' + (targets.bundleId || ''), 'popup,width=1100,height=720');
+  const params = new URLSearchParams({ view: 'logs', device: targets.deviceId || '', app: targets.bundleId || '', tab: net.tab });
+  const win = window.open('/?' + params, `layerlens-${net.tab}-${targets.bundleId || ''}`, 'popup,width=1100,height=720');
   if (!win) {
     toast(t('无法打开新窗口, 请允许弹出窗口'), true);
     return;
   }
   if (isNarrow()) setView('canvas');
   else if (logs.open) toggleLogPanel();
+}
+
+// 独立窗口停靠回主窗口: 通知打开它的主窗口显示面板并切到同一页, 然后关闭自己.
+// 主窗口已刷新时 opener 失效, 再经 BroadcastChannel 通知查看同一 App 的主窗口
+const LOG_DOCK_MESSAGE = 'layerlens-dock';
+
+function dockLogWindow() {
+  const message = { type: LOG_DOCK_MESSAGE, tab: net.tab, device: targets.deviceId, app: targets.bundleId };
+  try {
+    window.opener?.postMessage(message, location.origin);
+  } catch (e) {
+    // 主窗口已关闭
+  }
+  try {
+    const channel = new BroadcastChannel(LOG_DOCK_MESSAGE);
+    channel.postMessage(message);
+    channel.close();
+  } catch (e) {
+    // 不支持时只依赖 opener
+  }
+  window.close();
+}
+
+function listenLogDock() {
+  if (logs.window) return;
+  const receive = (data, fromOpener) => {
+    if (data?.type !== LOG_DOCK_MESSAGE) return;
+    if (!fromOpener && (data.device !== targets.deviceId || data.app !== targets.bundleId)) return;
+    setPaneTab(data.tab);
+    if (isNarrow()) setView('log');
+    else if (!logs.open) toggleLogPanel();
+    window.focus();
+  };
+  window.addEventListener('message', (e) => {
+    if (e.origin === location.origin) receive(e.data, true);
+  });
+  try {
+    new BroadcastChannel(LOG_DOCK_MESSAGE).onmessage = (e) => receive(e.data, false);
+  } catch (e) {
+    // ignore
+  }
 }
 
 // 独立的日志窗口: 地址中带着设备与 App, 不加载层级和实时画面
@@ -5153,9 +5203,10 @@ function setupLogsWindow() {
   logs.window = true;
   document.body.classList.add('logs-window');
   applyI18n();
-  document.title = `${targets.bundleId || 'LayerLens'} · ${t('日志')}`;
   applyTheme(loadTheme(), false);
   setupLogs();
+  setupNetwork();
+  setPaneTab(params.get('tab'));
   setupPanels();
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest('.popover-anchor')) hidePopovers();
@@ -5185,6 +5236,8 @@ function setupLogs() {
   $('logClose').addEventListener('click', toggleLogPanel);
   $('logMax').addEventListener('click', () => setLogMax(!document.body.classList.contains('log-max')));
   $('logPopout').addEventListener('click', openLogWindow);
+  $('logDock').addEventListener('click', dockLogWindow);
+  listenLogDock();
   let filterTimer = null;
   $('logFilter').addEventListener('input', (e) => {
     clearTimeout(filterTimer);
@@ -5290,6 +5343,758 @@ function setupLogs() {
     }
     scheduleLogRender();
   }).observe(list);
+}
+
+// MARK: - Network
+
+const NET_MAX_RECORDS = 5000;
+const NET_PREVIEW_LIMIT = 512 * 1024;
+const NET_TAB_KEY = 'layerlens_pane_tab';
+const NET_DETAIL_W_KEY = 'layerlens_net_detail_w';
+const NET_DETAIL_MIN_W = 280;
+const NET_SUPPORT_VERSION = '0.6.0';
+// Pod 返回的原因, 显示前翻译
+const NET_BODY_MESSAGES = {
+  'No content': '没有内容',
+  'Content over 5 MB is not saved': '内容超过 5 MB, 未保存',
+  'Sent as a stream, content is not available': '以流的方式发送, 无法获取内容',
+  'File content is not saved': '文件内容未保存',
+  'Removed by cache cleanup': '已被缓存清理删除',
+  'Request not found': '请求已不在设备的记录中',
+};
+
+// records: id -> 请求的列表字段; list: 全部请求, 按 id 递增; view: 过滤后的请求
+// seq: 收到的最大序号, 重连时只补齐之后的变化; pending: 暂停期间收到的变化
+const net = {
+  tab: 'log',
+  rowH: 26,
+  active: false,
+  es: null,
+  key: '',
+  timer: null,
+  token: 0,
+  unsupported: false,
+  connecting: false,
+  instanceId: '',
+  seq: 0,
+  records: new Map(),
+  list: [],
+  view: [],
+  filter: { raw: '', terms: [], regex: null },
+  type: '',
+  paused: false,
+  pending: [],
+  selected: 0,
+  detail: null,
+  detailTab: 'headers',
+  detailToken: 0,
+  follow: true,
+  rendered: new Map(),
+  renderKey: '',
+  raf: 0,
+};
+
+function netVisible() {
+  return logVisible() && net.tab === 'net';
+}
+
+function syncNetPanel() {
+  $('logPane').classList.toggle('net', net.tab === 'net');
+  $('paneTabs').querySelectorAll('button').forEach((button) => button.classList.toggle('active', button.dataset.pane === net.tab));
+  const visible = netVisible();
+  if (visible && !net.active) {
+    net.active = true;
+    netConnect();
+    net.timer = setInterval(() => {
+      if (logTargetKey() !== net.key) netConnect();
+    }, 1000);
+    scheduleNetRender();
+  } else if (!visible && net.active) {
+    // 记录保留在页面中, 再次打开时只补齐之后的变化
+    net.active = false;
+    clearInterval(net.timer);
+    netDisconnect();
+  }
+}
+
+function setPaneTab(tab) {
+  net.tab = tab === 'net' ? 'net' : 'log';
+  try {
+    localStorage.setItem(NET_TAB_KEY, net.tab);
+  } catch (e) {
+    // ignore
+  }
+  if (logs.window) document.title = `${targets.bundleId || 'LayerLens'} · ${net.tab === 'net' ? t('网络') : t('日志')}`;
+  syncNetPanel();
+  if (net.tab === 'log') scheduleLogRender();
+}
+
+// 快捷键 L / N: 面板已显示该页时关闭, 否则打开并切到该页
+function showPaneTab(tab) {
+  const open = logVisible();
+  if (open && net.tab === tab) {
+    toggleLogPanel();
+    return;
+  }
+  setPaneTab(tab);
+  if (!open) toggleLogPanel();
+}
+
+async function netConnect() {
+  netDisconnect();
+  const key = logTargetKey();
+  if (key !== net.key) {
+    net.key = key;
+    resetNet();
+  }
+  if (!key) {
+    scheduleNetRender();
+    return;
+  }
+  const token = ++net.token;
+  net.connecting = true;
+  net.unsupported = false;
+  scheduleNetRender();
+  if (await netOutdated()) {
+    if (token !== net.token) return;
+    net.unsupported = true;
+    net.connecting = false;
+    scheduleNetRender();
+    return;
+  }
+  if (token !== net.token) return;
+  const es = new EventSource(`${targetBase()}/api/network?since=${net.seq}`);
+  const parse = (e) => {
+    try {
+      return JSON.parse(e.data) || {};
+    } catch (err) {
+      return {};
+    }
+  };
+  es.addEventListener('network', (e) => {
+    const data = parse(e);
+    net.connecting = false;
+    // App 重启后序号从头开始, 上一次的请求内容已不在设备上
+    if (data.instanceId && net.instanceId && data.instanceId !== net.instanceId) resetNet();
+    if (data.instanceId) net.instanceId = data.instanceId;
+    receiveNetRecords(data.records || []);
+  });
+  es.addEventListener('clear', () => resetNet());
+  // 断开后由浏览器自动重连; 期间 App 可能换成了旧版 Pod, 重新检查一次
+  es.onerror = async () => {
+    if (token !== net.token || !(await netOutdated()) || token !== net.token) return;
+    netDisconnect();
+    net.unsupported = true;
+    scheduleNetRender();
+  };
+  net.es = es;
+}
+
+// 旧版 Pod 没有抓包接口, 路由返回 Not Found; App 未运行时 Hub 返回 503, 不算过低
+async function netOutdated() {
+  try {
+    const res = await fetch(targetBase() + '/api/network/status');
+    if (res.status !== 404) return false;
+    const data = await res.json().catch(() => ({}));
+    return !data.error || data.error === 'Not Found';
+  } catch (e) {
+    return false;
+  }
+}
+
+function netDisconnect() {
+  net.token++;
+  net.es?.close();
+  net.es = null;
+  net.connecting = false;
+}
+
+function resetNet() {
+  net.records.clear();
+  net.list = [];
+  net.view = [];
+  net.pending = [];
+  net.seq = 0;
+  net.instanceId = '';
+  net.follow = true;
+  closeNetDetail();
+  scheduleNetRender();
+}
+
+function receiveNetRecords(records) {
+  if (!records.length) return;
+  if (net.paused) {
+    net.pending.push(...records);
+    renderNetStatus();
+    return;
+  }
+  applyNetRecords(records);
+}
+
+function applyNetRecords(records) {
+  let reorder = false;
+  let detailChanged = false;
+  for (const record of records) {
+    net.seq = Math.max(net.seq, record.s || 0);
+    const old = net.records.get(record.id);
+    if (old) {
+      if (record.id === net.selected && old.state !== record.state) detailChanged = true;
+      Object.assign(old, record);
+      continue;
+    }
+    if (net.list.length && net.list[net.list.length - 1].id > record.id) reorder = true;
+    net.records.set(record.id, record);
+    net.list.push(record);
+  }
+  if (reorder) net.list.sort((a, b) => a.id - b.id);
+  if (net.list.length > NET_MAX_RECORDS) {
+    net.list.splice(0, net.list.length - NET_MAX_RECORDS).forEach((record) => net.records.delete(record.id));
+  }
+  rebuildNetView();
+  if (detailChanged) loadNetDetail(net.selected);
+}
+
+function setNetPaused(paused) {
+  net.paused = paused;
+  const button = $('netPause');
+  button.classList.toggle('on', paused);
+  button.setAttribute('aria-pressed', String(paused));
+  button.title = paused ? t('继续') : t('暂停');
+  button.querySelector('use').setAttribute('href', paused ? '#i-play' : '#i-pause');
+  if (!paused && net.pending.length) {
+    const pending = net.pending;
+    net.pending = [];
+    applyNetRecords(pending);
+  }
+  renderNetStatus();
+}
+
+// MARK: Filter
+
+function netKind(record) {
+  const mime = (record.mime || '').toLowerCase();
+  if (mime.includes('json')) return 'json';
+  if (mime.startsWith('image/')) return 'image';
+  if (/^text\/|xml|javascript|ecmascript/.test(mime)) return 'doc';
+  return 'other';
+}
+
+function netFailed(record) {
+  return record.state === 'failed' || record.status >= 400;
+}
+
+function netMatches(record) {
+  if (net.type === 'failed') {
+    if (!netFailed(record)) return false;
+  } else if (net.type && (record.state === 'pending' || netKind(record) !== net.type)) {
+    return false;
+  }
+  const { terms, regex } = net.filter;
+  const text = `${record.method} ${record.url} ${record.status || ''}`;
+  if (regex) {
+    regex.lastIndex = 0;
+    return regex.test(text);
+  }
+  if (!terms.length) return true;
+  const lower = text.toLowerCase();
+  return terms.some((term) => lower.includes(term));
+}
+
+function netFilterActive() {
+  return !!(net.type || net.filter.regex || net.filter.terms.length);
+}
+
+function rebuildNetView() {
+  net.view = netFilterActive() ? net.list.filter(netMatches) : net.list;
+  scheduleNetRender();
+}
+
+// MARK: List
+
+function scheduleNetRender() {
+  if (!net.raf) net.raf = requestAnimationFrame(renderNet);
+}
+
+function renderNet() {
+  net.raf = 0;
+  if (!net.active) return;
+  const list = $('netList');
+  const view = net.view;
+  $('netSpacer').style.height = view.length * net.rowH + 'px';
+  if (net.follow) list.scrollTop = list.scrollHeight;
+  const top = list.scrollTop;
+  const overscan = Math.ceil(list.clientHeight / net.rowH);
+  const start = Math.max(0, Math.floor(top / net.rowH) - overscan);
+  const end = Math.min(view.length, Math.ceil((top + list.clientHeight) / net.rowH) + overscan);
+  const rows = $('netRows');
+  const key = `${net.selected}|${view === net.list}`;
+  if (key !== net.renderKey) {
+    rows.replaceChildren();
+    net.rendered.clear();
+    net.renderKey = key;
+  }
+  // 已渲染的行内容没变时不重绘, 请求结束等变化后重建该行
+  const keep = new Set();
+  const fragment = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    const record = view[i];
+    keep.add(record.id);
+    let entry = net.rendered.get(record.id);
+    if (entry && entry.s !== record.s) {
+      entry.row.remove();
+      entry = null;
+    }
+    if (!entry) {
+      entry = { s: record.s, row: netRow(record) };
+      net.rendered.set(record.id, entry);
+      fragment.appendChild(entry.row);
+    }
+    const y = i * net.rowH + 'px';
+    if (entry.row.style.top !== y) entry.row.style.top = y;
+    entry.row.classList.toggle('odd', i % 2 === 1);
+  }
+  net.rendered.forEach((entry, id) => {
+    if (keep.has(id)) return;
+    entry.row.remove();
+    net.rendered.delete(id);
+  });
+  rows.appendChild(fragment);
+  renderNetStatus();
+}
+
+function netDuration(ms) {
+  if (ms === undefined || ms === null) return '';
+  return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s';
+}
+
+function netMimeLabel(record) {
+  if (record.state === 'pending') return '';
+  const mime = (record.mime || '').split(';')[0].trim();
+  const sub = mime.split('/').pop() || '';
+  return sub.replace(/^x-/, '').replace(/^.*\+/, '');
+}
+
+function netStatusCell(record) {
+  const cell = el('span', 'net-status');
+  if (record.state === 'pending') {
+    cell.textContent = '…';
+    cell.classList.add('pending');
+  } else if (record.state === 'failed') {
+    cell.textContent = record.status || '×';
+    cell.classList.add('bad');
+    cell.title = record.error || '';
+  } else {
+    cell.textContent = record.status || '—';
+    if (record.status >= 400) cell.classList.add('bad');
+    else if (record.status >= 300) cell.classList.add('redirect');
+  }
+  return cell;
+}
+
+function netSplitURL(url) {
+  const match = /^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)(.*)$/i.exec(url || '');
+  return match ? [match[1], match[2] || '/'] : ['', url || ''];
+}
+
+function netRow(record) {
+  const row = el('div', 'log-row net-row' + (record.id === net.selected ? ' sel' : '') + (netFailed(record) ? ' failed' : ''));
+  row.dataset.id = record.id;
+  const [origin, path] = netSplitURL(record.url);
+  const url = el('span', 'net-url');
+  url.append(el('span', 'net-path', path), el('span', 'net-host', origin.replace(/^https?:\/\//, '')));
+  url.title = record.url;
+  row.append(
+    netStatusCell(record),
+    el('span', 'net-method', record.method),
+    url,
+    el('span', 'net-kind', netMimeLabel(record)),
+    el('span', 'net-size', record.state === 'pending' && !record.resSize ? '' : logSize(record.resSize || 0)),
+    el('span', 'net-time', record.state === 'pending' ? t('进行中') : netDuration(record.duration)),
+  );
+  return row;
+}
+
+function renderNetStatus() {
+  const total = net.list.length;
+  const count = $('netCount');
+  const parts = [];
+  if (net.view !== net.list) parts.push(el('span', 'hit', String(net.view.length)), document.createTextNode(' / ' + total));
+  else if (total) parts.push(document.createTextNode(String(total)));
+  // 暂停期间同一请求会收到开始与结束两次变化, 只数新请求
+  const paused = new Set(net.pending.filter((record) => !net.records.has(record.id)).map((record) => record.id)).size;
+  if (paused) parts.push(document.createTextNode(' ' + t('+{0} 暂停中', paused)));
+  count.replaceChildren(...parts);
+  let empty = '';
+  if (!net.key) empty = t('未连接 App');
+  else if (net.unsupported) {
+    const version = currentApp()?.podVersion;
+    empty = version ? t('App 集成的 LayerLens 为 {0}, 抓包需要 {1} 或更高版本, 更新 Pod 后重新运行 App', version, NET_SUPPORT_VERSION) : t('抓包需要 LayerLens {0} 或更高版本, 更新 Pod 后重新运行 App', NET_SUPPORT_VERSION);
+  } else if (!total) empty = net.connecting ? t('正在连接…') : t('暂无请求. 通过 NSURLSession 发出的请求会显示在这里, WKWebView 中的请求不会');
+  else if (!net.view.length) empty = t('没有匹配的请求');
+  $('netEmpty').textContent = empty;
+  $('netEmpty').hidden = !empty;
+  $('netHar').disabled = !net.view.length;
+}
+
+function netRecordIndex(id) {
+  return net.view.findIndex((record) => record.id === id);
+}
+
+function selectNet(id) {
+  net.selected = id;
+  scheduleNetRender();
+  if (id) loadNetDetail(id);
+  else closeNetDetail();
+}
+
+function moveNetSelection(step) {
+  if (!net.view.length) return;
+  const index = netRecordIndex(net.selected);
+  const next = net.view[Math.max(0, Math.min(net.view.length - 1, index < 0 ? (step > 0 ? 0 : net.view.length - 1) : index + step))];
+  selectNet(next.id);
+  const list = $('netList');
+  const y = netRecordIndex(next.id) * net.rowH;
+  if (y < list.scrollTop) list.scrollTop = y;
+  else if (y + net.rowH > list.scrollTop + list.clientHeight) list.scrollTop = y + net.rowH - list.clientHeight;
+  net.follow = false;
+}
+
+// MARK: Detail
+
+function closeNetDetail() {
+  net.selected = 0;
+  net.detail = null;
+  net.detailToken++;
+  $('netDetail').hidden = true;
+  $('netSplitter').hidden = true;
+  $('netDetail').replaceChildren();
+  scheduleNetRender();
+}
+
+function netApi(path, params) {
+  return `${targetBase()}/api/network/${path}?${new URLSearchParams(params)}`;
+}
+
+async function loadNetDetail(id) {
+  const token = ++net.detailToken;
+  const panel = $('netDetail');
+  panel.hidden = false;
+  $('netSplitter').hidden = false;
+  if (!net.detail || net.detail.id !== id) panel.replaceChildren(el('p', 'net-note', t('正在加载…')));
+  try {
+    const res = await fetch(netApi('detail', { id }));
+    const data = await res.json().catch(() => ({}));
+    if (token !== net.detailToken) return;
+    if (!res.ok) throw new Error(t(NET_BODY_MESSAGES[data.error] || data.error || `HTTP ${res.status}`));
+    net.detail = data;
+    renderNetDetail();
+  } catch (e) {
+    if (token !== net.detailToken) return;
+    net.detail = null;
+    panel.replaceChildren(netDetailHead(net.records.get(id)), el('p', 'net-note', t('无法读取请求详情: {0}', e.message)));
+  }
+}
+
+function netDetailHead(record) {
+  const head = el('div', 'net-detail-head');
+  const title = el('div', 'net-detail-title');
+  if (record) {
+    title.append(netStatusCell(record), el('span', 'net-method', record.method), el('span', 'net-detail-url', record.url));
+    title.title = record.url;
+  }
+  const tools = el('div', 'net-detail-tools');
+  const copyUrl = el('button', 'sb-text-btn');
+  copyUrl.append(icon('copy'), 'URL');
+  copyUrl.addEventListener('click', () => copyText(record?.url || '', '复制 URL'));
+  const curl = el('button', 'sb-text-btn', 'cURL');
+  curl.addEventListener('click', () => copyNetCurl());
+  curl.disabled = !net.detail;
+  const close = el('button', 'icon-btn');
+  close.title = t('关闭');
+  close.appendChild(icon('close'));
+  close.addEventListener('click', () => closeNetDetail());
+  tools.append(copyUrl, curl, close);
+  head.append(title, tools);
+  return head;
+}
+
+function renderNetDetail() {
+  const detail = net.detail;
+  const panel = $('netDetail');
+  const tabs = el('div', 'segmented small net-detail-tabs');
+  [['headers', '标头'], ['request', '请求'], ['response', '响应']].forEach(([name, label]) => {
+    const button = el('button', name === net.detailTab ? 'active' : '', t(label));
+    button.addEventListener('click', () => {
+      net.detailTab = name;
+      renderNetDetail();
+    });
+    tabs.appendChild(button);
+  });
+  const body = el('div', 'net-detail-body');
+  if (net.detailTab === 'headers') {
+    body.append(
+      netSection(t('概要'), netGeneralRows(detail)),
+      netSection(t('响应头'), netHeaderRows(detail.responseHeaders)),
+      netSection(t('请求头'), netHeaderRows(detail.requestHeaders)),
+    );
+  } else if (net.detailTab === 'request') {
+    const query = [...new URL(detail.url, location.href).searchParams];
+    if (query.length) body.appendChild(netSection(t('查询参数'), netKeyValueRows(query)));
+    body.appendChild(netBodySection(detail, 'req'));
+  } else {
+    body.appendChild(netBodySection(detail, 'res'));
+  }
+  panel.replaceChildren(netDetailHead(net.records.get(detail.id) || detail), tabs, body);
+}
+
+function netSection(title, content) {
+  const section = el('section', 'net-section');
+  section.appendChild(el('h5', null, title));
+  section.append(...[].concat(content));
+  return section;
+}
+
+function netKeyValueRows(pairs) {
+  if (!pairs.length) return el('p', 'net-note', t('无'));
+  const table = el('div', 'net-kv');
+  pairs.forEach(([name, value]) => {
+    table.append(el('span', 'net-k', name), el('span', 'net-v', value));
+  });
+  return table;
+}
+
+function netHeaderRows(headers) {
+  return netKeyValueRows(Object.entries(headers || {}).sort(([a], [b]) => a.toLowerCase().localeCompare(b.toLowerCase())));
+}
+
+function netGeneralRows(detail) {
+  const status = detail.state === 'pending' ? t('进行中') : detail.state === 'failed' ? `${detail.status || ''} ${detail.error || ''}`.trim() : String(detail.status || '—');
+  const types = { data: t('数据'), upload: t('上传'), download: t('下载') };
+  return netKeyValueRows([
+    ['URL', detail.url],
+    [t('方法'), detail.method],
+    [t('状态'), status],
+    [t('开始时间'), logFullTime(detail.start)],
+    [t('耗时'), netDuration(detail.duration) || '—'],
+    [t('任务类型'), types[detail.type] || detail.type],
+    [t('请求大小'), logSize(detail.reqSize || 0)],
+    [t('响应大小'), logSize(detail.resSize || 0)],
+    ['MIME', detail.mime || '—'],
+  ]);
+}
+
+function netBodySection(detail, side) {
+  const size = side === 'req' ? detail.reqSize : detail.resSize;
+  const state = side === 'req' ? detail.reqBody : detail.resBody;
+  const section = netSection(side === 'req' ? t('请求内容') : t('响应内容'), []);
+  const notes = { none: '没有内容', tooLarge: '内容超过 5 MB, 未保存', stream: '以流的方式发送, 无法获取内容', file: '文件内容未保存', evicted: '已被缓存清理删除' };
+  if (detail.state === 'pending' && side === 'res') {
+    section.appendChild(el('p', 'net-note', t('请求进行中, 结束后显示')));
+  } else if (state !== 'stored') {
+    section.appendChild(el('p', 'net-note', t(notes[state] || '没有内容') + (size && state !== 'none' ? ` (${logSize(size)})` : '')));
+  } else {
+    const box = el('div', 'net-body-box');
+    box.appendChild(el('p', 'net-note', t('正在加载…')));
+    section.appendChild(box);
+    loadNetBody(detail.id, side, box);
+  }
+  return section;
+}
+
+async function fetchNetBody(id, side) {
+  const res = await fetch(netApi('body', { id, side }));
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(t(NET_BODY_MESSAGES[data.error] || data.error || `HTTP ${res.status}`));
+  }
+  return { type: res.headers.get('Content-Type') || '', bytes: new Uint8Array(await res.arrayBuffer()) };
+}
+
+async function loadNetBody(id, side, box) {
+  const token = net.detailToken;
+  try {
+    const { type, bytes } = await fetchNetBody(id, side);
+    if (token !== net.detailToken) return;
+    const tools = el('div', 'net-body-tools');
+    tools.appendChild(el('span', 'sb-meta', `${type.split(';')[0] || 'application/octet-stream'} · ${logSize(bytes.length)}`));
+    if (/^image\//i.test(type)) {
+      const img = el('img', 'sb-image');
+      img.src = URL.createObjectURL(new Blob([bytes], { type }));
+      img.onerror = () => box.replaceChildren(tools, el('p', 'net-note', t('无法预览此图片')));
+      box.replaceChildren(tools, img);
+      return;
+    }
+    const text = sandboxText(bytes.slice(0, NET_PREVIEW_LIMIT));
+    if (text === null) {
+      box.replaceChildren(tools, el('p', 'net-note', t('二进制内容, 显示开头 {0} 字节', Math.min(bytes.length, 1024))), sandboxCode(sandboxHex(bytes.slice(0, 1024))));
+      return;
+    }
+    const full = bytes.length <= NET_PREVIEW_LIMIT ? new TextDecoder().decode(bytes) : text;
+    let content = full;
+    if (bytes.length <= NET_PREVIEW_LIMIT && (/json/i.test(type) || /^\s*[{[]/.test(full))) {
+      try {
+        content = JSON.stringify(JSON.parse(full), null, 2);
+      } catch (e) {
+        // 不是合法 JSON 时按原文显示
+      }
+    }
+    const nodes = [];
+    if (/x-www-form-urlencoded/i.test(type)) nodes.push(netKeyValueRows([...new URLSearchParams(full)]));
+    const copy = el('button', 'sb-text-btn');
+    copy.append(icon('copy'), t('复制'));
+    copy.addEventListener('click', () => copyText(content, '复制内容'));
+    tools.appendChild(copy);
+    if (bytes.length > NET_PREVIEW_LIMIT) nodes.push(el('p', 'net-note', t('内容较大, 只显示前 {0}', logSize(NET_PREVIEW_LIMIT))));
+    nodes.push(sandboxCode(content));
+    box.replaceChildren(tools, ...nodes);
+  } catch (e) {
+    if (token === net.detailToken) box.replaceChildren(el('p', 'net-note', e.message));
+  }
+}
+
+function shellQuote(text) {
+  return `'${String(text).replace(/'/g, `'\\''`)}'`;
+}
+
+async function copyNetCurl() {
+  const detail = net.detail;
+  if (!detail) return;
+  const parts = ['curl'];
+  if (detail.method !== 'GET') parts.push('-X', detail.method);
+  parts.push(shellQuote(detail.url));
+  const headers = detail.requestHeaders || {};
+  Object.entries(headers).forEach(([name, value]) => {
+    if (name.toLowerCase() !== 'content-length') parts.push('-H', shellQuote(`${name}: ${value}`));
+  });
+  if (Object.keys(headers).some((name) => name.toLowerCase() === 'accept-encoding')) parts.push('--compressed');
+  let note = '';
+  if (detail.reqBody === 'stored') {
+    try {
+      const { bytes } = await fetchNetBody(detail.id, 'req');
+      const text = sandboxText(bytes);
+      if (text === null) note = t('请求内容为二进制, 未包含在 cURL 中');
+      else parts.push('--data-raw', shellQuote(text));
+    } catch (e) {
+      note = t('无法读取请求内容: {0}', e.message);
+    }
+  } else if (detail.reqSize) {
+    note = t('请求内容未保存, 未包含在 cURL 中');
+  }
+  await copyText(parts.join(' '), '复制 cURL');
+  if (note) toast(note);
+}
+
+function exportNetHar() {
+  if (!net.view.length) return;
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${logPad(d.getMonth() + 1)}${logPad(d.getDate())}-${logPad(d.getHours())}${logPad(d.getMinutes())}${logPad(d.getSeconds())}`;
+  const params = { name: `${targets.bundleId || 'LayerLens'}-${stamp}.har` };
+  if (net.view !== net.list) params.ids = net.view.map((record) => record.id).join(',');
+  const link = el('a');
+  link.href = netApi('har', params);
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  toast(t('正在下载…'));
+}
+
+async function clearNet() {
+  try {
+    const res = await fetch(targetBase() + '/api/network/clear', { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    toast(t('清空失败: {0}', e.message), true);
+    return;
+  }
+  // 设备推送 clear 后各窗口同步清空, 这里先清空当前页面
+  resetNet();
+}
+
+function setNetDetailWidth(width, save) {
+  const body = $('netBody');
+  const max = Math.max(NET_DETAIL_MIN_W, body.clientWidth - 200);
+  const value = Math.round(Math.max(NET_DETAIL_MIN_W, Math.min(max, width)));
+  body.style.setProperty('--net-detail-w', value + 'px');
+  if (!save) return;
+  try {
+    localStorage.setItem(NET_DETAIL_W_KEY, String(value));
+  } catch (e) {
+    // ignore
+  }
+}
+
+function setupNetwork() {
+  try {
+    net.tab = localStorage.getItem(NET_TAB_KEY) === 'net' ? 'net' : 'log';
+    const width = Number(localStorage.getItem(NET_DETAIL_W_KEY));
+    if (width) $('netBody').style.setProperty('--net-detail-w', width + 'px');
+  } catch (e) {
+    // ignore
+  }
+  $('paneTabs').addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-pane]');
+    if (button) setPaneTab(button.dataset.pane);
+  });
+  let filterTimer = null;
+  $('netFilter').addEventListener('input', (e) => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => {
+      net.filter = parseLogFilter(e.target.value);
+      $('netSearch').classList.toggle('invalid', !!net.filter.invalid);
+      rebuildNetView();
+    }, 150);
+  });
+  $('netType').addEventListener('change', (e) => {
+    net.type = e.target.value;
+    rebuildNetView();
+  });
+  $('netPause').addEventListener('click', () => setNetPaused(!net.paused));
+  $('netClear').addEventListener('click', clearNet);
+  $('netHar').addEventListener('click', exportNetHar);
+  const list = $('netList');
+  list.addEventListener('scroll', () => {
+    net.follow = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
+    cancelAnimationFrame(net.raf);
+    net.raf = 0;
+    renderNet();
+  });
+  list.addEventListener('click', (e) => {
+    const row = e.target.closest('.net-row');
+    if (!row || window.getSelection().toString()) return;
+    const id = Number(row.dataset.id);
+    selectNet(id === net.selected ? 0 : id);
+  });
+  list.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveNetSelection(e.key === 'ArrowUp' ? -1 : 1);
+    } else if (e.key === 'Escape' && net.selected) {
+      e.stopPropagation();
+      closeNetDetail();
+    }
+  });
+  const splitter = $('netSplitter');
+  splitter.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    splitter.setPointerCapture(e.pointerId);
+    splitter.classList.add('dragging');
+    const right = $('netBody').getBoundingClientRect().right;
+    const move = (ev) => setNetDetailWidth(right - ev.clientX, false);
+    const up = (ev) => {
+      splitter.classList.remove('dragging');
+      splitter.removeEventListener('pointermove', move);
+      splitter.removeEventListener('pointerup', up);
+      splitter.removeEventListener('pointercancel', up);
+      setNetDetailWidth(right - ev.clientX, true);
+    };
+    splitter.addEventListener('pointermove', move);
+    splitter.addEventListener('pointerup', up);
+    splitter.addEventListener('pointercancel', up);
+  });
+  new ResizeObserver(() => scheduleNetRender()).observe(list);
+  syncNetPanel();
 }
 
 // MARK: - Setup
@@ -5485,6 +6290,7 @@ function setup() {
   setupLiveEvents();
   setupColorPicker();
   setupLogs();
+  setupNetwork();
   setupLayout();
 
   applyTheme(loadTheme(), false);

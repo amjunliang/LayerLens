@@ -14,7 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 日志条目为 {"s": 序号, "t": 毫秒时间戳, "m": 内容}, 所有状态只在内部串行队列上读写
 @interface LayerLensLogger : NSObject
 
-/// 设备上的日志目录, 每天一个文件
+/// 设备上的日志目录, 每天一个文件, 与其他缓存共用总大小上限, 超出时先删最早的
 @property (nonatomic, copy, readonly) NSString *directory;
 /// 有新日志时在内部队列回调, 每 100ms 最多一次, 一次带上这段时间内的所有条目
 @property (nonatomic, copy, nullable) void (^onFlush)(NSArray<NSDictionary *> *entries);
