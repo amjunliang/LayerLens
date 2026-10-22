@@ -152,10 +152,54 @@
 
 - (void)resumeIfNeeded {
     dispatch_async(self.queue, ^{
-        if (self.stopped || self.listener || self.pendingListener || self.attempts <= 0) {
+        if (self.stopped || self.pendingListener || self.attempts <= 0) {
+            return;
+        }
+        if (self.listener) {
+            [self verifyListener:self.listener];
             return;
         }
         [self tryListenWithLoopbackOnly:self.loopbackOnly port:self.startPort remaining:self.attempts completion:self.startCompletion];
+    });
+}
+
+// 真机锁屏期间系统会回收监听 socket, 但监听器仍停留在 ready, 不会收到失效回调.
+// 回到前台时连接一次自己的端口, 连不上则丢弃监听器并重新监听
+- (void)verifyListener:(nw_listener_t)listener {
+    NSString *portString = [NSString stringWithFormat:@"%u", self.port];
+    nw_endpoint_t endpoint = nw_endpoint_create_host("127.0.0.1", portString.UTF8String);
+    nw_parameters_t parameters = nw_parameters_create_secure_tcp(NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    nw_connection_t probe = nw_connection_create(endpoint, parameters);
+    __weak typeof(self) weakSelf = self;
+    __block BOOL finished = NO;
+    void (^finish)(BOOL) = ^(BOOL alive) {
+        if (finished) {
+            return;
+        }
+        finished = YES;
+        nw_connection_cancel(probe);
+        __strong typeof(weakSelf) self = weakSelf;
+        if (alive || !self || self.stopped || self.listener != listener) {
+            return;
+        }
+        NSLog(@"[LayerLens] Listener on port %u is dead, restarting", self.port);
+        self.listener = nil;
+        self.port = 0;
+        nw_listener_cancel(listener);
+        [self tryListenWithLoopbackOnly:self.loopbackOnly port:self.startPort remaining:self.attempts completion:self.startCompletion];
+    };
+    nw_connection_set_queue(probe, self.queue);
+    nw_connection_set_state_changed_handler(probe, ^(nw_connection_state_t state, nw_error_t error) {
+        if (state == nw_connection_state_ready) {
+            finish(YES);
+        } else if (state == nw_connection_state_waiting || state == nw_connection_state_failed) {
+            // 端口无人监听时连接进入 waiting(ECONNREFUSED)
+            finish(NO);
+        }
+    });
+    nw_connection_start(probe);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), self.queue, ^{
+        finish(NO);
     });
 }
 
