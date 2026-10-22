@@ -1868,8 +1868,65 @@ const TARGET_KEY = 'layerlens_target';
 const TARGETS_POLL_MS = 2000;
 const API_VERSION = 1;
 // hadDevice: 页面加载时选中的设备是否存在
-// idle: 正在显示没有设备的默认页; goneSince: 设备全部断开的时间
-const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false, idle: false, goneSince: 0 };
+// idle: 正在显示没有设备的默认页
+const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false, idle: false };
+
+// 连接过的设备和 App: 断开后仍显示在菜单中, 选中项不随设备断开跳动, 连回来后自动恢复.
+// 存在 sessionStorage 中, 切换设备重新加载页面后保留, 关闭窗口即清除
+// { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version } } } }
+const HISTORY_KEY = 'layerlens_target_history';
+const targetHistory = loadTargetHistory();
+
+function loadTargetHistory() {
+  try {
+    return JSON.parse(sessionStorage.getItem(HISTORY_KEY)) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveTargetHistory() {
+  try {
+    sessionStorage.setItem(HISTORY_KEY, JSON.stringify(targetHistory));
+  } catch (e) {
+    // 不可用时只保留在内存中
+  }
+}
+
+// 记录当前连接的设备和 App; 设备不在列表中时(如带地址参数打开)补一条占位记录
+function recordTargetHistory() {
+  if (!targets.deviceId) return;
+  const before = JSON.stringify(targetHistory[targets.deviceId] || null);
+  const entry = targetHistory[targets.deviceId] || { id: targets.deviceId, name: t('已断开的设备'), kind: '', apps: {} };
+  const device = currentDevice();
+  if (device) Object.assign(entry, { name: device.name, model: device.model || '', os: device.os || '', kind: device.kind });
+  const app = currentApp();
+  if (app) entry.apps[app.bundleId] = { bundleId: app.bundleId, appName: app.appName || '', version: app.version || '' };
+  else if (targets.bundleId && !entry.apps[targets.bundleId]) entry.apps[targets.bundleId] = { bundleId: targets.bundleId, appName: appInfo.name || '', version: '' };
+  targetHistory[targets.deviceId] = entry;
+  if (JSON.stringify(entry) !== before) saveTargetHistory();
+}
+
+function removeTargetHistory(deviceId, bundleId) {
+  const entry = targetHistory[deviceId];
+  if (!entry) return;
+  if (bundleId) delete entry.apps[bundleId];
+  if (!bundleId || (!Object.keys(entry.apps).length && !targets.devices.some((d) => d.id === deviceId))) delete targetHistory[deviceId];
+  saveTargetHistory();
+  renderTargetMenu();
+}
+
+// 设备上已断开的历史 App(不在当前扫描结果中)
+function historyApps(deviceId, liveApps = []) {
+  return Object.values(targetHistory[deviceId]?.apps || {})
+    .filter((app) => !liveApps.some((a) => a.bundleId === app.bundleId))
+    .map((app) => ({ ...app, away: true }));
+}
+
+// 选中的设备不在列表中(拔掉或关闭)
+function currentDeviceGone() {
+  return !!targets.deviceId && !currentDevice();
+}
 
 function targetBase() {
   return `/t/${encodeURIComponent(targets.deviceId || '-')}/${encodeURIComponent(targets.bundleId || '-')}`;
@@ -1974,11 +2031,12 @@ function savedTarget() {
   }
 }
 
-// 地址参数指定的目标始终保留(设备或 App 稍后可能启动); 记住的目标不存在时自动选第一个运行中的 App
+// 地址参数指定的和本次窗口中连接过的目标始终保留(设备或 App 稍后可能回来); 记住的目标不存在时自动选第一个运行中的 App
 function pickTarget() {
   const saved = savedTarget();
   const device = targets.devices.find((d) => d.id === saved.deviceId);
-  if (saved.explicit || device?.apps.some((a) => a.bundleId === saved.bundleId)) {
+  const known = !!targetHistory[saved.deviceId] && (!saved.bundleId || !!targetHistory[saved.deviceId].apps[saved.bundleId]);
+  if (saved.explicit || known || device?.apps.some((a) => a.bundleId === saved.bundleId)) {
     targets.deviceId = saved.deviceId || '';
     targets.bundleId = saved.bundleId || '';
     return;
@@ -2038,19 +2096,23 @@ const targetMenuUi = { offlineOpen: false };
 function renderTargetMenu() {
   const menu = $('targetMenu');
   const children = [];
-  // 挂起的 App 不响应探测, 会从列表消失; 在后台时沿用最后一次的信息显示
   const background = appState.value === 'background';
-  if (currentApp()) targets.lastApp = currentApp();
-  // 按类型分组: 模拟器(已启动在前, 未启动的灰色显示在后), 真机
+  recordTargetHistory();
+  // 按类型分组: 模拟器(已启动在前, 未启动的灰色显示在后), 真机; 已断开的历史设备排在各组最后
   const simulators = targets.devices.filter((d) => d.kind === 'simulator');
   const offline = targets.simulators || [];
   const devices = targets.devices.filter((d) => d.kind !== 'simulator');
-  if (simulators.length || offline.length) {
+  // 关闭的模拟器在「未启动」中显示, 其历史 App 合并到那里
+  const goneDevices = Object.values(targetHistory).filter((entry) => !targets.devices.some((d) => d.id === entry.id) && !offline.some((sim) => sim.id === entry.id));
+  const goneSimulators = goneDevices.filter((entry) => entry.kind === 'simulator');
+  const goneOthers = goneDevices.filter((entry) => entry.kind !== 'simulator');
+  if (simulators.length || offline.length || goneSimulators.length) {
     children.push(el('div', 'target-section', t('模拟器')));
     simulators.forEach((device) => children.push(...targetDeviceRows(device, background)));
+    goneSimulators.forEach((entry) => children.push(...goneDeviceRows(entry)));
     if (offline.length) {
-      // 未启动的模拟器默认折叠, 有正在启动的时保持展开
-      const open = targetMenuUi.offlineOpen || offline.some((sim) => simPending.has(sim.id));
+      // 未启动的模拟器默认折叠, 有正在启动的或选中的模拟器已关闭时保持展开
+      const open = targetMenuUi.offlineOpen || offline.some((sim) => simPending.has(sim.id) || sim.id === targets.deviceId);
       const toggle = el('button', 'target-fold' + (open ? ' open' : ''));
       toggle.append(icon('chevron'), el('span', null, t('未启动 ({0})', offline.length)));
       toggle.addEventListener('click', () => {
@@ -2058,12 +2120,13 @@ function renderTargetMenu() {
         renderTargetMenu();
       });
       children.push(toggle);
-      if (open) offline.forEach((sim) => children.push(offlineSimulatorRow(sim)));
+      if (open) offline.forEach((sim) => children.push(...[offlineSimulatorRow(sim)].flat()));
     }
   }
-  if (devices.length) {
+  if (devices.length || goneOthers.length) {
     children.push(el('div', 'target-section', t('真机 (USB)')));
     devices.forEach((device) => children.push(...targetDeviceRows(device, background)));
+    goneOthers.forEach((entry) => children.push(...goneDeviceRows(entry)));
   }
   if (children.length === 0) children.push(el('div', 'target-empty', t('没有发现设备')));
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
@@ -2100,39 +2163,67 @@ function targetDeviceRows(device, background) {
   } else {
     rows.push(head);
   }
-  const apps = [...device.apps];
-  const last = targets.lastApp;
-  if (background && device.id === targets.deviceId && last?.bundleId === targets.bundleId && !apps.some((a) => a.bundleId === last.bundleId)) apps.push(last);
+  const apps = [...device.apps, ...historyApps(device.id, device.apps)];
   // App 缩进在设备下方, 左侧竖线表示归属
   const group = el('div', 'target-apps');
   rows.push(group);
   if (!apps.length) group.append(el('div', 'target-empty', t('没有运行中的已集成 App')));
-  apps.forEach((app) => {
-    const row = el('button', 'target-app');
-    const current = device.id === targets.deviceId && app.bundleId === targets.bundleId;
-    const inBackground = (current && background) || appInBackground(app);
-    row.classList.toggle('current', current);
-    row.classList.toggle('background', inBackground);
-    row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
-    if (!appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
-    row.append(el('span', 'target-app-meta', inBackground ? t('在后台') : app.version || ''));
-    row.title = `${app.bundleId} · ${t('端口 {0}', app.port)}`;
-    row.addEventListener('click', async () => {
-      hidePopovers();
-      // 切换到其他 App 时总是先激活: 旧版 Pod 不上报 foreground, 在后台也看不出来; 已在前台时无影响
-      if (inBackground || !current) {
-        // 激活要等 App 响应, 最多几秒
-        toast(t('正在切换到 {0}…', app.appName || app.bundleId));
-        await activateApp(device.id, app.bundleId);
-      }
-      // 当前 App 回到前台后由事件流恢复, 不必重新加载; 同一设备上换 App 原地切换, 实时画面不中断
-      if (current) return;
-      if (device.id === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
-      else switchTarget(device.id, app.bundleId);
-    });
-    group.append(row);
-  });
+  apps.forEach((app) => group.append(targetAppRow(device.id, app, background)));
   return rows;
+}
+
+// 已断开的历史设备: 灰色显示, 可从列表移除; 选中的设备不能移除
+function goneDeviceRows(entry) {
+  const head = el('div', 'target-device offline');
+  const model = entry.model && entry.model !== entry.name ? entry.model : '';
+  head.append(el('span', 'status-dot'), el('span', 'target-device-name', entry.name), el('span', 'target-device-os', [model, entry.os].filter(Boolean).join(' · ') || t('已断开')));
+  if (entry.id !== targets.deviceId) head.appendChild(historyRemoveButton(entry.id, ''));
+  const group = el('div', 'target-apps');
+  historyApps(entry.id).forEach((app) => group.append(targetAppRow(entry.id, app, false)));
+  return group.childElementCount ? [head, group] : [head];
+}
+
+function historyRemoveButton(deviceId, bundleId) {
+  const button = el('span', 'target-remove');
+  button.setAttribute('role', 'button');
+  button.title = t('从列表中移除');
+  button.appendChild(icon('close'));
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    removeTargetHistory(deviceId, bundleId);
+  });
+  return button;
+}
+
+// 设备下的一个 App. away: 已断开的历史 App; 当前 App 以页面自己的连接状态为准, 挂起后扫描结果可能还保留着记录, 但连接已断开
+function targetAppRow(deviceId, app, background) {
+  const row = el('button', 'target-app');
+  const current = deviceId === targets.deviceId && app.bundleId === targets.bundleId;
+  const away = !!app.away || (current && appState.value === 'offline');
+  const inBackground = !away && ((current && background) || appInBackground(app));
+  const live = targets.devices.some((d) => d.id === deviceId);
+  row.classList.toggle('current', current);
+  row.classList.toggle('background', inBackground);
+  row.classList.toggle('away', away);
+  row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
+  if (!away && !appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
+  row.append(el('span', 'target-app-meta', inBackground ? t('在后台') : away ? t('未连接') : app.version || ''));
+  if (away && !current) row.appendChild(historyRemoveButton(deviceId, app.bundleId));
+  row.title = !away ? `${app.bundleId} · ${t('端口 {0}', app.port)}` : live ? `${app.bundleId} · ${t('已挂起或退出, 点击启动或切到前台')}` : `${app.bundleId} · ${t('设备未连接, 连上后自动恢复')}`;
+  row.addEventListener('click', async () => {
+    hidePopovers();
+    // 切换到其他 App 时总是先激活: 旧版 Pod 不上报 foreground, 在后台也看不出来; 已在前台时无影响. 设备未连接时无法激活
+    if (live && (inBackground || away || !current)) {
+      // 激活要等 App 响应, 最多几秒
+      toast(t('正在切换到 {0}…', app.appName || app.bundleId));
+      await activateApp(deviceId, app.bundleId);
+    }
+    // 当前 App 回到前台后由事件流恢复, 不必重新加载; 同一设备上换 App 原地切换, 实时画面不中断
+    if (current) return;
+    if (deviceId === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
+    else switchTarget(deviceId, app.bundleId);
+  });
+  return row;
 }
 
 // 未启动的模拟器: 点名称启动并在启动后选中, 点按钮只启动
@@ -2145,7 +2236,11 @@ function offlineSimulatorRow(sim) {
   });
   const row = el('div', 'target-device-row');
   row.append(head, simPowerButton(sim.id, false));
-  return row;
+  const apps = historyApps(sim.id);
+  if (!apps.length) return row;
+  const group = el('div', 'target-apps');
+  apps.forEach((app) => group.append(targetAppRow(sim.id, app, false)));
+  return [row, group];
 }
 
 // 跟随模拟器前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
@@ -2290,18 +2385,6 @@ function nextTarget() {
   return [first.id, firstAppId(first)];
 }
 
-// 设备全部断开持续一段时间后回到默认页, 短暂中断(重新插拔, 模拟器重启)不切换
-const DEVICES_GONE_MS = 3000;
-
-function devicesGone() {
-  if (targets.idle || targets.devices.length) {
-    targets.goneSince = 0;
-    return false;
-  }
-  targets.goneSince = targets.goneSince || Date.now();
-  return Date.now() - targets.goneSince >= DEVICES_GONE_MS;
-}
-
 // 定时刷新设备列表, 设备或 App 出现时自动连接
 function pollTargets() {
   setTimeout(async () => {
@@ -2309,10 +2392,8 @@ function pollTargets() {
       await loadTargets();
       renderTargetMenu();
       syncLive();
-      if (devicesGone()) {
-        location.reload();
-        return;
-      }
+      // 选中的设备断开或连回时更新提示
+      if (appState.value === 'offline' && appState.deviceGone !== currentDeviceGone()) setAppState('offline');
       // 回到前台的通知可能早于事件流连上而错过, 列表里显示已在前台时恢复
       if (appState.value === 'background' && currentApp() && appInForeground(currentApp())) {
         setAppState('online');
@@ -2421,6 +2502,7 @@ async function reconnected() {
 
 function setAppState(value, message, link) {
   appState.value = value;
+  appState.deviceGone = currentDeviceGone();
   document.body.classList.toggle('app-restarting', value === 'restarting');
   // 在后台时同样不能选择元素; 实时画面下只用状态点提示, 不挡住画面
   document.body.classList.toggle('app-offline', value === 'offline' || value === 'background');
@@ -2431,7 +2513,7 @@ function setAppState(value, message, link) {
   const canRun = document.body.classList.contains('has-live') && !!targets.bundleId;
   const texts = {
     restarting: t('正在编译并重启 App, 完成后自动刷新'),
-    offline: canRun ? t('App 未运行或在后台') : t('App 未运行或在后台, 启动后会自动连接'),
+    offline: currentDeviceGone() ? t('设备已断开, 重新连接后自动恢复') : canRun ? t('App 未运行或在后台') : t('App 未运行或在后台, 启动后会自动连接'),
     background: t('App 在后台, 回到前台后自动连接'),
     back: t('已连接, 正在刷新…'),
     warn: appState.warning,
@@ -5424,7 +5506,7 @@ async function start() {
   await syncLive();
   pollTargets();
   // 一台设备都没有时显示默认页, 保留选中的目标, 该设备回来时优先连接
-  if (!targets.devices.length) {
+  if (!targets.devices.length && !targets.bundleId) {
     targets.idle = true;
     $('appName').textContent = t('未连接');
     showGuide();
@@ -5432,9 +5514,9 @@ async function start() {
     return;
   }
   if (!targets.bundleId) {
-    $('appName').textContent = device.name;
+    $('appName').textContent = device?.name || targetHistory[targets.deviceId]?.name || t('未连接');
     // 只选了模拟器(没有运行中的 App)时直接显示实时画面
-    if (device.kind === 'simulator' && liveAvailable()) setMode('live');
+    if (device?.kind === 'simulator' && liveAvailable()) setMode('live');
     const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
     showEmptyState(t('没有运行中的已集成 App'), body);
     setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
@@ -5447,7 +5529,7 @@ async function start() {
   // App 未运行时等事件流连上后整页重新加载; 模拟器的实时画面照常可用
   if (!currentApp()) {
     appState.dropped = true;
-    $('appName').textContent = targets.bundleId;
+    $('appName').textContent = targetHistory[targets.deviceId]?.apps[targets.bundleId]?.appName || targets.bundleId;
     setAppState('offline');
     return;
   }
@@ -5458,6 +5540,7 @@ async function start() {
 function loadAppInfo() {
   return api('/api/app').then((info) => {
     $('appName').textContent = info.appName;
+    appInfo.name = info.appName;
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
     const menuInfo = $('menuAppInfo');

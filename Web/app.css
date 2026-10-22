@@ -240,6 +240,15 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 .target-app.current { background: var(--selected, var(--hover)); }
 .target-app .status-dot { width: 6px; height: 6px; background: var(--success); }
 .target-app.background .status-dot { background: var(--warning, #e6a23c); }
+.target-app.away .status-dot { background: var(--muted); }
+.target-app.away.current .status-dot { background: var(--danger); }
+.target-app.away .target-app-name { color: var(--text-2); }
+/* 已断开的历史记录: 悬停时显示移除按钮, 代替右侧的说明 */
+.target-remove { display: none; flex: none; align-items: center; justify-content: center; width: 18px; height: 18px; margin-left: auto; border-radius: var(--r-control); color: var(--muted); }
+.target-remove .icon { width: 12px; height: 12px; }
+.target-remove:hover { background: var(--hover); color: var(--text); }
+.target-app:hover .target-remove, .target-device:hover .target-remove { display: inline-flex; }
+.target-app:hover .target-remove ~ .target-app-meta, .target-app.away:not(.current):hover .target-app-meta { display: none; }
 .target-app-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target-app-meta { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .target-badge { padding: 0 5px; border-radius: 3px; background: var(--danger); color: #fff; font-size: 11px; line-height: 16px; }
