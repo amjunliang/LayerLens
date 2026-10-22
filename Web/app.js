@@ -37,7 +37,7 @@ const SKIP_GROUPS = new Set(['Class', 'Relation']);
 
 const DEFAULT_ROT_X = -12;
 const DEFAULT_ROT_Y = 28;
-// 与 CSS 中 .mode-3d .stage-wrap 的 perspective 保持一致
+// 3D 透视距离, WebGL 绘制与投影计算共用
 const PERSPECTIVE = 2400;
 
 const state = {
@@ -447,7 +447,7 @@ function pumpImages() {
       images.running--;
       if (ok) {
         images.loaded.set(job.url, true);
-        job.apply(job.url);
+        job.apply(job.url, img);
       } else if (job.attempts < 1) {
         // 失败重试一次, 仍失败则视为该节点没有截图
         job.attempts++;
@@ -980,6 +980,7 @@ function renderCanvas() {
   if (state.mode === 'live') return;
   if (!win) {
     stage.replaceChildren();
+    stage3DClear();
     return;
   }
   const [wx, wy, w, h] = canvasFrame(win);
@@ -997,24 +998,11 @@ function renderCanvas() {
     loadImage(shotURL(win.oid, 'group'), (url) => (img.src = url));
     stage.append(img, el('div', 'box hover'), el('div', 'box selected'));
   } else {
-    drawableNodes(win).forEach((node) => {
-      const slab = el('div', 'slab');
-      slab.dataset.key = node.key;
-      annotate(slab, node, false);
-      slab.style.left = node.rect[0] - wx + 'px';
-      slab.style.top = node.rect[1] - wy + 'px';
-      slab.style.width = node.rect[2] + 'px';
-      slab.style.height = node.rect[3] + 'px';
-      slab.style.transform = `translateZ(${node.level * state.spacing}px)`;
-      // 先挂载再加载: 命中缓存时回调是同步的
-      stage.appendChild(slab);
-      if (state.showImages && node.oid) {
-        // 不显示 CALayer 且只有 CALayer 子节点时, 子层不单独绘制, 取整体截图; 旧版 Pod 也能显示视频播放层等内容
-        const onlyLayers = !state.showLayers && node.children.length > 0 && node.children.every((child) => child.isLayer);
-        loadImage(shotURL(node.oid, onlyLayers ? 'group' : 'solo'), (url) => {
-          if (slab.isConnected) slab.style.backgroundImage = `url("${url}")`;
-        });
-      }
+    stage3DSetNodes(drawableNodes(win), [wx, wy, w, h], (node) => {
+      if (!state.showImages || !node.oid) return null;
+      // 不显示 CALayer 且只有 CALayer 子节点时, 子层不单独绘制, 取整体截图; 旧版 Pod 也能显示视频播放层等内容
+      const onlyLayers = !state.showLayers && node.children.length > 0 && node.children.every((child) => child.isLayer);
+      return shotURL(node.oid, onlyLayers ? 'group' : 'solo');
     });
   }
   updatePivot();
@@ -1053,13 +1041,14 @@ function applyStageTransform() {
   }
   const win = currentWindow();
   if (!win) return;
-  const scale = stageScale(win);
-  // 平移在屏幕坐标系中进行, 放在最前面; 3D 下先移到旋转中心再旋转, 选中节点在旋转时保持不动
-  const pan = `translate3d(${state.panX}px, ${state.panY}px, ${state.panZ}px) `;
-  const p = state.pivot;
-  $('stage').style.transform = pan + (state.mode === '3d'
-    ? `scale(${scale}) translate3d(${p.x}px, ${p.y}px, ${p.z}px) rotateX(${state.rotX}deg) rotateY(${state.rotY}deg) translate3d(${-p.x}px, ${-p.y}px, ${-p.z}px)`
-    : `scale(${scale})`);
+  // 3D 由 WebGL 绘制: 平移后先移到旋转中心再旋转, 选中节点在旋转时保持不动(见 stage-gl.js)
+  if (state.mode === '3d') {
+    $('stage').style.transform = '';
+    stage3DInvalidate();
+    return;
+  }
+  // 平移在屏幕坐标系中进行, 放在最前面
+  $('stage').style.transform = `translate3d(${state.panX}px, ${state.panY}px, 0px) scale(${stageScale(win)})`;
 }
 
 // MARK: - Pivot
@@ -1084,7 +1073,7 @@ function projectToScreen(q) {
 function computePivot() {
   const win = currentWindow();
   const node = state.nodes.get(state.selected);
-  if (state.mode !== '3d' || !win || !node || !$('stage').querySelector(`.slab[data-key="${CSS.escape(node.key)}"]`)) {
+  if (state.mode !== '3d' || !win || !node || !stage3DHas(node.key)) {
     return { x: 0, y: 0, z: 0 };
   }
   const [fx, fy, fw, fh] = canvasFrame(win);
@@ -1170,10 +1159,7 @@ function updateHighlights() {
     placeBox($('stage').querySelector('.box.hover'), state.nodes.get(state.hover), win);
     placeBox($('stage').querySelector('.box.selected'), state.nodes.get(state.selected), win);
   } else {
-    $('stage').querySelectorAll('.slab').forEach((slab) => {
-      slab.classList.toggle('selected', slab.dataset.key === state.selected);
-      slab.classList.toggle('hover', slab.dataset.key === state.hover);
-    });
+    stage3DInvalidate();
   }
   const tree = $('tree');
   tree.querySelectorAll('.row.hover').forEach((row) => row.classList.remove('hover'));
@@ -1184,7 +1170,8 @@ function updateHighlights() {
 // 画布悬停标签(类似 Chrome 检查元素): 只显示类名, 带箭头贴在悬停元素顶部, 元素不变则位置不变
 
 // selection: 键盘切换选中时标签贴在选中元素上, 鼠标移动后恢复跟随悬停
-const hoverTip = { pendingKey: null, contentTimer: 0, selection: false };
+// switchedAt: 上次切换内容的时间
+const hoverTip = { pendingKey: null, contentTimer: 0, selection: false, switchedAt: 0 };
 
 function showHoverTip(event, node) {
   if (!node) {
@@ -1196,8 +1183,10 @@ function showHoverTip(event, node) {
     hoverTip.selection = false;
     delete tip.dataset.key;
   }
-  // 内容防抖: 鼠标在新目标上停留片刻再切换, 快速划过重叠层时不闪烁
-  if (tip.hidden || !tip.dataset.key) {
+  // 内容防抖: 停顿后第一次换目标立即切换; 连续快速划过重叠层时, 在新目标上停留片刻再切换, 不闪烁
+  if (tip.hidden || !tip.dataset.key || (tip.dataset.key !== node.key && performance.now() - hoverTip.switchedAt > 150)) {
+    clearTimeout(hoverTip.contentTimer);
+    hoverTip.pendingKey = null;
     tip.hidden = false;
     setHoverTipContent(node);
   } else if (tip.dataset.key !== node.key && hoverTip.pendingKey !== node.key) {
@@ -1232,6 +1221,7 @@ function setHoverTipContent(node) {
   const tip = $('hoverTip');
   tip.dataset.key = node.key;
   tip.textContent = node.cls;
+  hoverTip.switchedAt = performance.now();
   positionHoverTip();
 }
 
@@ -1240,10 +1230,8 @@ function positionHoverTip() {
   const tip = $('hoverTip');
   const key = tip.dataset.key;
   if (tip.hidden || !key) return;
-  const target = state.mode === '2d'
-    ? $('stage').querySelector(hoverTip.selection ? '.box.selected' : '.box.hover')
-    : $('stage').querySelector(`.slab[data-key="${CSS.escape(key)}"]`);
-  const rect = target && target.getBoundingClientRect();
+  const target = state.mode === '2d' && $('stage').querySelector(hoverTip.selection ? '.box.selected' : '.box.hover');
+  const rect = state.mode === '2d' ? target && target.getBoundingClientRect() : stage3DClientRect(key);
   // 选中元素在画布上不可见(不在当前 window / 实时模式等)时不显示
   if (!rect || (!rect.width && !rect.height)) {
     if (hoverTip.selection) hideHoverTip();
@@ -1317,9 +1305,7 @@ function setupCanvasEvents() {
   const nodeAtPoint = (point) => {
     if (!currentWindow()) return null;
     if (state.mode === '2d') return hitTest(...stagePoint(point));
-    const target = document.elementFromPoint(point.clientX, point.clientY);
-    const slab = target && target.closest('.slab');
-    return slab ? state.nodes.get(slab.dataset.key) : null;
+    return stage3DNodeAt(point.clientX, point.clientY);
   };
   // 画布菜单始终针对当前选中节点, 不按点击位置重新选中, 空白处也可呼出
   const openCanvasMenu = (point) => {
@@ -1333,8 +1319,7 @@ function setupCanvasEvents() {
       const node = currentWindow() && hitTest(...stagePoint(e));
       key = node ? node.key : null;
     } else {
-      const slab = e.target.closest('.slab');
-      key = slab ? slab.dataset.key : null;
+      key = stage3DNodeAt(e.clientX, e.clientY)?.key || null;
     }
     if (key !== state.hover) {
       state.hover = key;
@@ -3663,10 +3648,6 @@ function setSpacing(value) {
   state.spacing = value;
   $('spacing').value = value;
   $('spacingLabel').textContent = value;
-  $('stage').querySelectorAll('.slab').forEach((slab) => {
-    const node = state.nodes.get(slab.dataset.key);
-    if (node) slab.style.transform = `translateZ(${node.level * state.spacing}px)`;
-  });
   updatePivot();
 }
 
