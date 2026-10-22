@@ -10,7 +10,7 @@ import AppKit
 import WebKit
 
 /// 承载网页的窗口, 加载的地址与浏览器访问的相同
-final class MainWindowController: NSWindowController, WKNavigationDelegate, WKScriptMessageHandler {
+final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
     private let url: URL
     private var webView: WKWebView!
     private var loaded = false
@@ -18,6 +18,9 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     private var waitingFirstLoad = false
     private static let themeKey = "LayerLensTheme"
     private var appearanceObservation: NSKeyValueObservation?
+    private var zoomObserver: NSObjectProtocol?
+    /// 进行中的下载及其保存位置
+    private var downloads: [ObjectIdentifier: URL] = [:]
     /// 与网页工具栏 --panel 一致: 标题栏后方与工具栏连成一体, 网页绘制前窗口也显示此颜色
     private static func backgroundColor(dark: Bool) -> NSColor {
         dark ? NSColor(srgbRed: 0x1B / 255.0, green: 0x1D / 255.0, blue: 0x21 / 255.0, alpha: 1)
@@ -44,7 +47,9 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         configuration.userContentController.add(WeakScriptHandler(self), name: "layerlens")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.isInspectable = true
+        zoomObserver = PageZoom.follow(webView)
         // 不绘制默认的白色背景, 网页绘制前透出窗口底色
         webView.setValue(false, forKey: "drawsBackground")
         window.contentView = webView
@@ -121,6 +126,8 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     }
 
     private var pendingPanel: String?
+    /// 网页用 window.open 打开的窗口, 关闭时移除
+    private var childWindows: [ChildWebWindow] = []
 
     private func makeReloadAccessory() -> NSTitlebarAccessoryViewController {
         let browser = makeTitlebarButton(symbol: "safari", title: L("在浏览器打开", "Open in Browser"), action: #selector(openInBrowser))
@@ -156,6 +163,7 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
         finishFirstLoad()
         if let panel = pendingPanel {
             pendingPanel = nil
@@ -165,6 +173,10 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
 
     /// 外部链接用系统浏览器打开
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.shouldPerformDownload {
+            decisionHandler(.download)
+            return
+        }
         guard let target = navigationAction.request.url else {
             decisionHandler(.allow)
             return
@@ -175,6 +187,93 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
             NSWorkspace.shared.open(target)
             decisionHandler(.cancel)
         }
+    }
+
+    /// 附件(如沙盒文件下载)和无法显示的内容转为下载
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let disposition = (navigationResponse.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        decisionHandler(disposition.lowercased().hasPrefix("attachment") || !navigationResponse.canShowMIMEType ? .download : .allow)
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    // MARK: - WKDownloadDelegate
+
+    /// 保存到下载文件夹, 重名时加序号
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+        let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+        let name = suggestedFilename.isEmpty ? "download" : suggestedFilename
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
+        var destination = folder.appendingPathComponent(name)
+        var index = 2
+        while FileManager.default.fileExists(atPath: destination.path) {
+            destination = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)")
+            index += 1
+        }
+        downloads[ObjectIdentifier(download)] = destination
+        completionHandler(destination)
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        guard let destination = downloads.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([destination])
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        downloads.removeValue(forKey: ObjectIdentifier(download))
+        guard let window else { return }
+        let alert = NSAlert(error: error)
+        alert.beginSheetModal(for: window)
+    }
+
+    // MARK: - WKUIDelegate
+
+    /// 网页中的文件选择框(如日志面板打开本地文件), WKWebView 需要由宿主弹出选择面板
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        guard let window else {
+            completionHandler(panel.runModal() == .OK ? panel.urls : nil)
+            return
+        }
+        panel.beginSheetModal(for: window) { response in
+            completionHandler(response == .OK ? panel.urls : nil)
+        }
+    }
+
+    /// 网页的 window.open(如独立的日志窗口)用新的 App 窗口打开, 同一地址已打开时直接切到前面; 外部地址用浏览器打开
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard let target = navigationAction.request.url else { return nil }
+        guard target.host == url.host, target.port == url.port else {
+            NSWorkspace.shared.open(target)
+            return nil
+        }
+        if let existing = childWindows.first(where: { $0.webView.url == target }) {
+            existing.window.makeKeyAndOrderFront(nil)
+            return nil
+        }
+        let child = ChildWebWindow(configuration: configuration, appearance: window?.appearance, backgroundColor: window?.backgroundColor)
+        child.webView.uiDelegate = self
+        child.webView.navigationDelegate = self
+        child.onClose = { [weak self, weak child] in
+            self?.childWindows.removeAll { $0 === child }
+        }
+        childWindows.append(child)
+        child.window.makeKeyAndOrderFront(nil)
+        return child.webView
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        childWindows.first { $0.webView === webView }?.window.close()
     }
 
     // MARK: - WKScriptMessageHandler
@@ -188,6 +287,47 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKSc
         default:
             break
         }
+    }
+}
+
+/// 网页打开的子窗口, 可调整大小和全屏, 标题跟随网页
+private final class ChildWebWindow: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    let webView: WKWebView
+    var onClose: (() -> Void)?
+    private var titleObservation: NSKeyValueObservation?
+    private var zoomObserver: NSObjectProtocol?
+
+    init(configuration: WKWebViewConfiguration, appearance: NSAppearance?, backgroundColor: NSColor?) {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        super.init()
+        window.title = "LayerLens"
+        window.minSize = NSSize(width: 400, height: 240)
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        window.appearance = appearance
+        if let backgroundColor {
+            window.backgroundColor = backgroundColor
+            webView.underPageBackgroundColor = backgroundColor
+        }
+        webView.isInspectable = true
+        zoomObserver = PageZoom.follow(webView)
+        webView.setValue(false, forKey: "drawsBackground")
+        window.contentView = webView
+        window.delegate = self
+        window.center()
+        window.setFrameAutosaveName("LayerLensChildWindow")
+        titleObservation = webView.observe(\.title) { [weak self] webView, _ in
+            self?.window.title = webView.title.flatMap { $0.isEmpty ? nil : $0 } ?? "LayerLens"
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        titleObservation = nil
+        zoomObserver.map(NotificationCenter.default.removeObserver)
+        zoomObserver = nil
+        onClose?()
     }
 }
 

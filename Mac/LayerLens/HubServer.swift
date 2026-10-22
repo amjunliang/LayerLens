@@ -248,6 +248,22 @@ final class HubServer {
             appLogs.reveal(deviceId: json["device"] as? String ?? "", bundleId: json["app"] as? String ?? "") { ok in
                 connection.respond(ok ? .json(["ok": true]) : .error(500, "Open failed"))
             }
+        case "/api/hub/sandbox/reveal":
+            // 模拟器的沙盒就在本机, 直接在访达中打开 App 的数据目录
+            guard let device = json["device"] as? String, UUID(uuidString: device) != nil,
+                  let app = json["app"] as? String, !app.isEmpty else {
+                connection.respond(.error(400, "Invalid target"))
+                return
+            }
+            workQueue.async {
+                guard let data = TargetRegistry.run("/usr/bin/xcrun", ["simctl", "get_app_container", device, app, "data"]),
+                      let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
+                    connection.respond(.error(404, "App container not found"))
+                    return
+                }
+                let ok = TargetRegistry.run("/usr/bin/open", [path]) != nil
+                connection.respond(ok ? .json(["ok": true, "path": path]) : .error(500, "Open failed"))
+            }
         case "/api/hub/activate":
             // 把在后台的 App 切到前台; 已在运行时只激活, 不重启
             guard let device = json["device"] as? String, let app = json["app"] as? String, !device.isEmpty, !app.isEmpty else {

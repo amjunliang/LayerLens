@@ -13,6 +13,7 @@
 #import "LayerLensLookinBridge.h"
 #import "LayerLensRuntimeReader.h"
 #import "LayerLensLogger.h"
+#import "LayerLensSandbox.h"
 #import <UIKit/UIKit.h>
 
 @implementation LayerLensAPIController
@@ -65,6 +66,8 @@
             responder(response);
         }];
     }];
+
+    [self registerSandboxRoutesToRouter:router];
 
     [router addRoute:@"GET" path:@"/api/app" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         [self onMain:^{
@@ -134,6 +137,114 @@
 }
 
 #pragma mark - Private
+
+#pragma mark - Sandbox
+
+// 沙盒文件读写较慢, 放到后台队列, 路径参数均为相对主目录的路径
+- (void)registerSandboxRoutesToRouter:(LayerLensRouter *)router {
+    [router addRoute:@"GET" path:@"/api/sandbox/list" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onBackground:^{
+            NSError *error = nil;
+            NSDictionary *result = [LayerLensSandbox listDirectory:request.query[@"path"] ?: @"" error:&error];
+            responder(result ? [LayerLensHTTPResponse JSONResponse:result] : [self responseWithError:error]);
+        }];
+    }];
+
+    // limit 用于预览只取开头; download=1 时作为附件下载
+    [router addRoute:@"GET" path:@"/api/sandbox/file" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onBackground:^{
+            NSString *path = request.query[@"path"] ?: @"";
+            unsigned long long total = 0;
+            NSError *error = nil;
+            NSData *data = [LayerLensSandbox readFile:path limit:strtoull(request.query[@"limit"].UTF8String ?: "0", NULL, 10) total:&total error:&error];
+            if (!data) {
+                responder([self responseWithError:error]);
+                return;
+            }
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse responseWithStatus:200 contentType:[LayerLensSandbox contentTypeForPath:path] body:data];
+            response.headers[@"X-Total-Size"] = [NSString stringWithFormat:@"%llu", total];
+            response.headers[@"Cache-Control"] = @"no-store";
+            if ([request.query[@"download"] isEqualToString:@"1"]) {
+                response.headers[@"Content-Disposition"] = [self attachmentHeaderWithName:path.lastPathComponent];
+            }
+            responder(response);
+        }];
+    }];
+
+    [router addRoute:@"GET" path:@"/api/sandbox/zip" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onBackground:^{
+            NSString *path = request.query[@"path"] ?: @"";
+            NSError *error = nil;
+            NSData *data = [LayerLensSandbox zipItem:path error:&error];
+            if (!data) {
+                responder([self responseWithError:error]);
+                return;
+            }
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse responseWithStatus:200 contentType:@"application/zip" body:data];
+            NSString *name = path.lastPathComponent.length > 0 ? path.lastPathComponent : @"Sandbox";
+            response.headers[@"Content-Disposition"] = [self attachmentHeaderWithName:[name stringByAppendingPathExtension:@"zip"]];
+            responder(response);
+        }];
+    }];
+
+    [router addRoute:@"GET" path:@"/api/sandbox/plist" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onBackground:^{
+            NSError *error = nil;
+            id result = [LayerLensSandbox propertyList:request.query[@"path"] ?: @"" error:&error];
+            responder(result ? [LayerLensHTTPResponse JSONResponse:@{@"value": result}] : [self responseWithError:error]);
+        }];
+    }];
+
+    [router addRoute:@"GET" path:@"/api/sandbox/sqlite" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onBackground:^{
+            NSError *error = nil;
+            NSDictionary *result = [LayerLensSandbox queryDatabase:request.query[@"path"] ?: @""
+                                                             table:request.query[@"table"]
+                                                            offset:[request.query[@"offset"] integerValue]
+                                                             limit:[request.query[@"limit"] integerValue] ?: 100
+                                                             error:&error];
+            responder(result ? [LayerLensHTTPResponse JSONResponse:result] : [self responseWithError:error]);
+        }];
+    }];
+
+    // 请求体为文件原始内容, 上限见 LayerLensHTTPRequest
+    [router addRoute:@"POST" path:@"/api/sandbox/upload" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onBackground:^{
+            NSError *error = nil;
+            BOOL ok = [LayerLensSandbox writeData:request.body ?: [NSData data] directory:request.query[@"path"] ?: @"" name:request.query[@"name"] ?: @"" error:&error];
+            responder(ok ? [LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}] : [self responseWithError:error]);
+        }];
+    }];
+
+    [router addRoute:@"POST" path:@"/api/sandbox/delete" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSDictionary *body = [request.JSONBody isKindOfClass:NSDictionary.class] ? request.JSONBody : @{};
+        NSString *path = [body[@"path"] isKindOfClass:NSString.class] ? body[@"path"] : @"";
+        [self onBackground:^{
+            NSError *error = nil;
+            BOOL ok = [LayerLensSandbox removeItem:path error:&error];
+            responder(ok ? [LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}] : [self responseWithError:error]);
+        }];
+    }];
+}
+
+- (LayerLensHTTPResponse *)responseWithError:(NSError *)error {
+    return [LayerLensHTTPResponse errorResponse:error.code >= 400 ? error.code : 500 message:error.localizedDescription ?: @"Failed"];
+}
+
+/// 文件名可能含中文, 同时给出 RFC 5987 编码的版本
+- (NSString *)attachmentHeaderWithName:(NSString *)name {
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    NSString *encoded = [name stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"download";
+    NSString *ascii = [[name componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\"\\\r\n"]] componentsJoinedByString:@"_"];
+    if (![ascii canBeConvertedToEncoding:NSASCIIStringEncoding]) {
+        ascii = name.pathExtension.length > 0 ? [@"download" stringByAppendingPathExtension:name.pathExtension] : @"download";
+    }
+    return [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", ascii, encoded];
+}
+
+- (void)onBackground:(dispatch_block_t)block {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), block);
+}
 
 - (NSString *)dayString {
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];

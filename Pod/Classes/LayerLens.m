@@ -14,7 +14,7 @@
 #import "LayerLensLogger.h"
 #import <UIKit/UIKit.h>
 
-NSString * const LayerLensVersion = @"0.4.0";
+NSString * const LayerLensVersion = @"0.5.0";
 const NSInteger LayerLensAPIVersion = 1;
 
 #if DEBUG

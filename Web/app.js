@@ -2735,6 +2735,7 @@ function setupLiveEvents() {
   $('liveRotate').addEventListener('click', liveRotate);
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
+  $('sandboxBtn').addEventListener('click', openSandbox);
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
   $('menuHeal').addEventListener('click', () => openPanel('heal'));
@@ -3824,12 +3825,14 @@ function shortcutsPanel() {
 }
 
 function openPanel(name) {
-  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel] };
+  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel] };
   const panel = panels[name];
   if (!panel) return;
   state.panel = name;
   hidePopovers();
   hideMenu();
+  $('modal').classList.toggle('modal-wide', name === 'sandbox');
+  if (name !== 'sandbox') sandbox = null;
   $('modalTitle').textContent = panel[0];
   $('modalBody').replaceChildren(...panel[1]());
   $('modalBody').scrollTop = 0;
@@ -3837,6 +3840,7 @@ function openPanel(name) {
 }
 
 function closePanel() {
+  sandbox = null;
   hideLayer($('modal'), 160);
 }
 
@@ -3854,10 +3858,451 @@ function setupPanels() {
   $('modalClose').addEventListener('click', closePanel);
 }
 
+// MARK: - Sandbox
+// 沙盒文件: 模拟器的沙盒在本机, 直接在访达打开; 真机通过 App 内的接口浏览, 预览, 下载, 上传和删除
+
+const SANDBOX_PREVIEW_LIMIT = 512 * 1024;
+const SANDBOX_UPLOAD_LIMIT = 256 * 1024 * 1024;
+const SANDBOX_IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'bmp', 'ico', 'svg', 'tif', 'tiff'];
+// 当前打开的沙盒面板, 面板关闭后旧的请求结果不再渲染
+let sandbox = null;
+
+async function openSandbox() {
+  hidePopovers();
+  if (!targets.bundleId) {
+    toast(t('请先选择 App'));
+    return;
+  }
+  if (currentDevice()?.kind !== 'simulator') {
+    openPanel('sandbox');
+    return;
+  }
+  try {
+    const res = await fetch('/api/hub/sandbox/reveal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device: targets.deviceId, app: targets.bundleId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    toast(t('已在访达中打开沙盒'));
+  } catch (e) {
+    toast(t('打开失败: {0}', e.message));
+  }
+}
+
+function sandboxUrl(api, params) {
+  return `${sandbox.base}/api/sandbox/${api}?${new URLSearchParams(params)}`;
+}
+
+async function sandboxFetch(api, params, options) {
+  const res = await fetch(sandboxUrl(api, params), options);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    // 旧版 Pod 没有沙盒接口, 路由返回 Not Found; 文件不存在时为 File not found
+    const outdated = res.status === 404 && (!data.error || data.error === 'Not Found');
+    const message = res.status === 503 ? t('App 未运行, 启动后点刷新重试') : data.error || `HTTP ${res.status}`;
+    throw Object.assign(new Error(message), { outdated });
+  }
+  return res;
+}
+
+function sandboxJoin(dir, name) {
+  return dir ? `${dir}/${name}` : name;
+}
+
+function sandboxPanel() {
+  const root = el('div', 'sb');
+  const side = el('div', 'sb-side');
+  const bar = el('div', 'sb-bar');
+  const crumbs = el('div', 'sb-crumbs');
+  const actions = el('div', 'sb-actions');
+  const button = (name, title, onClick) => {
+    const node = el('button', 'icon-btn');
+    node.title = t(title);
+    node.setAttribute('aria-label', t(title));
+    node.appendChild(icon(name));
+    node.addEventListener('click', onClick);
+    return node;
+  };
+  const input = el('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.hidden = true;
+  input.addEventListener('change', () => {
+    sandboxUpload([...input.files]);
+    input.value = '';
+  });
+  actions.append(
+    button('upload', '上传到此文件夹', () => input.click()),
+    button('download', '下载此文件夹 (zip)', () => sandboxDownload('zip', sandbox.path)),
+    button('refresh', '刷新', () => sandboxList(sandbox.path)),
+    input,
+  );
+  bar.append(crumbs, actions);
+  const notice = el('div', 'sb-notice');
+  notice.hidden = true;
+  const list = el('div', 'sb-list');
+  list.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    list.classList.add('drop');
+  });
+  list.addEventListener('dragleave', (e) => {
+    if (!list.contains(e.relatedTarget)) list.classList.remove('drop');
+  });
+  list.addEventListener('drop', (e) => {
+    e.preventDefault();
+    list.classList.remove('drop');
+    sandboxUpload([...e.dataTransfer.files]);
+  });
+  side.append(bar, notice, list);
+  const preview = el('div', 'sb-preview');
+  root.append(side, preview);
+
+  sandbox = { node: root, base: targetBase(), root: '', path: '', entries: [], selected: '', crumbs, list, notice, preview, token: 0 };
+  sandboxShowEmpty(t('选择文件以预览'));
+  sandboxList('');
+  return [root];
+}
+
+// App 集成的 Pod 版本过低时整个面板只显示升级说明
+function sandboxShowOutdated(panel) {
+  const box = el('div', 'sb-outdated');
+  const badge = el('div', 'sb-outdated-icon');
+  badge.appendChild(icon('folder'));
+  const version = currentApp()?.podVersion;
+  const help = el('button', null, t('查看集成说明'));
+  help.dataset.panel = 'integration';
+  box.append(
+    badge,
+    el('h4', null, t('App 集成的 LayerLens 版本过低')),
+    el('p', null, version ? t('当前为 {0}, 沙盒浏览需要 0.5.0 或更高版本.', version) : t('沙盒浏览需要 LayerLens 0.5.0 或更高版本.')),
+    el('p', null, t('更新 Pod 后重新运行 App 即可使用.')),
+    help,
+  );
+  panel.node.replaceChildren(box);
+}
+
+async function sandboxList(path) {
+  const panel = sandbox;
+  panel.list.replaceChildren(el('p', 'sb-empty', t('正在加载…')));
+  try {
+    const data = await (await sandboxFetch('list', { path })).json();
+    if (sandbox !== panel) return;
+    panel.root = data.root || '';
+    panel.path = data.path || '';
+    panel.entries = data.entries || [];
+    sandboxRenderCrumbs();
+    sandboxRenderList();
+  } catch (e) {
+    if (sandbox !== panel) return;
+    if (e.outdated) sandboxShowOutdated(panel);
+    else panel.list.replaceChildren(el('p', 'sb-empty', t('无法读取沙盒: {0}', e.message)));
+  }
+}
+
+function sandboxRenderCrumbs() {
+  const parts = sandbox.path ? sandbox.path.split('/') : [];
+  const nodes = [['', t('沙盒')], ...parts.map((name, i) => [parts.slice(0, i + 1).join('/'), name])];
+  sandbox.crumbs.replaceChildren(...nodes.flatMap(([path, name], i) => {
+    const node = el('button', 'sb-crumb', name);
+    node.title = name;
+    node.disabled = i === nodes.length - 1;
+    node.addEventListener('click', () => sandboxList(path));
+    return i ? [el('span', 'sb-crumb-sep', '/'), node] : [node];
+  }));
+  sandbox.crumbs.scrollLeft = sandbox.crumbs.scrollWidth;
+}
+
+function sandboxRenderList() {
+  const { entries, path } = sandbox;
+  const rows = [];
+  if (path) {
+    const up = el('button', 'sb-row');
+    up.append(icon('folder'), el('span', 'sb-name', '..'));
+    up.addEventListener('click', () => sandboxList(path.split('/').slice(0, -1).join('/')));
+    rows.push(up);
+  }
+  entries.forEach((entry) => {
+    const itemPath = sandboxJoin(path, entry.name);
+    const row = el('div', 'sb-row' + (entry.dir ? ' dir' : '') + (sandbox.selected === itemPath ? ' selected' : ''));
+    row.tabIndex = 0;
+    row.dataset.path = itemPath;
+    const meta = entry.dir ? '' : logSize(entry.size);
+    row.append(icon(entry.dir ? 'folder' : 'file'), el('span', 'sb-name', entry.name + (entry.link ? ' →' : '')), el('span', 'sb-meta', meta));
+    row.title = `${entry.name}\n${logFullTime(entry.modified).slice(0, 19)}`;
+    const tools = el('span', 'sb-tools');
+    const download = el('button', 'icon-btn');
+    download.title = entry.dir ? t('下载 (zip)') : t('下载');
+    download.appendChild(icon('download'));
+    download.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sandboxDownload(entry.dir ? 'zip' : 'file', itemPath);
+    });
+    tools.append(download, sandboxDeleteButton(itemPath));
+    row.appendChild(tools);
+    row.addEventListener('click', () => (entry.dir ? sandboxList(itemPath) : sandboxPreview(entry, itemPath)));
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') row.click();
+    });
+    rows.push(row);
+  });
+  if (!entries.length) rows.push(el('p', 'sb-empty', t('空文件夹, 可拖入文件上传')));
+  sandbox.list.replaceChildren(...rows);
+}
+
+// 删除需要再点一次确认, Mac App 的 WebView 不支持 confirm()
+function sandboxDeleteButton(path, withText) {
+  const node = el('button', withText ? 'sb-delete' : 'icon-btn sb-delete');
+  const reset = () => {
+    node.classList.remove('confirm');
+    node.replaceChildren(icon('trash'));
+    if (withText) node.append(t('删除'));
+    node.title = t('删除');
+  };
+  reset();
+  node.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!node.classList.contains('confirm')) {
+      node.classList.add('confirm');
+      node.replaceChildren(icon('trash'), t('确认删除'));
+      clearTimeout(node.timer);
+      node.timer = setTimeout(reset, 3000);
+      return;
+    }
+    clearTimeout(node.timer);
+    sandboxDelete(path);
+  });
+  return node;
+}
+
+async function sandboxDelete(path) {
+  const panel = sandbox;
+  try {
+    await sandboxFetch('delete', {}, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+    if (sandbox !== panel) return;
+    toast(t('已删除 {0}', path.split('/').pop()));
+    if (panel.selected === path || panel.selected.startsWith(path + '/')) {
+      panel.selected = '';
+      sandboxShowEmpty(t('选择文件以预览'));
+    }
+    sandboxList(panel.path);
+  } catch (e) {
+    toast(t('删除失败: {0}', e.message), true);
+  }
+}
+
+function sandboxDownload(api, path) {
+  const link = el('a');
+  link.href = sandboxUrl(api, api === 'file' ? { path, download: '1' } : { path });
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  toast(t('正在下载…'));
+}
+
+// 同名文件先确认覆盖
+function sandboxUpload(files) {
+  if (!files.length || !sandbox) return;
+  const large = files.find((file) => file.size > SANDBOX_UPLOAD_LIMIT);
+  if (large) {
+    toast(t('{0} 超过 256 MB, 无法上传', large.name), true);
+    return;
+  }
+  const names = new Set(sandbox.entries.map((entry) => entry.name));
+  const existing = files.filter((file) => names.has(file.name));
+  if (!existing.length) {
+    sandboxSend(files);
+    return;
+  }
+  const { notice } = sandbox;
+  const ok = el('button', 'primary', t('覆盖'));
+  const cancel = el('button', null, t('取消'));
+  ok.addEventListener('click', () => {
+    notice.hidden = true;
+    sandboxSend(files);
+  });
+  cancel.addEventListener('click', () => (notice.hidden = true));
+  const message = existing.length === 1 ? t('{0} 已存在, 是否覆盖?', existing[0].name) : t('{0} 个文件已存在, 是否覆盖?', existing.length);
+  notice.replaceChildren(el('span', null, message), cancel, ok);
+  notice.hidden = false;
+}
+
+async function sandboxSend(files) {
+  const panel = sandbox;
+  const path = panel.path;
+  let done = 0;
+  for (const file of files) {
+    toast(t('正在上传 {0} ({1}/{2})…', file.name, done + 1, files.length));
+    try {
+      await sandboxFetch('upload', { path, name: file.name }, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+      done += 1;
+    } catch (e) {
+      toast(t('上传 {0} 失败: {1}', file.name, e.message), true);
+      break;
+    }
+  }
+  if (done === files.length) toast(t('已上传 {0} 个文件', done));
+  if (sandbox === panel && panel.path === path) sandboxList(path);
+}
+
+function sandboxShowEmpty(message) {
+  sandbox.preview.replaceChildren(el('p', 'sb-empty', message));
+}
+
+async function sandboxPreview(entry, path) {
+  const panel = sandbox;
+  const token = ++panel.token;
+  panel.selected = path;
+  panel.list.querySelectorAll('.sb-row').forEach((row) => row.classList.toggle('selected', row.dataset.path === path));
+
+  const head = el('div', 'sb-preview-head');
+  const title = el('div', 'sb-preview-title');
+  title.append(el('span', 'sb-preview-name', entry.name), el('span', 'sb-meta', `${logSize(entry.size)} · ${logFullTime(entry.modified).slice(0, 19)}`));
+  const tools = el('div', 'sb-preview-tools');
+  const copy = el('button', 'sb-text-btn');
+  copy.append(icon('copy'), t('复制路径'));
+  copy.addEventListener('click', () => copyText(sandboxJoin(panel.root, path), '复制路径'));
+  const download = el('button', 'sb-text-btn');
+  download.append(icon('download'), t('下载'));
+  download.addEventListener('click', () => sandboxDownload('file', path));
+  tools.append(copy, download, sandboxDeleteButton(path, true));
+  head.append(title, tools);
+  const body = el('div', 'sb-preview-body');
+  body.appendChild(el('p', 'sb-empty', t('正在加载…')));
+  panel.preview.replaceChildren(head, body);
+
+  const current = () => sandbox === panel && panel.token === token;
+  const ext = entry.name.split('.').pop().toLowerCase();
+  try {
+    if (SANDBOX_IMAGE_EXT.includes(ext)) {
+      const img = el('img', 'sb-image');
+      img.src = sandboxUrl('file', { path });
+      img.onerror = () => current() && body.replaceChildren(el('p', 'sb-empty', t('无法预览此图片')));
+      body.replaceChildren(img);
+      return;
+    }
+    const res = await sandboxFetch('file', { path, limit: SANDBOX_PREVIEW_LIMIT });
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!current()) return;
+    const total = Number(res.headers.get('X-Total-Size')) || bytes.length;
+    const magic = new TextDecoder().decode(bytes.slice(0, 16));
+    if (magic.startsWith('SQLite format 3')) {
+      sandboxDatabase(body, path, current);
+      return;
+    }
+    if (magic.startsWith('bplist')) {
+      const data = await (await sandboxFetch('plist', { path })).json();
+      if (current()) body.replaceChildren(sandboxCode(JSON.stringify(data.value, null, 2)));
+      return;
+    }
+    const text = sandboxText(bytes);
+    if (text === null) {
+      body.replaceChildren(el('p', 'sb-note', t('二进制文件, 显示开头 {0} 字节', Math.min(bytes.length, 1024))), sandboxCode(sandboxHex(bytes.slice(0, 1024))));
+      return;
+    }
+    let content = text;
+    if (ext === 'json' && total === bytes.length) {
+      try {
+        content = JSON.stringify(JSON.parse(text), null, 2);
+      } catch (e) {
+        // 格式不对时按原文显示
+      }
+    }
+    const nodes = [sandboxCode(content)];
+    if (total > bytes.length) nodes.unshift(el('p', 'sb-note', t('文件较大, 只显示前 {0}, 完整内容请下载', logSize(bytes.length))));
+    body.replaceChildren(...nodes);
+  } catch (e) {
+    if (current()) body.replaceChildren(el('p', 'sb-empty', t('无法预览: {0}', e.message)));
+  }
+}
+
+// 含 NUL 或不是 UTF-8 时视为二进制; 截断处可能切开多字节字符, 允许末尾不完整
+function sandboxText(bytes) {
+  if (bytes.slice(0, 8192).includes(0)) return null;
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: true });
+  } catch (e) {
+    return null;
+  }
+}
+
+function sandboxHex(bytes) {
+  const lines = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const chunk = [...bytes.slice(i, i + 16)];
+    const hex = chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ').padEnd(47);
+    const ascii = chunk.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('');
+    lines.push(`${i.toString(16).padStart(8, '0')}  ${hex}  ${ascii}`);
+  }
+  return lines.join('\n');
+}
+
+function sandboxCode(text) {
+  return el('pre', 'sb-code', text);
+}
+
+async function sandboxDatabase(body, path, current) {
+  const data = await (await sandboxFetch('sqlite', { path })).json();
+  if (!current()) return;
+  const tables = data.tables || [];
+  if (!tables.length) {
+    body.replaceChildren(el('p', 'sb-empty', t('数据库中没有表')));
+    return;
+  }
+  const bar = el('div', 'sb-db-bar');
+  const select = el('select', 'sb-db-select');
+  tables.forEach((table) => {
+    const option = el('option', null, `${table.name} (${table.count})`);
+    option.value = table.name;
+    select.appendChild(option);
+  });
+  const pager = el('span', 'sb-db-pager');
+  const grid = el('div', 'sb-db-grid');
+  bar.append(select, pager);
+  body.replaceChildren(bar, grid);
+
+  const pageSize = 100;
+  const load = async (offset) => {
+    const table = select.value;
+    grid.replaceChildren(el('p', 'sb-empty', t('正在加载…')));
+    try {
+      const result = await (await sandboxFetch('sqlite', { path, table, offset, limit: pageSize })).json();
+      if (!current() || select.value !== table) return;
+      const tableNode = el('table', 'sb-table');
+      const headRow = el('tr');
+      result.columns.forEach((name) => headRow.appendChild(el('th', null, name)));
+      tableNode.appendChild(el('thead')).appendChild(headRow);
+      const tbody = tableNode.appendChild(el('tbody'));
+      result.rows.forEach((row) => {
+        const tr = tbody.appendChild(el('tr'));
+        row.forEach((value) => {
+          const td = tr.appendChild(el('td', value === null ? 'null' : null, value === null ? 'NULL' : String(value)));
+          td.title = td.textContent;
+        });
+      });
+      grid.replaceChildren(result.rows.length ? tableNode : el('p', 'sb-empty', t('表中没有数据')));
+      const prev = el('button', 'sb-text-btn', '‹');
+      const next = el('button', 'sb-text-btn', '›');
+      prev.disabled = offset <= 0;
+      next.disabled = offset + pageSize >= result.total;
+      prev.addEventListener('click', () => load(Math.max(0, offset - pageSize)));
+      next.addEventListener('click', () => load(offset + pageSize));
+      const end = Math.min(offset + result.rows.length, result.total);
+      pager.replaceChildren(prev, el('span', null, result.total ? `${offset + 1}-${end} / ${result.total}` : '0'), next);
+    } catch (e) {
+      if (current()) grid.replaceChildren(el('p', 'sb-empty', t('查询失败: {0}', e.message)));
+    }
+  };
+  select.addEventListener('change', () => load(0));
+  load(0);
+}
+
 // MARK: - Logs
 // 日志面板: 只在打开时连接 Hub 的日志流, 关闭即断开并释放; 列表只渲染可见区域
 
-const LOG_ROW_H = 20;
 const LOG_MAX_LINES = 100000;
 const LOG_OVERSCAN = 10;
 // 单条日志渲染的字符上限, 完整内容在详情区和复制中
@@ -3866,6 +4311,10 @@ const LOG_WRAP_CHARS = 20000;
 const LOG_FILE_CHUNK = 1024 * 1024;
 const LOG_OPEN_KEY = 'layerlens_log_open';
 const LOG_WRAP_KEY = 'layerlens_log_wrap';
+const LOG_FONT_KEY = 'layerlens_log_font';
+const LOG_FONT_SIZE = { min: 10, max: 20, value: 12 };
+// 候选字体, 只列出本机已安装的
+const LOG_FONTS = ['SF Mono', 'Menlo', 'Monaco', 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'Cascadia Code', 'IBM Plex Mono', 'Hack', 'Inconsolata', 'Roboto Mono', 'Courier New', 'PingFang SC', 'Helvetica Neue'];
 const LOG_LINE_RE = /^\[(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{3})\] ?/;
 
 // lines: 全部日志, 按 id 递增; view: 过滤后的日志, 无过滤时与 lines 为同一数组
@@ -3892,16 +4341,22 @@ const logs = {
   heights: [],
   offsets: [0],
   charW: 7.2,
+  rendered: new Map(),
+  renderKey: '',
+  rowH: 17,
+  font: { family: '', size: LOG_FONT_SIZE.value },
   raf: 0,
 };
 
 function logVisible() {
+  if (logs.window) return true;
   return isNarrow() ? document.body.dataset.view === 'log' : logs.open;
 }
 
 function syncLogPanel() {
   const visible = logVisible();
-  document.body.classList.toggle('log-open', !isNarrow() && logs.open);
+  document.body.classList.toggle('log-open', !logs.window && !isNarrow() && logs.open);
+  if (!logs.open || isNarrow()) setLogMax(false);
   $('logToggle').classList.toggle('on', visible);
   $('logToggle').setAttribute('aria-pressed', String(visible));
   if (visible && !logs.active) {
@@ -3982,7 +4437,8 @@ function logDisconnect() {
 
 function resetLogLines() {
   logs.lines = [];
-  logs.view = logs.lines;
+  // 重连或清空后保留过滤条件
+  logs.view = logFilterActive() ? [] : logs.lines;
   logs.anchor = logs.focus = 0;
   logs.follow = logs.source === 'live';
   logs.unseen = false;
@@ -4014,7 +4470,7 @@ function trimLogLines() {
   logs.lines.splice(0, remove);
   const removed = logs.view === logs.lines ? remove : logIndexOf(logs.view, firstId);
   if (logs.view !== logs.lines) logs.view.splice(0, removed);
-  const removedH = logs.wrap ? logs.offsets[removed] : removed * LOG_ROW_H;
+  const removedH = logs.wrap ? logs.offsets[removed] : removed * logs.rowH;
   if (logs.wrap) {
     logs.heights.splice(0, removed);
     rebuildLogOffsets();
@@ -4056,6 +4512,10 @@ function parseLogFilter(raw) {
   return filter;
 }
 
+function logFilterActive() {
+  return !!(logs.filter.regex || logs.filter.terms.length);
+}
+
 function logMatches(line) {
   const { terms, regex } = logs.filter;
   // 重启标记始终显示, 便于看出日志属于哪次运行
@@ -4072,8 +4532,7 @@ function logMatches(line) {
 function applyLogFilter(raw) {
   logs.filter = parseLogFilter(raw);
   $('logSearch').classList.toggle('invalid', logs.filter.invalid);
-  const active = logs.filter.regex || logs.filter.terms.length;
-  logs.view = active ? logs.lines.filter(logMatches) : logs.lines;
+  logs.view = logFilterActive() ? logs.lines.filter(logMatches) : logs.lines;
   rebuildLogHeights();
   // 切换过滤后保持选中行可见, 便于在上下文中查看
   if (logs.focus && !logs.follow) scrollLogTo(logs.focus, true);
@@ -4145,7 +4604,7 @@ function pushLogHeight(line) {
     const wide = part.length > 2000 ? 0 : (part.match(/[^\x00-\xff]/g) || []).length;
     rows += Math.max(1, Math.ceil((part.length + wide) / cols));
   });
-  const h = rows * LOG_ROW_H;
+  const h = rows * logs.rowH;
   logs.heights.push(h);
   logs.offsets.push(logs.offsets[logs.offsets.length - 1] + h);
 }
@@ -4165,11 +4624,11 @@ function rebuildLogOffsets(from = 0) {
 }
 
 function logOffset(index) {
-  return logs.wrap ? logs.offsets[Math.min(index, logs.offsets.length - 1)] : index * LOG_ROW_H;
+  return logs.wrap ? logs.offsets[Math.min(index, logs.offsets.length - 1)] : index * logs.rowH;
 }
 
 function logIndexAt(y) {
-  if (!logs.wrap) return Math.floor(y / LOG_ROW_H);
+  if (!logs.wrap) return Math.floor(y / logs.rowH);
   let lo = 0;
   let hi = logs.heights.length;
   while (lo < hi) {
@@ -4195,48 +4654,76 @@ function renderLogs() {
     logs.pendingBottom = false;
   }
   const top = list.scrollTop;
-  const start = Math.max(0, logIndexAt(top) - LOG_OVERSCAN);
-  const end = Math.min(view.length, logIndexAt(top + list.clientHeight) + LOG_OVERSCAN + 1);
+  // 上下各多渲染一屏, 快速滚动时不露出空白
+  const overscan = Math.max(LOG_OVERSCAN, Math.ceil(list.clientHeight / logs.rowH));
+  const start = Math.max(0, logIndexAt(top) - overscan);
+  const end = Math.min(view.length, logIndexAt(top + list.clientHeight) + overscan + 1);
   const [selA, selB] = [Math.min(logs.anchor, logs.focus), Math.max(logs.anchor, logs.focus)];
-  let html = '';
+  // 影响行内容的状态变化时整体重建; 否则只增删进出渲染区域的行, 已有的行不重绘, 滚动时不闪烁
+  const key = [logs.filter.raw, logs.wrap, logs.focus ? selA : 0, logs.focus ? selB : 0].join('|');
+  const rows = $('logRows');
+  if (key !== logs.renderKey) {
+    rows.replaceChildren();
+    logs.rendered.clear();
+    logs.renderKey = key;
+  }
+  const keep = new Set();
+  const fragment = document.createDocumentFragment();
   for (let i = start; i < end; i++) {
     const line = view[i];
-    const cls = 'log-row' + (line.k ? ' mark' : '') + (logs.focus && line.id >= selA && line.id <= selB ? ' sel' : '');
-    let msg;
-    if (line.k) {
-      msg = escapeLog('—— ' + t('App 已重新启动') + ' ——');
-    } else if (logs.wrap) {
-      msg = logHighlight(line.m.length > LOG_WRAP_CHARS ? line.m.slice(0, LOG_WRAP_CHARS) + '…' : line.m);
-    } else {
-      // 单行模式下换行符显示为 ⏎, 行高保持固定
-      msg = logHighlight((line.m.length > LOG_ROW_CHARS ? line.m.slice(0, LOG_ROW_CHARS) + '…' : line.m).replace(/\r?\n/g, '⏎'));
+    keep.add(line.id);
+    let row = logs.rendered.get(line.id);
+    if (!row) {
+      row = logRow(line, logs.focus && line.id >= selA && line.id <= selB);
+      logs.rendered.set(line.id, row);
+      fragment.appendChild(row);
     }
-    html += `<div class="${cls}" data-i="${i}"><span class="log-time">${logTime(line.t)}</span><span class="log-msg">${msg}</span></div>`;
+    const y = logOffset(i) + 'px';
+    if (row.style.top !== y) row.style.top = y;
   }
-  const rows = $('logRows');
-  rows.innerHTML = html;
-  rows.style.transform = `translateY(${logOffset(start)}px)`;
-  if (logs.wrap) measureLogRows(rows, start, top);
+  logs.rendered.forEach((row, id) => {
+    if (keep.has(id)) return;
+    row.remove();
+    logs.rendered.delete(id);
+  });
+  rows.appendChild(fragment);
+  if (logs.wrap) measureLogRows(start, end, top);
   renderLogStatus();
 }
 
+function logRow(line, selected) {
+  let msg;
+  if (line.k) {
+    msg = escapeLog('—— ' + t('App 已重新启动') + ' ——');
+  } else if (logs.wrap) {
+    msg = logHighlight(line.m.length > LOG_WRAP_CHARS ? line.m.slice(0, LOG_WRAP_CHARS) + '…' : line.m);
+  } else {
+    // 单行模式下换行符显示为 ⏎, 行高保持固定
+    msg = logHighlight((line.m.length > LOG_ROW_CHARS ? line.m.slice(0, LOG_ROW_CHARS) + '…' : line.m).replace(/\r?\n/g, '⏎'));
+  }
+  const row = el('div', 'log-row' + (line.k ? ' mark' : '') + (selected ? ' sel' : ''));
+  row.dataset.id = line.id;
+  row.innerHTML = `<span class="log-time">${logTime(line.t)}</span><span class="log-msg">${msg}</span>`;
+  return row;
+}
+
 // 换行模式: 用实际高度校正估算值; 视口上方的行变化时同步调整滚动位置, 内容不跳动
-function measureLogRows(rows, start, top) {
+function measureLogRows(start, end, top) {
+  const view = logs.view;
   let from = -1;
   let above = 0;
-  [...rows.children].forEach((row, n) => {
-    const i = start + n;
-    const h = row.offsetHeight;
+  for (let i = start; i < end; i++) {
+    const h = logs.rendered.get(view[i].id).offsetHeight;
     if (h && h !== logs.heights[i]) {
       if (logs.offsets[i + 1] <= top) above += h - logs.heights[i];
       logs.heights[i] = h;
       if (from < 0) from = i;
     }
-  });
+  }
   if (from < 0) return;
   rebuildLogOffsets(from);
-  $('logSpacer').style.height = logOffset(logs.view.length) + 'px';
-  rows.style.transform = `translateY(${logOffset(start)}px)`;
+  $('logSpacer').style.height = logOffset(view.length) + 'px';
+  for (let i = from; i < end; i++) logs.rendered.get(view[i].id).style.top = logOffset(i) + 'px';
   const list = $('logList');
   if (logs.follow) list.scrollTop = list.scrollHeight;
   else if (above) list.scrollTop += above;
@@ -4311,6 +4798,65 @@ function measureLogChar() {
   $('logList').appendChild(probe);
   logs.charW = probe.getBoundingClientRect().width / 100 || 7.2;
   probe.remove();
+}
+
+// MARK: Font
+
+// 用画布比较与后备字体的宽度, 判断字体是否已安装
+function installedLogFonts() {
+  const context = document.createElement('canvas').getContext('2d');
+  const sample = 'mmmmmmmmmmlli1WQ@中文';
+  const width = (font) => {
+    context.font = `40px ${font}`;
+    return context.measureText(sample).width;
+  };
+  const fallbacks = ['monospace', 'serif', 'sans-serif'].map((name) => [name, width(name)]);
+  return LOG_FONTS.filter((family) => fallbacks.some(([name, w]) => width(`"${family}", ${name}`) !== w));
+}
+
+function fillLogFontMenu() {
+  const select = $('logFont');
+  if (select.options.length) return;
+  const families = installedLogFonts();
+  if (logs.font.family && !families.includes(logs.font.family)) families.push(logs.font.family);
+  select.append(el('option', null, t('默认')), ...families.map((family) => {
+    const option = el('option', null, family);
+    option.value = family;
+    option.style.fontFamily = `"${family}"`;
+    return option;
+  }));
+  select.options[0].value = '';
+}
+
+// 字号决定行高; 切换后保持当前第一行可见
+function applyLogFont(save) {
+  const { family, size } = logs.font;
+  const list = $('logList');
+  const first = logs.view[logIndexAt(list.scrollTop)]?.id;
+  const pane = $('logPane');
+  logs.rowH = Math.round(size * 1.4);
+  pane.style.setProperty('--log-font', family ? `"${family}", var(--mono)` : 'var(--mono)');
+  pane.style.setProperty('--log-size', size + 'px');
+  pane.style.setProperty('--log-row-h', logs.rowH + 'px');
+  $('logSizeLabel').textContent = size;
+  $('logSizeDown').disabled = size <= LOG_FONT_SIZE.min;
+  $('logSizeUp').disabled = size >= LOG_FONT_SIZE.max;
+  measureLogChar();
+  rebuildLogHeights();
+  $('logSpacer').style.height = logOffset(logs.view.length) + 'px';
+  if (!logs.follow && first) list.scrollTop = logOffset(logIndexOf(logs.view, first));
+  scheduleLogRender();
+  if (!save) return;
+  try {
+    localStorage.setItem(LOG_FONT_KEY, JSON.stringify(logs.font));
+  } catch (e) {
+    // ignore
+  }
+}
+
+function setLogFontSize(step) {
+  logs.font.size = Math.max(LOG_FONT_SIZE.min, Math.min(LOG_FONT_SIZE.max, logs.font.size + step));
+  applyLogFont(true);
 }
 
 // MARK: Selection
@@ -4448,8 +4994,11 @@ function parseLogText(parts, file) {
       result.push(last);
     }
   });
-  // 上一段的最后一条有续行时重新计算高度
-  if (changed && logs.wrap) rebuildLogHeights();
+  // 上一段的最后一条有续行时重新渲染并计算高度
+  if (changed) {
+    logs.renderKey = '';
+    if (logs.wrap) rebuildLogHeights();
+  }
   return result;
 }
 
@@ -4482,17 +5031,78 @@ function clearLogs() {
   }
 }
 
+// 菜单向下展开, 超出窗口底部时整体上移; 用 offset 尺寸计算, 不受进入动画的缩放影响
+function fitLogMenu() {
+  const menu = $('logMenu');
+  menu.style.top = '';
+  if (menu.hidden) return;
+  const margin = 8;
+  const top = $('logMore').getBoundingClientRect().bottom + 6;
+  const overflow = Math.min(top + menu.offsetHeight - (window.innerHeight - margin), top - margin);
+  if (overflow > 0) menu.style.top = `calc(100% + 6px - ${overflow}px)`;
+}
+
+function setLogMax(max) {
+  document.body.classList.toggle('log-max', max);
+  const button = $('logMax');
+  button.title = max ? t('还原') : t('最大化');
+  button.setAttribute('aria-label', button.title);
+  button.querySelector('use').setAttribute('href', max ? '#i-minimize' : '#i-maximize');
+  scheduleLogRender();
+}
+
+// 独立窗口只显示当前 App 的日志, 当前页面的面板随之收起
+function openLogWindow() {
+  const params = new URLSearchParams({ view: 'logs', device: targets.deviceId || '', app: targets.bundleId || '' });
+  const win = window.open('/?' + params, 'layerlens-logs-' + (targets.bundleId || ''), 'popup,width=1100,height=720');
+  if (!win) {
+    toast(t('无法打开新窗口, 请允许弹出窗口'), true);
+    return;
+  }
+  if (isNarrow()) setView('canvas');
+  else if (logs.open) toggleLogPanel();
+}
+
+// 独立的日志窗口: 地址中带着设备与 App, 不加载层级和实时画面
+function setupLogsWindow() {
+  const params = new URLSearchParams(location.search);
+  targets.deviceId = params.get('device') || '';
+  targets.bundleId = params.get('app') || '';
+  logs.window = true;
+  document.body.classList.add('logs-window');
+  applyI18n();
+  document.title = `${targets.bundleId || 'LayerLens'} · ${t('日志')}`;
+  applyTheme(loadTheme(), false);
+  setupLogs();
+  setupPanels();
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('.popover-anchor')) hidePopovers();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    hidePopovers();
+    closePanel();
+  });
+  syncLogPanel();
+}
+
 function setupLogs() {
   try {
     logs.open = localStorage.getItem(LOG_OPEN_KEY) === '1';
     logs.wrap = localStorage.getItem(LOG_WRAP_KEY) === '1';
+    const font = JSON.parse(localStorage.getItem(LOG_FONT_KEY)) || {};
+    logs.font.family = typeof font.family === 'string' ? font.family : '';
+    logs.font.size = Math.max(LOG_FONT_SIZE.min, Math.min(LOG_FONT_SIZE.max, Number(font.size) || LOG_FONT_SIZE.value));
   } catch (e) {
     // ignore
   }
+  applyLogFont(false);
   setLogWrap(logs.wrap);
   const list = $('logList');
   $('logToggle').addEventListener('click', toggleLogPanel);
   $('logClose').addEventListener('click', toggleLogPanel);
+  $('logMax').addEventListener('click', () => setLogMax(!document.body.classList.contains('log-max')));
+  $('logPopout').addEventListener('click', openLogWindow);
   let filterTimer = null;
   $('logFilter').addEventListener('input', (e) => {
     clearTimeout(filterTimer);
@@ -4510,7 +5120,18 @@ function setupLogs() {
   $('logBottom').addEventListener('click', () => scrollLogEdge(true));
   $('logNew').addEventListener('click', () => scrollLogEdge(true));
   $('logClear').addEventListener('click', clearLogs);
-  $('logMore').addEventListener('click', () => togglePopover('logMenu'));
+  $('logMore').addEventListener('click', () => {
+    fillLogFontMenu();
+    $('logFont').value = logs.font.family;
+    togglePopover('logMenu');
+    fitLogMenu();
+  });
+  $('logFont').addEventListener('change', (e) => {
+    logs.font.family = e.target.value;
+    applyLogFont(true);
+  });
+  $('logSizeDown').addEventListener('click', () => setLogFontSize(-1));
+  $('logSizeUp').addEventListener('click', () => setLogFontSize(1));
   $('logCopy').addEventListener('click', () => {
     hidePopovers();
     copyLogSelection();
@@ -4543,12 +5164,14 @@ function setupLogs() {
       if (atBottom) logs.unseen = false;
     }
     if (logs.file && list.scrollTop + list.clientHeight * 3 >= logOffset(logs.view.length)) loadLogChunk();
-    scheduleLogRender();
+    // 滚动事件已与帧对齐, 直接渲染, 不再等下一帧
+    cancelAnimationFrame(logs.raf);
+    renderLogs();
   });
   list.addEventListener('click', (e) => {
     const row = e.target.closest('.log-row');
     if (!row || window.getSelection().toString()) return;
-    const line = logs.view[Number(row.dataset.i)];
+    const line = logLineById(Number(row.dataset.id));
     if (line) selectLog(line.id, e.shiftKey);
   });
   list.addEventListener('keydown', (e) => {
@@ -4590,6 +5213,10 @@ function setupLogs() {
 // MARK: - Setup
 
 function setup() {
+  if (new URLSearchParams(location.search).get('view') === 'logs') {
+    setupLogsWindow();
+    return;
+  }
   applyI18n();
   loadViewState();
   window.addEventListener('pagehide', saveViewState);
@@ -4734,6 +5361,7 @@ function setup() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (document.body.classList.contains('log-max') && $('modal').hidden) setLogMax(false);
       setColorPicker(false);
       hideMenu();
       hidePopovers();

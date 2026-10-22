@@ -1,6 +1,6 @@
 Pod::Spec.new do |spec|
   spec.name         = "LayerLens"
-  spec.version      = "0.4.0"
+  spec.version      = "0.5.0"
   spec.summary      = "Inspect, edit and explore your iOS view hierarchy from the LayerLens Mac app or your browser."
   spec.description  = <<-DESC
   LayerLens runs a tiny HTTP server inside your debug build. The LayerLens Mac app discovers simulators and
@@ -16,7 +16,9 @@ Pod::Spec.new do |spec|
 
   spec.source_files        = "Pod/Classes/**/*.{h,m}"
   spec.public_header_files = "Pod/Classes/LayerLens.h"
-  spec.frameworks          = "UIKit", "Network"
+  spec.frameworks          = "UIKit", "Network", "UniformTypeIdentifiers"
+  # 沙盒浏览: 打包 zip 用到 crc32, 预览 SQLite 数据库
+  spec.libraries           = "z", "sqlite3"
 
   # 使用了 LookinServer 的内部类, 限定在已验证的版本范围内
   spec.dependency "LookinServer", "~> 1.2.8"

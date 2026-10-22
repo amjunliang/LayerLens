@@ -10,6 +10,8 @@
 
 static const NSUInteger kLayerLensMaxHeaderLength = 64 * 1024;
 static const NSUInteger kLayerLensMaxBodyLength = 1024 * 1024;
+// 沙盒上传的请求体为文件内容, 与 LayerLensSandbox 的大小上限一致
+static const NSUInteger kLayerLensMaxUploadLength = 256 * 1024 * 1024;
 
 @interface LayerLensHTTPRequest ()
 
@@ -49,7 +51,8 @@ static const NSUInteger kLayerLensMaxBodyLength = 1024 * 1024;
     }
 
     NSUInteger bodyLength = (NSUInteger)MAX([headers[@"content-length"] integerValue], 0);
-    if (bodyLength > kLayerLensMaxBodyLength) {
+    NSUInteger maxLength = [requestLine[1] hasPrefix:@"/api/sandbox/upload?"] ? kLayerLensMaxUploadLength : kLayerLensMaxBodyLength;
+    if (bodyLength > maxLength) {
         return LayerLensParseResultError;
     }
     NSUInteger bodyStart = headerEnd.location + headerEnd.length;

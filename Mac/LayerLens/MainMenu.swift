@@ -37,6 +37,17 @@ enum MainMenu {
         edit.addItem(withTitle: L("全选", "Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         main.addItem(submenu: edit, title: edit.title)
 
+        let view = NSMenu(title: L("显示", "View"))
+        view.addItem(withTitle: L("放大", "Zoom In"), action: #selector(AppDelegate.zoomIn), keyEquivalent: "=").target = target
+        // ⌘+ 与 ⌘= 都可放大, 菜单中只显示一项
+        let zoomInPlus = view.addItem(withTitle: L("放大", "Zoom In"), action: #selector(AppDelegate.zoomIn), keyEquivalent: "+")
+        zoomInPlus.target = target
+        zoomInPlus.isHidden = true
+        zoomInPlus.allowsKeyEquivalentWhenHidden = true
+        view.addItem(withTitle: L("缩小", "Zoom Out"), action: #selector(AppDelegate.zoomOut), keyEquivalent: "-").target = target
+        view.addItem(withTitle: L("实际大小", "Actual Size"), action: #selector(AppDelegate.actualSize), keyEquivalent: "0").target = target
+        main.addItem(submenu: view, title: view.title)
+
         let window = NSMenu(title: L("窗口", "Window"))
         window.addItem(withTitle: L("最小化", "Minimize"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         window.addItem(withTitle: L("关闭", "Close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")

@@ -63,6 +63,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.reload()
     }
 
+    @objc func zoomIn() {
+        PageZoom.zoomIn()
+    }
+
+    @objc func zoomOut() {
+        PageZoom.zoomOut()
+    }
+
+    @objc func actualSize() {
+        PageZoom.reset()
+    }
+
     @objc func showAbout() {
         openWindow()
         windowController.openPanel("about")

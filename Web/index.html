@@ -48,6 +48,12 @@
     <symbol id="i-to-top" viewBox="0 0 24 24"><path d="M5 4h14M12 20V8M7 13l5-5 5 5"/></symbol>
     <symbol id="i-to-bottom" viewBox="0 0 24 24"><path d="M5 20h14M12 4v12M7 11l5 5 5-5"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+    <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
+    <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M10 14l-7 7M14 10l7-7"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
   </defs>
 </svg>
@@ -104,6 +110,7 @@
     <div class="popover-anchor help-anchor">
       <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
     </div>
+    <button class="icon-btn" id="sandboxBtn" title="沙盒文件" aria-label="沙盒文件"><svg class="icon"><use href="#i-folder"/></svg></button>
     <button class="icon-btn toggle" id="logToggle" title="日志面板 (L)" aria-label="日志面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
     <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
@@ -209,9 +216,14 @@
       <button class="icon-btn" id="logTop" title="跳到顶部" aria-label="跳到顶部"><svg class="icon"><use href="#i-to-top"/></svg></button>
       <button class="icon-btn" id="logBottom" title="跳到底部, 跟随最新" aria-label="跳到底部"><svg class="icon"><use href="#i-to-bottom"/></svg></button>
       <button class="icon-btn" id="logClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
+      <button class="icon-btn" id="logPopout" title="在独立窗口打开" aria-label="在独立窗口打开"><svg class="icon"><use href="#i-external"/></svg></button>
       <div class="popover-anchor">
         <button class="icon-btn" id="logMore" title="更多" aria-label="更多"><svg class="icon"><use href="#i-more"/></svg></button>
         <div class="popover menu log-menu" id="logMenu" hidden>
+          <div class="menu-row"><span>字体</span><select id="logFont" class="log-font-select"></select></div>
+          <div class="menu-row"><span>字号</span><span class="log-size"><button id="logSizeDown" aria-label="减小字号">−</button><span id="logSizeLabel">12</span><button id="logSizeUp" aria-label="增大字号">+</button></span></div>
+          <div class="menu-sep"></div>
           <button class="menu-row menu-action" id="logCopy">复制选中行</button>
           <button class="menu-row menu-action" id="logExportAll">导出全部</button>
           <button class="menu-row menu-action" id="logExportView">导出过滤结果</button>

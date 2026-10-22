@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */; };
 		13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */; };
+		17193F2776181150A07D780F /* PageZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */; };
 		1F92C6B485796F8B4DFD7632 /* HTTPMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */; };
 		295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541966EE0D953E021F155FB9 /* SimulatorBridge.swift */; };
 		2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB1A4B00E5E141A81FF61999 /* main.swift */; };
@@ -46,6 +47,7 @@
 		8BEB09D7814382476662F06E /* XcodeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XcodeController.swift; sourceTree = "<group>"; };
 		952DDBAAEE608BB432BB2E87 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		97DC8C75223B44DCC6264C99 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Web; path = ../Web; sourceTree = SOURCE_ROOT; };
+		A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageZoom.swift; sourceTree = "<group>"; };
 		A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketConnection.swift; sourceTree = "<group>"; };
 		B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubServer.swift; sourceTree = "<group>"; };
 		BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
@@ -89,6 +91,7 @@
 				DB1A4B00E5E141A81FF61999 /* main.swift */,
 				4EA9476CF005F0D8805106BB /* MainMenu.swift */,
 				1CD20781F27975DD00515545 /* MainWindowController.swift */,
+				A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */,
 				85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */,
 				541966EE0D953E021F155FB9 /* SimulatorBridge.swift */,
 				C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */,
@@ -190,6 +193,7 @@
 				C9CDC699FE2578D78BE232EC /* HubServer.swift in Sources */,
 				AE99CD6490BFF1D10DBE64F9 /* MainMenu.swift in Sources */,
 				D1B3FD3F79A4FF247AB49D3D /* MainWindowController.swift in Sources */,
+				17193F2776181150A07D780F /* PageZoom.swift in Sources */,
 				2F60E987BD741C84FE39106E /* ProxyTunnel.swift in Sources */,
 				295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */,
 				64ED4F6E692A2A9ABF7CB5D7 /* SimulatorEncoder.swift in Sources */,
@@ -224,7 +228,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.4.0;
+				MARKETING_VERSION = 0.5.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.mac;
 				PRODUCT_NAME = LayerLens;
 				SDKROOT = macosx;
@@ -312,7 +316,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.4.0;
+				MARKETING_VERSION = 0.5.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.mac;
 				PRODUCT_NAME = LayerLens;
 				SDKROOT = macosx;
