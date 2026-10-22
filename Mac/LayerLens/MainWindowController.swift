@@ -19,6 +19,7 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
     private static let themeKey = "LayerLensTheme"
     private var appearanceObservation: NSKeyValueObservation?
     private var zoomObserver: NSObjectProtocol?
+    private var frameObservers: [NSObjectProtocol] = []
     /// 进行中的下载及其保存位置
     private var downloads: [ObjectIdentifier: URL] = [:]
     /// 与网页工具栏 --panel 一致: 标题栏后方与工具栏连成一体, 网页绘制前窗口也显示此颜色
@@ -33,9 +34,13 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
         window.title = "LayerLens"
         window.minSize = NSSize(width: 400, height: 300)
         window.isReleasedWhenClosed = false
-        window.center()
-        window.setFrameAutosaveName("LayerLensMainWindow")
+        if !WindowFrameStore.restore(window, name: "main") {
+            window.center()
+        }
         super.init(window: window)
+        // 关闭层叠, 否则显示窗口时会挪动恢复的位置
+        shouldCascadeWindows = false
+        frameObservers = WindowFrameStore.track(window, name: "main")
 
         // 整页重新加载放在标题栏右侧; 用标题栏附件而不是工具栏, 不增加标题栏高度
         window.addTitlebarAccessoryViewController(makeReloadAccessory())
@@ -297,6 +302,7 @@ private final class ChildWebWindow: NSObject, NSWindowDelegate {
     var onClose: (() -> Void)?
     private var titleObservation: NSKeyValueObservation?
     private var zoomObserver: NSObjectProtocol?
+    private var frameObservers: [NSObjectProtocol] = []
 
     init(configuration: WKWebViewConfiguration, appearance: NSAppearance?, backgroundColor: NSColor?) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -316,8 +322,10 @@ private final class ChildWebWindow: NSObject, NSWindowDelegate {
         webView.setValue(false, forKey: "drawsBackground")
         window.contentView = webView
         window.delegate = self
-        window.center()
-        window.setFrameAutosaveName("LayerLensChildWindow")
+        if !WindowFrameStore.restore(window, name: "child") {
+            window.center()
+        }
+        frameObservers = WindowFrameStore.track(window, name: "child")
         titleObservation = webView.observe(\.title) { [weak self] webView, _ in
             self?.window.title = webView.title.flatMap { $0.isEmpty ? nil : $0 } ?? "LayerLens"
         }
@@ -327,6 +335,8 @@ private final class ChildWebWindow: NSObject, NSWindowDelegate {
         titleObservation = nil
         zoomObserver.map(NotificationCenter.default.removeObserver)
         zoomObserver = nil
+        frameObservers.forEach(NotificationCenter.default.removeObserver)
+        frameObservers = []
         onClose?()
     }
 }

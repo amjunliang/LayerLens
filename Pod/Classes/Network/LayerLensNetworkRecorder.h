@@ -40,6 +40,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)detailForIdentifier:(uint64_t)identifier completion:(void (^)(NSDictionary * _Nullable detail))completion;
 /// side 为 req 或 res; 没有内容时 data 为 nil, message 为原因
 - (void)bodyForIdentifier:(uint64_t)identifier side:(NSString *)side completion:(void (^)(NSData * _Nullable data, NSString *contentType, NSString * _Nullable message))completion;
+/// 请求和响应内容中包含关键词的请求 id; query 以 \\ 开头为正则, 否则以 | 分隔多个关键词, 均不区分大小写.
+/// 二进制内容不参与; 正则无效时 identifiers 为 nil.
+/// candidates 不为空时只查找这些请求; 同一 client 发起新的查找时, 未完成的旧查找提前结束并返回空数组
+- (void)searchBodiesWithQuery:(NSString *)query candidates:(nullable NSArray<NSNumber *> *)candidates client:(nullable NSString *)client completion:(void (^)(NSArray<NSNumber *> * _Nullable identifiers))completion;
 /// 导出 HAR 1.2, identifiers 为空时导出全部; 文本内容原样写入, 其他以 base64 写入
 - (void)HARWithIdentifiers:(nullable NSArray<NSNumber *> *)identifiers completion:(void (^)(NSData *data))completion;
 - (void)clear;

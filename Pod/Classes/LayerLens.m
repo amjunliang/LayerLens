@@ -16,7 +16,7 @@
 #import "LayerLensNetworkRecorder.h"
 #import <UIKit/UIKit.h>
 
-NSString * const LayerLensVersion = @"0.6.0";
+NSString * const LayerLensVersion = @"0.6.1";
 const NSInteger LayerLensAPIVersion = 1;
 
 #if DEBUG

@@ -2132,12 +2132,10 @@ function renderTargetMenu() {
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
   footer.dataset.panel = 'integration';
   children.push(el('div', 'menu-sep'), footer);
-  // 工具栏放不下时视图选项按钮折叠, 从这里打开
-  if (document.body.classList.contains('fold-options')) {
-    const options = el('button', 'menu-row menu-action target-footer', t('视图选项…'));
-    options.addEventListener('click', () => togglePopover('optionsMenu'));
-    children.push(options);
-  }
+  // 视图选项使用频率低, 工具栏不放按钮, 从这里打开
+  const options = el('button', 'menu-row menu-action target-footer', t('视图选项…'));
+  options.addEventListener('click', () => openPanel('options'));
+  children.push(options);
   menu.replaceChildren(...children);
 }
 
@@ -3140,22 +3138,6 @@ function setupLayout() {
   document.body.dataset.view = 'canvas';
   updateAutoPanels();
   new ResizeObserver(updateAutoPanels).observe(layout);
-  const toolbar = document.querySelector('.toolbar');
-  const observer = new ResizeObserver(updateToolbarFold);
-  [toolbar, ...toolbar.children].forEach((node) => observer.observe(node));
-}
-
-// 工具栏放不下时先折叠视图选项按钮(低频), 两端的面板开关保持可见; 先展开再量, 变宽后能恢复
-function updateToolbarFold() {
-  const toolbar = document.querySelector('.toolbar');
-  const folded = document.body.classList.contains('fold-options');
-  document.body.classList.remove('fold-options');
-  const fold = toolbar.scrollWidth > toolbar.clientWidth;
-  document.body.classList.toggle('fold-options', fold);
-  if (fold !== folded) {
-    hideLayer($('optionsMenu'), 120);
-    renderTargetMenu();
-  }
 }
 
 // MARK: - Detail
@@ -3862,6 +3844,7 @@ const SHORTCUT_GROUPS = [
     [['D'], '显示 / 隐藏详情面板'],
     [['L'], '显示 / 隐藏日志面板'],
     [['N'], '显示 / 隐藏网络面板'],
+    [['⌘', 'F'], '在当前区域查找: 层级树, 日志, 网络列表或请求详情'],
     [['?'], '显示此面板'],
   ]],
   ['层级树', false, [
@@ -3911,13 +3894,16 @@ function shortcutsPanel() {
 }
 
 function openPanel(name) {
-  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel] };
+  const panels = { options: [t('视图选项'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel] };
   const panel = panels[name];
   if (!panel) return;
   state.panel = name;
   hidePopovers();
   hideMenu();
+  // 视图选项的控件一直留在文档中, 换成其他弹窗前先放回隐藏的容器
+  $('optionsHolder').appendChild($('optionsMenu'));
   $('modal').classList.toggle('modal-wide', name === 'sandbox');
+  $('modal').classList.toggle('modal-narrow', name === 'options');
   if (name !== 'sandbox') sandbox = null;
   $('modalTitle').textContent = panel[0];
   $('modalBody').replaceChildren(...panel[1]());
@@ -3942,6 +3928,11 @@ function setupPanels() {
     if (value) copyText(value, '复制');
   });
   $('modalClose').addEventListener('click', closePanel);
+  // 视图选项中的操作执行后关闭弹窗; 打开其他弹窗的由 data-panel 处理
+  $('optionsMenu').addEventListener('click', (e) => {
+    const action = e.target.closest('.menu-action');
+    if (action && !action.dataset.panel && action.id !== 'menuHeal') closePanel();
+  });
 }
 
 // MARK: - Sandbox
@@ -5386,8 +5377,20 @@ const net = {
   pending: [],
   selected: 0,
   detail: null,
-  detailTab: 'headers',
+  detailTab: 'response',
   detailToken: 0,
+  // 内容搜索: 设备返回内容匹配过滤词的请求 id
+  searchSupported: false,
+  bodyHits: null,
+  searchTimer: 0,
+  searchToken: 0,
+  // 全量查找后新结束的请求, 下次只查找这些
+  searchPending: new Set(),
+  searchInflight: 0,
+  // 设备据此取消本页面未完成的旧查找
+  searchClient: Math.random().toString(36).slice(2),
+  // 详情中的 ⌘F 查找
+  find: { open: false, query: '', marks: [], index: -1 },
   follow: true,
   rendered: new Map(),
   renderKey: '',
@@ -5494,8 +5497,10 @@ async function netConnect() {
 async function netOutdated() {
   try {
     const res = await fetch(targetBase() + '/api/network/status');
-    if (res.status !== 404) return false;
     const data = await res.json().catch(() => ({}));
+    // 0.6.1 起支持搜索内容
+    if (res.ok) net.searchSupported = !!data.search;
+    if (res.status !== 404) return false;
     return !data.error || data.error === 'Not Found';
   } catch (e) {
     return false;
@@ -5517,6 +5522,9 @@ function resetNet() {
   net.seq = 0;
   net.instanceId = '';
   net.follow = true;
+  net.bodyHits = null;
+  net.searchPending.clear();
+  net.searchToken++;
   closeNetDetail();
   scheduleNetRender();
 }
@@ -5534,12 +5542,15 @@ function receiveNetRecords(records) {
 function applyNetRecords(records) {
   let reorder = false;
   let detailChanged = false;
+  const searching = netBodySearchActive();
   for (const record of records) {
     net.seq = Math.max(net.seq, record.s || 0);
     const old = net.records.get(record.id);
+    if (searching && record.state && record.state !== 'pending' && (!old || old.state === 'pending')) net.searchPending.add(record.id);
     if (old) {
       if (record.id === net.selected && old.state !== record.state) detailChanged = true;
       Object.assign(old, record);
+      old.filterText = old.filterLower = null;
       continue;
     }
     if (net.list.length && net.list[net.list.length - 1].id > record.id) reorder = true;
@@ -5547,6 +5558,8 @@ function applyNetRecords(records) {
     net.list.push(record);
   }
   if (reorder) net.list.sort((a, b) => a.id - b.id);
+  // 有请求结束时查找它们的内容, 请求频繁时每秒最多一次
+  if (net.bodyHits && net.searchPending.size && !net.searchTimer && !net.searchInflight) scheduleNetBodySearch(1000);
   if (net.list.length > NET_MAX_RECORDS) {
     net.list.splice(0, net.list.length - NET_MAX_RECORDS).forEach((record) => net.records.delete(record.id));
   }
@@ -5590,14 +5603,61 @@ function netMatches(record) {
     return false;
   }
   const { terms, regex } = net.filter;
-  const text = `${record.method} ${record.url} ${record.status || ''}`;
+  if (!regex && !terms.length) return true;
+  if (net.bodyHits?.has(record.id)) return true;
+  // 缓存过滤用的文本, 记录多时每次刷新不必重新拼接; 记录更新时清空
+  record.filterText ??= `${record.method} ${record.url} ${record.status || ''}`;
   if (regex) {
     regex.lastIndex = 0;
-    return regex.test(text);
+    return regex.test(record.filterText);
   }
-  if (!terms.length) return true;
-  const lower = text.toLowerCase();
-  return terms.some((term) => lower.includes(term));
+  record.filterLower ??= record.filterText.toLowerCase();
+  return terms.some((term) => record.filterLower.includes(term));
+}
+
+// 过滤词同时在请求和响应内容中查找, 由设备完成; 旧版 Pod 不支持时只过滤地址等字段
+// 过滤词变化时查找全部请求, 之后只查找新结束的请求
+function netBodySearchActive() {
+  return !!(net.searchSupported && net.key && !net.filter.invalid && (net.filter.regex || net.filter.terms.length));
+}
+
+function scheduleNetBodySearch(delay) {
+  clearTimeout(net.searchTimer);
+  net.searchTimer = 0;
+  if (!netBodySearchActive()) return;
+  net.searchTimer = setTimeout(() => {
+    net.searchTimer = 0;
+    searchNetBodies();
+  }, delay);
+}
+
+async function searchNetBodies() {
+  let ids = net.bodyHits ? [...net.searchPending] : null;
+  // 增量查找同时只发一个; 积压过多时改为全量查找
+  if (ids && (net.searchInflight || !ids.length)) return;
+  if (ids && ids.length > 500) {
+    ids = null;
+    net.bodyHits = null;
+  }
+  net.searchPending.clear();
+  const token = net.searchToken;
+  const params = { q: net.filter.raw, client: net.searchClient };
+  if (ids) params.ids = ids.join(',');
+  net.searchInflight++;
+  try {
+    const res = await fetch(netApi('search', params));
+    const data = await res.json().catch(() => ({}));
+    if (token === net.searchToken && res.ok) {
+      if (ids) (data.ids || []).forEach((id) => net.bodyHits.add(id));
+      else net.bodyHits = new Set(data.ids || []);
+      rebuildNetView();
+    }
+  } catch (e) {
+    // 设备断开时保留地址等字段的过滤结果
+  } finally {
+    net.searchInflight--;
+  }
+  if (token === net.searchToken && net.bodyHits && net.searchPending.size && !net.searchTimer) scheduleNetBodySearch(1000);
 }
 
 function netFilterActive() {
@@ -5615,14 +5675,17 @@ function scheduleNetRender() {
   if (!net.raf) net.raf = requestAnimationFrame(renderNet);
 }
 
+const NET_HEAD_H = 28;
+
 function renderNet() {
   net.raf = 0;
   if (!net.active) return;
   const list = $('netList');
+  if (!net.charMeasured) measureNetChar(list);
   const view = net.view;
   $('netSpacer').style.height = view.length * net.rowH + 'px';
   if (net.follow) list.scrollTop = list.scrollHeight;
-  const top = list.scrollTop;
+  const top = Math.max(0, list.scrollTop - NET_HEAD_H);
   const overscan = Math.ceil(list.clientHeight / net.rowH);
   const start = Math.max(0, Math.floor(top / net.rowH) - overscan);
   const end = Math.min(view.length, Math.ceil((top + list.clientHeight) / net.rowH) + overscan);
@@ -5685,7 +5748,8 @@ function netStatusCell(record) {
     cell.title = record.error || '';
   } else {
     cell.textContent = record.status || '—';
-    if (record.status >= 400) cell.classList.add('bad');
+    if (record.status >= 500) cell.classList.add('bad');
+    else if (record.status >= 400) cell.classList.add('client');
     else if (record.status >= 300) cell.classList.add('redirect');
   }
   return cell;
@@ -5700,16 +5764,19 @@ function netRow(record) {
   const row = el('div', 'log-row net-row' + (record.id === net.selected ? ' sel' : '') + (netFailed(record) ? ' failed' : ''));
   row.dataset.id = record.id;
   const [origin, path] = netSplitURL(record.url);
-  const url = el('span', 'net-url');
-  url.append(el('span', 'net-path', path), el('span', 'net-host', origin.replace(/^https?:\/\//, '')));
-  url.title = record.url;
+  const host = el('span', 'net-host', origin.replace(/^[a-z][a-z0-9+.-]*:\/\//i, ''));
+  host.title = origin;
+  const pathCell = el('span', 'net-path', path);
+  pathCell.title = record.url;
   row.append(
-    netStatusCell(record),
+    el('span', 'net-start', logTime(record.start)),
     el('span', 'net-method', record.method),
-    url,
-    el('span', 'net-kind', netMimeLabel(record)),
+    netStatusCell(record),
     el('span', 'net-size', record.state === 'pending' && !record.resSize ? '' : logSize(record.resSize || 0)),
     el('span', 'net-time', record.state === 'pending' ? t('进行中') : netDuration(record.duration)),
+    host,
+    pathCell,
+    el('span', 'net-kind', netMimeLabel(record)),
   );
   return row;
 }
@@ -5753,10 +5820,62 @@ function moveNetSelection(step) {
   const next = net.view[Math.max(0, Math.min(net.view.length - 1, index < 0 ? (step > 0 ? 0 : net.view.length - 1) : index + step))];
   selectNet(next.id);
   const list = $('netList');
+  // 列头固定在顶部, 行在内容中的位置要加上列头高度
   const y = netRecordIndex(next.id) * net.rowH;
   if (y < list.scrollTop) list.scrollTop = y;
-  else if (y + net.rowH > list.scrollTop + list.clientHeight) list.scrollTop = y + net.rowH - list.clientHeight;
+  else if (y + NET_HEAD_H + net.rowH > list.scrollTop + list.clientHeight) list.scrollTop = y + NET_HEAD_H + net.rowH - list.clientHeight;
   net.follow = false;
+}
+
+// MARK: Menu
+
+// items: [标题, 操作, 是否禁用], null 为分隔线
+function showNetMenu(x, y, items) {
+  hideMenu();
+  const menu = el('div', 'context-menu');
+  menu.id = 'contextMenu';
+  items.forEach((entry) => {
+    if (!entry) {
+      menu.appendChild(el('div', 'menu-separator'));
+      return;
+    }
+    const [title, run, disabled] = entry;
+    const button = el('button', 'menu-item', t(title));
+    button.disabled = !!disabled;
+    button.addEventListener('click', () => {
+      hideMenu();
+      run();
+    });
+    menu.appendChild(button);
+  });
+  document.body.appendChild(menu);
+  placeMenu(menu, x, y);
+}
+
+function showNetRowMenu(x, y, record, cell) {
+  // 单元格只是视觉上截断, 文本是完整的
+  const value = cell?.textContent || '';
+  showNetMenu(x, y, [
+    ['复制单元格', () => copyText(value, '复制单元格'), !value],
+    ['复制 URL', () => copyText(record.url, '复制 URL')],
+    null,
+    ['复制 cURL', () => copyNetCurl(record.id)],
+    ['复制响应内容', () => copyNetResponse(record.id), record.state === 'pending'],
+  ]);
+}
+
+async function copyNetResponse(id) {
+  try {
+    const { bytes } = await fetchNetBody(id, 'res');
+    const text = sandboxText(bytes);
+    if (text === null) {
+      toast(t('响应内容为二进制, 无法复制'), true);
+      return;
+    }
+    await copyText(text, '复制响应内容');
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 // MARK: Detail
@@ -5775,6 +5894,13 @@ function netApi(path, params) {
   return `${targetBase()}/api/network/${path}?${new URLSearchParams(params)}`;
 }
 
+async function fetchNetDetail(id) {
+  const res = await fetch(netApi('detail', { id }));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(t(NET_BODY_MESSAGES[data.error] || data.error || `HTTP ${res.status}`));
+  return data;
+}
+
 async function loadNetDetail(id) {
   const token = ++net.detailToken;
   const panel = $('netDetail');
@@ -5782,10 +5908,8 @@ async function loadNetDetail(id) {
   $('netSplitter').hidden = false;
   if (!net.detail || net.detail.id !== id) panel.replaceChildren(el('p', 'net-note', t('正在加载…')));
   try {
-    const res = await fetch(netApi('detail', { id }));
-    const data = await res.json().catch(() => ({}));
+    const data = await fetchNetDetail(id);
     if (token !== net.detailToken) return;
-    if (!res.ok) throw new Error(t(NET_BODY_MESSAGES[data.error] || data.error || `HTTP ${res.status}`));
     net.detail = data;
     renderNetDetail();
   } catch (e) {
@@ -5795,7 +5919,7 @@ async function loadNetDetail(id) {
   }
 }
 
-function netDetailHead(record) {
+function netDetailHead(record, tabs) {
   const head = el('div', 'net-detail-head');
   const title = el('div', 'net-detail-title');
   if (record) {
@@ -5803,18 +5927,19 @@ function netDetailHead(record) {
     title.title = record.url;
   }
   const tools = el('div', 'net-detail-tools');
-  const copyUrl = el('button', 'sb-text-btn');
-  copyUrl.append(icon('copy'), 'URL');
+  const copyUrl = el('button', 'icon-btn');
+  copyUrl.title = t('复制 URL');
+  copyUrl.appendChild(icon('copy'));
   copyUrl.addEventListener('click', () => copyText(record?.url || '', '复制 URL'));
   const curl = el('button', 'sb-text-btn', 'cURL');
-  curl.addEventListener('click', () => copyNetCurl());
+  curl.addEventListener('click', () => copyNetCurl(net.detail?.id));
   curl.disabled = !net.detail;
   const close = el('button', 'icon-btn');
   close.title = t('关闭');
   close.appendChild(icon('close'));
   close.addEventListener('click', () => closeNetDetail());
-  tools.append(copyUrl, curl, close);
-  head.append(title, tools);
+  tools.append(copyUrl, curl, el('span', 'net-find-sep'), close);
+  head.append(...[title, tabs, tools].filter(Boolean));
   return head;
 }
 
@@ -5822,7 +5947,7 @@ function renderNetDetail() {
   const detail = net.detail;
   const panel = $('netDetail');
   const tabs = el('div', 'segmented small net-detail-tabs');
-  [['headers', '标头'], ['request', '请求'], ['response', '响应']].forEach(([name, label]) => {
+  [['response', '响应'], ['request', '请求'], ['headers', '标头']].forEach(([name, label]) => {
     const button = el('button', name === net.detailTab ? 'active' : '', t(label));
     button.addEventListener('click', () => {
       net.detailTab = name;
@@ -5838,13 +5963,18 @@ function renderNetDetail() {
       netSection(t('请求头'), netHeaderRows(detail.requestHeaders)),
     );
   } else if (net.detailTab === 'request') {
+    body.appendChild(netBodySection(detail, 'req'));
     const query = [...new URL(detail.url, location.href).searchParams];
     if (query.length) body.appendChild(netSection(t('查询参数'), netKeyValueRows(query)));
-    body.appendChild(netBodySection(detail, 'req'));
   } else {
     body.appendChild(netBodySection(detail, 'res'));
   }
-  panel.replaceChildren(netDetailHead(net.records.get(detail.id) || detail), tabs, body);
+  // 查找栏浮在内容区上, 不随内容滚动
+  const content = el('div', 'net-detail-content');
+  content.appendChild(body);
+  if (net.find.open) content.appendChild(netFindBar());
+  panel.replaceChildren(netDetailHead(net.records.get(detail.id) || detail, tabs), content);
+  runNetFind();
 }
 
 function netSection(title, content) {
@@ -5859,6 +5989,18 @@ function netKeyValueRows(pairs) {
   const table = el('div', 'net-kv');
   pairs.forEach(([name, value]) => {
     table.append(el('span', 'net-k', name), el('span', 'net-v', value));
+  });
+  table.addEventListener('contextmenu', (e) => {
+    const cell = e.target.closest('.net-k, .net-v');
+    // 有选中文本时保留系统的复制行为
+    if (!cell || window.getSelection().toString()) return;
+    e.preventDefault();
+    const [name, value] = pairs[Math.floor([...table.children].indexOf(cell) / 2)];
+    showNetMenu(e.clientX, e.clientY, [
+      ['复制值', () => copyText(value, '复制值')],
+      ['复制名称', () => copyText(name, '复制名称')],
+      ['复制整行', () => copyText(`${name}: ${value}`, '复制整行')],
+    ]);
   });
   return table;
 }
@@ -5886,7 +6028,7 @@ function netGeneralRows(detail) {
 function netBodySection(detail, side) {
   const size = side === 'req' ? detail.reqSize : detail.resSize;
   const state = side === 'req' ? detail.reqBody : detail.resBody;
-  const section = netSection(side === 'req' ? t('请求内容') : t('响应内容'), []);
+  const section = el('section', 'net-section net-body-section');
   const notes = { none: '没有内容', tooLarge: '内容超过 5 MB, 未保存', stream: '以流的方式发送, 无法获取内容', file: '文件内容未保存', evicted: '已被缓存清理删除' };
   if (detail.state === 'pending' && side === 'res') {
     section.appendChild(el('p', 'net-note', t('请求进行中, 结束后显示')));
@@ -5916,7 +6058,8 @@ async function loadNetBody(id, side, box) {
     const { type, bytes } = await fetchNetBody(id, side);
     if (token !== net.detailToken) return;
     const tools = el('div', 'net-body-tools');
-    tools.appendChild(el('span', 'sb-meta', `${type.split(';')[0] || 'application/octet-stream'} · ${logSize(bytes.length)}`));
+    const duration = side === 'res' ? netDuration(net.records.get(id)?.duration) : '';
+    tools.appendChild(el('span', 'sb-meta', [type.split(';')[0] || 'application/octet-stream', logSize(bytes.length), duration].filter(Boolean).join(' · ')));
     if (/^image\//i.test(type)) {
       const img = el('img', 'sb-image');
       img.src = URL.createObjectURL(new Blob([bytes], { type }));
@@ -5931,34 +6074,291 @@ async function loadNetBody(id, side, box) {
     }
     const full = bytes.length <= NET_PREVIEW_LIMIT ? new TextDecoder().decode(bytes) : text;
     let content = full;
+    let tree = null;
     if (bytes.length <= NET_PREVIEW_LIMIT && (/json/i.test(type) || /^\s*[{[]/.test(full))) {
       try {
-        content = JSON.stringify(JSON.parse(full), null, 2);
+        tree = parseJSONTree(full);
+        content = jsonPretty(tree, '');
       } catch (e) {
         // 不是合法 JSON 时按原文显示
       }
     }
     const nodes = [];
     if (/x-www-form-urlencoded/i.test(type)) nodes.push(netKeyValueRows([...new URLSearchParams(full)]));
+    if (bytes.length > NET_PREVIEW_LIMIT) nodes.push(el('p', 'net-note', t('内容较大, 只显示前 {0}', logSize(NET_PREVIEW_LIMIT))));
+    const folds = [];
+    if (tree && (tree.t === 'o' || tree.t === 'a')) {
+      const expand = el('button', 'sb-text-btn', t('展开全部'));
+      expand.addEventListener('click', () => box.querySelectorAll('.json-node').forEach((node) => node.classList.remove('collapsed')));
+      const collapse = el('button', 'sb-text-btn', t('折叠全部'));
+      // 保留第一层, 只折叠更深的层级
+      collapse.addEventListener('click', () => box.querySelectorAll('.json-node .json-node').forEach((node) => node.classList.add('collapsed')));
+      folds.push(expand, collapse);
+    }
     const copy = el('button', 'sb-text-btn');
     copy.append(icon('copy'), t('复制'));
     copy.addEventListener('click', () => copyText(content, '复制内容'));
-    tools.appendChild(copy);
-    if (bytes.length > NET_PREVIEW_LIMIT) nodes.push(el('p', 'net-note', t('内容较大, 只显示前 {0}', logSize(NET_PREVIEW_LIMIT))));
-    nodes.push(sandboxCode(content));
-    box.replaceChildren(tools, ...nodes);
+    tools.append(...folds, copy);
+    box.replaceChildren(tools, ...nodes, tree ? jsonView(tree) : sandboxCode(content));
+    runNetFind();
   } catch (e) {
     if (token === net.detailToken) box.replaceChildren(el('p', 'net-note', e.message));
   }
+}
+
+// MARK: JSON
+
+// 自行解析以保留数字原文, 避免超过 2^53 的 id 等在 JSON.parse 后丢失精度.
+// 节点: o 对象 (v 为 [key, 节点] 数组), a 数组, s 字符串, n 数字 (原文), l true / false / null
+function parseJSONTree(text) {
+  let i = 0;
+  const fail = () => {
+    throw new SyntaxError('Invalid JSON');
+  };
+  const space = () => {
+    for (let c = text.charCodeAt(i); c === 32 || c === 9 || c === 10 || c === 13; c = text.charCodeAt(++i));
+  };
+  const stringRe = /"(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/y;
+  const literalRe = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/y;
+  const string = () => {
+    stringRe.lastIndex = i;
+    const match = stringRe.exec(text);
+    if (!match) fail();
+    i = stringRe.lastIndex;
+    return JSON.parse(match[0]);
+  };
+  const value = () => {
+    space();
+    const c = text[i];
+    if (c === '{' || c === '[') {
+      const object = c === '{';
+      const items = [];
+      i++;
+      space();
+      if (text[i] === (object ? '}' : ']')) {
+        i++;
+        return { t: object ? 'o' : 'a', v: items };
+      }
+      for (;;) {
+        if (object) {
+          space();
+          if (text[i] !== '"') fail();
+          const key = string();
+          space();
+          if (text[i++] !== ':') fail();
+          items.push([key, value()]);
+        } else {
+          items.push([null, value()]);
+        }
+        space();
+        const next = text[i++];
+        if (next === (object ? '}' : ']')) break;
+        if (next !== ',') fail();
+      }
+      return { t: object ? 'o' : 'a', v: items };
+    }
+    if (c === '"') return { t: 's', v: string() };
+    literalRe.lastIndex = i;
+    const match = literalRe.exec(text);
+    if (!match) fail();
+    i = literalRe.lastIndex;
+    return { t: /^[tfn]/.test(match[0]) ? 'l' : 'n', v: match[0] };
+  };
+  const root = value();
+  space();
+  if (i < text.length) fail();
+  return root;
+}
+
+function jsonScalarText(node) {
+  return node.t === 's' ? JSON.stringify(node.v) : node.v;
+}
+
+function jsonPretty(node, indent) {
+  if (node.t !== 'o' && node.t !== 'a') return jsonScalarText(node);
+  const [open, close] = node.t === 'o' ? ['{', '}'] : ['[', ']'];
+  if (!node.v.length) return open + close;
+  const inner = indent + '  ';
+  const items = node.v.map(([key, child]) => inner + (key === null ? '' : JSON.stringify(key) + ': ') + jsonPretty(child, inner));
+  return `${open}\n${items.join(',\n')}\n${indent}${close}`;
+}
+
+// 点击 ▸ 或折叠后的摘要切换展开, 按住 ⌥ 时同时切换所有下级
+function jsonView(tree) {
+  const root = el('pre', 'sb-code json-view');
+  root.appendChild(jsonNode(tree, null, false));
+  // 行号按展开后的行编号, 折叠时保持不变
+  const lines = root.querySelectorAll('.json-line, .json-close');
+  lines.forEach((line, index) => (line.dataset.line = index + 1));
+  root.style.setProperty('--gutter', String(lines.length).length + 'ch');
+  root.addEventListener('click', (e) => {
+    const target = e.target.closest('.json-toggle, .json-summary');
+    if (!target) return;
+    const node = target.closest('.json-node');
+    const collapse = !node.classList.contains('collapsed');
+    if (e.altKey) node.querySelectorAll('.json-node').forEach((child) => child.classList.toggle('collapsed', collapse));
+    node.classList.toggle('collapsed', collapse);
+  });
+  return root;
+}
+
+function jsonNode(node, key, comma) {
+  const line = el('div', 'json-line');
+  if (key !== null) line.append(el('span', 'json-key', JSON.stringify(key)), el('span', 'json-punct', ': '));
+  const container = node.t === 'o' || node.t === 'a';
+  if (!container || !node.v.length) {
+    line.appendChild(container ? el('span', 'json-punct', node.t === 'o' ? '{}' : '[]') : el('span', node.t === 's' ? 'json-str' : node.t === 'n' ? 'json-num' : 'json-lit', node.v === undefined ? '' : jsonScalarText(node)));
+    if (comma) line.appendChild(el('span', 'json-punct', ','));
+    return line;
+  }
+  const [open, close] = node.t === 'o' ? ['{', '}'] : ['[', ']'];
+  const wrap = el('div', 'json-node');
+  line.prepend(el('span', 'json-toggle'));
+  line.append(el('span', 'json-punct', open), el('span', 'json-summary', ` … ${close}${comma ? ',' : ''}  ${t('{0} 项', node.v.length)}`));
+  const children = el('div', 'json-children');
+  node.v.forEach(([childKey, child], index) => children.appendChild(jsonNode(child, childKey, index < node.v.length - 1)));
+  const end = el('div', 'json-close');
+  end.appendChild(el('span', 'json-punct', close + (comma ? ',' : '')));
+  wrap.append(line, children, end);
+  return wrap;
+}
+
+// MARK: Find
+
+function netFindBar() {
+  const bar = el('div', 'net-find');
+  const input = el('input');
+  input.type = 'text';
+  input.placeholder = t('在内容中查找');
+  input.spellcheck = false;
+  input.value = net.find.query;
+  input.addEventListener('input', () => {
+    net.find.query = input.value;
+    net.find.index = -1;
+    runNetFind();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      stepNetFind(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeNetFind();
+    }
+  });
+  const count = el('span', 'net-find-count');
+  const button = (name, title, run) => {
+    const b = el('button', 'icon-btn');
+    b.title = t(title);
+    b.appendChild(icon(name));
+    b.addEventListener('click', run);
+    return b;
+  };
+  bar.append(input, count, el('span', 'net-find-sep'), button('chevron-up', '上一个', () => stepNetFind(-1)), button('chevron-down', '下一个', () => stepNetFind(1)), button('close', '关闭', closeNetFind));
+  return bar;
+}
+
+function openNetFind() {
+  const panel = $('netDetail');
+  net.find.open = true;
+  let bar = panel.querySelector('.net-find');
+  if (!bar) {
+    bar = netFindBar();
+    panel.querySelector('.net-detail-content').appendChild(bar);
+  }
+  const input = bar.querySelector('input');
+  // 选中文本时以选中内容查找
+  const selection = window.getSelection().toString().trim();
+  if (selection && !selection.includes('\n') && panel.contains(window.getSelection().anchorNode)) {
+    input.value = net.find.query = selection;
+    net.find.index = -1;
+  }
+  input.focus();
+  input.select();
+  runNetFind();
+}
+
+function closeNetFind() {
+  net.find.open = false;
+  net.find.query = '';
+  $('netDetail').querySelector('.net-find')?.remove();
+  runNetFind();
+  $('netList').focus();
+  // 关闭后焦点回到列表, 再按 ⌘F 仍在详情中查找
+  findArea = 'netDetail';
+}
+
+// 在详情内容的文本中标记所有匹配, 不区分大小写; 折叠的 JSON 中的匹配在跳转到时展开
+function runNetFind() {
+  const panel = $('netDetail');
+  const body = panel.querySelector('.net-detail-body');
+  const find = net.find;
+  panel.querySelectorAll('mark.find').forEach((mark) => {
+    const parent = mark.parentNode;
+    mark.replaceWith(document.createTextNode(mark.textContent));
+    parent.normalize();
+  });
+  find.marks = [];
+  const query = find.open ? find.query.toLowerCase() : '';
+  if (body && query) {
+    const nodes = [];
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => (node.parentElement.closest('.json-summary, .json-toggle, .net-body-tools, button') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+    for (const node of nodes) {
+      const lower = node.nodeValue.toLowerCase();
+      const starts = [];
+      for (let at = lower.indexOf(query); at >= 0 && find.marks.length + starts.length < 5000; at = lower.indexOf(query, at + query.length)) starts.push(at);
+      const marks = [];
+      // 从后往前拆分, 前面的位置不受影响
+      for (let k = starts.length - 1; k >= 0; k--) {
+        const match = node.splitText(starts[k]);
+        match.splitText(query.length);
+        const mark = el('mark', 'find');
+        match.replaceWith(mark);
+        mark.appendChild(match);
+        marks.unshift(mark);
+      }
+      find.marks.push(...marks);
+    }
+  }
+  if (find.index >= find.marks.length) find.index = find.marks.length - 1;
+  if (find.index < 0 && find.marks.length) find.index = 0;
+  focusNetFind(false);
+}
+
+function stepNetFind(step) {
+  const find = net.find;
+  if (!find.marks.length) return;
+  find.index = (find.index + step + find.marks.length) % find.marks.length;
+  focusNetFind(true);
+}
+
+function focusNetFind(scroll) {
+  const find = net.find;
+  const count = $('netDetail').querySelector('.net-find-count');
+  if (count) count.textContent = !find.query ? '' : find.marks.length ? `${find.index + 1}/${find.marks.length}` : t('无结果');
+  const mark = find.marks[find.index];
+  if (!mark) return;
+  find.marks.forEach((item) => item.classList.toggle('current', item === mark));
+  for (let node = mark.closest('.json-node.collapsed'); node; node = node.parentElement.closest('.json-node.collapsed')) node.classList.remove('collapsed');
+  if (scroll || find.index === 0) mark.scrollIntoView({ block: 'center', inline: 'nearest' });
 }
 
 function shellQuote(text) {
   return `'${String(text).replace(/'/g, `'\\''`)}'`;
 }
 
-async function copyNetCurl() {
-  const detail = net.detail;
-  if (!detail) return;
+async function copyNetCurl(id) {
+  let detail = net.detail?.id === id ? net.detail : null;
+  try {
+    detail = detail || (await fetchNetDetail(id));
+  } catch (e) {
+    toast(t('无法读取请求详情: {0}', e.message), true);
+    return;
+  }
   const parts = ['curl'];
   if (detail.method !== 'GET') parts.push('-X', detail.method);
   parts.push(shellQuote(detail.url));
@@ -6032,6 +6432,7 @@ function setupNetwork() {
   } catch (e) {
     // ignore
   }
+  setupNetColumns();
   $('paneTabs').addEventListener('click', (e) => {
     const button = e.target.closest('button[data-pane]');
     if (button) setPaneTab(button.dataset.pane);
@@ -6042,7 +6443,11 @@ function setupNetwork() {
     filterTimer = setTimeout(() => {
       net.filter = parseLogFilter(e.target.value);
       $('netSearch').classList.toggle('invalid', !!net.filter.invalid);
+      net.bodyHits = null;
+      net.searchPending.clear();
+      net.searchToken++;
       rebuildNetView();
+      scheduleNetBodySearch(0);
     }, 150);
   });
   $('netType').addEventListener('change', (e) => {
@@ -6054,6 +6459,7 @@ function setupNetwork() {
   $('netHar').addEventListener('click', exportNetHar);
   const list = $('netList');
   list.addEventListener('scroll', () => {
+    hideMenu();
     net.follow = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
     cancelAnimationFrame(net.raf);
     net.raf = 0;
@@ -6075,6 +6481,16 @@ function setupNetwork() {
       closeNetDetail();
     }
   });
+  list.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.net-row');
+    if (!row) return;
+    e.preventDefault();
+    showNetRowMenu(e.clientX, e.clientY, net.records.get(Number(row.dataset.id)), e.target.closest('.net-row > span'));
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('.context-menu')) hideMenu();
+  });
+  setupFindKey();
   const splitter = $('netSplitter');
   splitter.addEventListener('pointerdown', (e) => {
     e.preventDefault();
@@ -6095,6 +6511,60 @@ function setupNetwork() {
   });
   new ResizeObserver(() => scheduleNetRender()).observe(list);
   syncNetPanel();
+}
+
+// MARK: - Find
+
+// ⌘F 按鼠标所在, 或最近点击, 聚焦的区域查找: 层级树, 日志, 网络列表, 网络请求详情;
+// 不必先点击, 鼠标移到哪个区域就查找哪里; 该区域不可见时依次退到层级树, 底部面板当前页
+let findArea = '';
+
+function findAreaOf(target) {
+  if (!(target instanceof Element)) return findArea;
+  if (target.closest('.net-detail')) return 'netDetail';
+  if (target.closest('.log-pane')) return 'pane';
+  if (target.closest('.tree-pane')) return 'tree';
+  return findArea;
+}
+
+function paneFilterInput() {
+  return net.tab === 'net' ? $('netFilter') : $('logFilter');
+}
+
+function runFind() {
+  const shown = (node) => !!node && node.offsetParent !== null;
+  const detailOpen = netVisible() && net.detail && shown($('netDetail'));
+  const targets = {
+    netDetail: detailOpen ? () => openNetFind() : null,
+    pane: shown(paneFilterInput()) ? paneFilterInput() : null,
+    tree: shown($('search')) ? $('search') : null,
+  };
+  const target = targets[findArea] || targets.tree || targets.pane;
+  if (!target) return false;
+  if (typeof target === 'function') {
+    target();
+  } else {
+    target.focus();
+    target.select();
+  }
+  return true;
+}
+
+function setupFindKey() {
+  ['pointerdown', 'pointerover'].forEach((type) => document.addEventListener(type, (e) => {
+    findArea = findAreaOf(e.target);
+  }, true));
+  document.addEventListener('focusin', (e) => {
+    findArea = findAreaOf(e.target);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+    if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
+    if (runFind()) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
 }
 
 // MARK: - Setup
@@ -6216,7 +6686,6 @@ function setup() {
       renderCanvas();
     });
   });
-  $('optionsBtn').addEventListener('click', () => togglePopover('optionsMenu'));
   $('helpBtn').addEventListener('click', () => openPanel('shortcuts'));
   $('spacingBtn').addEventListener('click', () => togglePopover('spacingPop'));
   $('treeFilterBtn').addEventListener('click', () => togglePopover('treeFilterPop'));
@@ -6349,8 +6818,6 @@ function loadAppInfo() {
     appInfo.name = info.appName;
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
-    const menuInfo = $('menuAppInfo');
-    menuInfo.replaceChildren(el('b', null, info.appName), el('div', null, `${info.bundleId} · ${info.version}`), el('div', null, `${info.device} · ${info.os}`));
     updateAppMeta();
     document.title = `${info.appName} - LayerLens`;
   }).catch((e) => {

@@ -1,5 +1,5 @@
 PODS:
-  - LayerLens (0.6.0):
+  - LayerLens (0.6.1):
     - LookinServer (~> 1.2.8)
   - LookinServer (1.2.8):
     - LookinServer/Core (= 1.2.8)
@@ -17,7 +17,7 @@ EXTERNAL SOURCES:
     :path: ".."
 
 SPEC CHECKSUMS:
-  LayerLens: 695dcf7fc51dfa641c922c6c024b864bec8b850b
+  LayerLens: 6a3e78e0349e9abdefeafc102dfc430f4b3caa0d
   LookinServer: 1b2b61c6402ae29fa22182d48f5cd067b4e99e80
 
 PODFILE CHECKSUM: a02872deba3b4e3f1c8b8dd4cb9e336fd0c6f1a7

@@ -232,9 +232,9 @@
 #pragma mark - Network
 
 - (void)registerNetworkRoutesToRouter:(LayerLensRouter *)router {
-    // 网页据此判断 Pod 是否支持抓包
+    // 网页据此判断 Pod 是否支持抓包, search 表示支持搜索内容
     [router addRoute:@"GET" path:@"/api/network/status" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
-        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}]);
+        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES, @"search": @YES}]);
     }];
 
     // 请求流: 先补齐序号大于 since 的请求, 之后每批变化推送一次, 同一请求以 id 合并; 清空时推送 clear
@@ -265,6 +265,23 @@
             LayerLensHTTPResponse *response = [LayerLensHTTPResponse responseWithStatus:200 contentType:contentType body:data];
             response.headers[@"Cache-Control"] = @"no-store";
             responder(response);
+        }];
+    }];
+
+    // 内容包含关键词的请求 id, 规则同网页过滤框; ids 为逗号分隔的请求 id, 只查找这些请求
+    [router addRoute:@"GET" path:@"/api/network/search" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSMutableArray<NSNumber *> *candidates = nil;
+        if (request.query[@"ids"]) {
+            candidates = [NSMutableArray array];
+            for (NSString *item in [request.query[@"ids"] componentsSeparatedByString:@","]) {
+                uint64_t identifier = strtoull(item.UTF8String ?: "0", NULL, 10);
+                if (identifier > 0) {
+                    [candidates addObject:@(identifier)];
+                }
+            }
+        }
+        [LayerLensNetworkRecorder.sharedRecorder searchBodiesWithQuery:request.query[@"q"] ?: @"" candidates:candidates client:request.query[@"client"] completion:^(NSArray<NSNumber *> *identifiers) {
+            responder(identifiers ? [LayerLensHTTPResponse JSONResponse:@{@"ids": identifiers}] : [LayerLensHTTPResponse errorResponse:400 message:@"Invalid query"]);
         }];
     }];
 

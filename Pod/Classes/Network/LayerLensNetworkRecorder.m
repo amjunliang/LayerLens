@@ -42,6 +42,10 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
 @property (nonatomic, assign) uint64_t seq;
 @property (nonatomic, assign) BOOL flushScheduled;
 @property (nonatomic, strong, nullable) dispatch_source_t sweepTimer;
+/// 内容查找串行执行, 避免多次查找同时占用 CPU
+@property (nonatomic, strong) dispatch_queue_t searchQueue;
+/// client -> 最新一次查找的序号, 用于取消旧查找
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *searchGenerations;
 
 @end
 
@@ -63,6 +67,8 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
         _records = [NSMutableDictionary dictionary];
         _order = [NSMutableArray array];
         _changed = [NSMutableOrderedSet orderedSet];
+        _searchQueue = dispatch_queue_create("com.layerlens.network.search", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+        _searchGenerations = [NSMutableDictionary dictionary];
         // 列表只在内存中, 上次启动留下的内容已无法查看
         dispatch_async(_queue, ^{
             [NSFileManager.defaultManager removeItemAtPath:self.directory error:nil];
@@ -380,6 +386,98 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
         NSString *state = [record detail][isRequest ? @"reqBody" : @"resBody"];
         completion(nil, contentType, messages[state] ?: @"No content");
     });
+}
+
+- (void)searchBodiesWithQuery:(NSString *)query candidates:(NSArray<NSNumber *> *)candidates client:(NSString *)client completion:(void (^)(NSArray<NSNumber *> *))completion {
+    NSRegularExpression *regex = [self searchRegexWithQuery:query];
+    if (!regex) {
+        completion(nil);
+        return;
+    }
+    NSString *key = client ?: @"";
+    NSUInteger generation = 0;
+    @synchronized (self.searchGenerations) {
+        // 只保留最近的 client, 避免页面反复刷新后无限增长
+        if (self.searchGenerations.count > 32 && !self.searchGenerations[key]) {
+            [self.searchGenerations removeAllObjects];
+        }
+        generation = self.searchGenerations[key].unsignedIntegerValue + 1;
+        self.searchGenerations[key] = @(generation);
+    }
+    BOOL (^cancelled)(void) = ^BOOL {
+        @synchronized (self.searchGenerations) {
+            return self.searchGenerations[key].unsignedIntegerValue != generation;
+        }
+    };
+    NSSet<NSNumber *> *candidateSet = candidates ? [NSSet setWithArray:candidates] : nil;
+    dispatch_async(self.queue, ^{
+        // 在内部队列取内容的快照, 读文件和匹配放到后台, 不阻塞记录
+        NSMutableArray<NSArray *> *items = [NSMutableArray array];
+        for (NSNumber *identifier in self.order) {
+            if (candidateSet && ![candidateSet containsObject:identifier]) {
+                continue;
+            }
+            LayerLensNetworkRecord *record = self.records[identifier];
+            id request = record.requestBody ?: record.requestBodyPath;
+            id response = record.responseBody ?: record.responseBodyPath;
+            if (request || response) {
+                [items addObject:@[identifier, request ?: NSNull.null, response ?: NSNull.null]];
+            }
+        }
+        dispatch_async(self.searchQueue, ^{
+            NSMutableArray<NSNumber *> *identifiers = [NSMutableArray array];
+            for (NSArray *item in items) {
+                if (cancelled()) {
+                    completion(@[]);
+                    return;
+                }
+                if ([self body:item[2] matches:regex] || [self body:item[1] matches:regex]) {
+                    [identifiers addObject:item[0]];
+                }
+            }
+            completion(identifiers);
+        });
+    });
+}
+
+- (NSRegularExpression *)searchRegexWithQuery:(NSString *)query {
+    NSString *pattern = nil;
+    if ([query hasPrefix:@"\\"]) {
+        pattern = [query substringFromIndex:1];
+    } else {
+        NSMutableArray<NSString *> *terms = [NSMutableArray array];
+        for (NSString *term in [query componentsSeparatedByString:@"|"]) {
+            NSString *trimmed = [term stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            if (trimmed.length > 0) {
+                [terms addObject:[NSRegularExpression escapedPatternForString:trimmed]];
+            }
+        }
+        pattern = [terms componentsJoinedByString:@"|"];
+    }
+    if (pattern.length == 0) {
+        return nil;
+    }
+    return [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionCaseInsensitive error:nil];
+}
+
+- (BOOL)body:(id)body matches:(NSRegularExpression *)regex {
+    NSData *data = [body isKindOfClass:NSString.class] ? [NSData dataWithContentsOfFile:body] : ([body isKindOfClass:NSData.class] ? body : nil);
+    if (data.length == 0) {
+        return NO;
+    }
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!text) {
+        return NO;
+    }
+    if ([regex firstMatchInString:text options:0 range:NSMakeRange(0, text.length)]) {
+        return YES;
+    }
+    // JSON 中的中文常转义为 \uXXXX, 还原后再匹配一次
+    if ([text containsString:@"\\u"]) {
+        NSString *decoded = [text stringByApplyingTransform:@"Any-Hex/Java" reverse:YES];
+        return decoded && [regex firstMatchInString:decoded options:0 range:NSMakeRange(0, decoded.length)];
+    }
+    return NO;
 }
 
 - (NSData *)bodyOfRecord:(LayerLensNetworkRecord *)record request:(BOOL)isRequest {

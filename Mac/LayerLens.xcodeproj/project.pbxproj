@@ -11,6 +11,7 @@
 		13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */; };
 		17193F2776181150A07D780F /* PageZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */; };
 		1F92C6B485796F8B4DFD7632 /* HTTPMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */; };
+		217C92BE894BC97978F9F94C /* WindowFrameStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BD19405B2FDC9FD18D3B5DF /* WindowFrameStore.swift */; };
 		295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 541966EE0D953E021F155FB9 /* SimulatorBridge.swift */; };
 		2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB1A4B00E5E141A81FF61999 /* main.swift */; };
 		2F60E987BD741C84FE39106E /* ProxyTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */; };
@@ -42,6 +43,7 @@
 		591B590B9F1B317AD096335C /* AppLogRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogRecorder.swift; sourceTree = "<group>"; };
 		5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorKeyboard.swift; sourceTree = "<group>"; };
 		78F1AD52529F3E51E363B48B /* LayerLens.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LayerLens.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7BD19405B2FDC9FD18D3B5DF /* WindowFrameStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrameStore.swift; sourceTree = "<group>"; };
 		835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorStream.swift; sourceTree = "<group>"; };
 		85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyTunnel.swift; sourceTree = "<group>"; };
 		8BEB09D7814382476662F06E /* XcodeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XcodeController.swift; sourceTree = "<group>"; };
@@ -101,6 +103,7 @@
 				C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */,
 				018BD14CAF3AA5013A6E67EA /* Usbmux.swift */,
 				A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */,
+				7BD19405B2FDC9FD18D3B5DF /* WindowFrameStore.swift */,
 				8BEB09D7814382476662F06E /* XcodeController.swift */,
 			);
 			path = LayerLens;
@@ -203,6 +206,7 @@
 				8CCD018F71C87A6C6F8B962C /* TargetRegistry.swift in Sources */,
 				5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */,
 				0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */,
+				217C92BE894BC97978F9F94C /* WindowFrameStore.swift in Sources */,
 				5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */,
 				2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */,
 			);
@@ -228,7 +232,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.0;
+				MARKETING_VERSION = 0.6.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.mac;
 				PRODUCT_NAME = LayerLens;
 				SDKROOT = macosx;
@@ -316,7 +320,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.0;
+				MARKETING_VERSION = 0.6.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.mac;
 				PRODUCT_NAME = LayerLens;
 				SDKROOT = macosx;
