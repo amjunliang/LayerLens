@@ -1,0 +1,103 @@
+
+//
+//  LayerLens_StaticAsyncUpdateTask.m
+//  Lookin
+//
+//  Created by Li Kai on 2019/6/21.
+//  https://lookin.work
+//
+
+
+
+#import "LayerLens_StaticAsyncUpdateTask.h"
+
+@implementation LayerLens_StaticAsyncUpdateTask
+
+- (void)encodeWithCoder:(NSCoder *)aCoder {
+    [aCoder encodeObject:@(self.oid) forKey:@"oid"];
+    [aCoder encodeInteger:self.taskType forKey:@"taskType"];
+    [aCoder encodeObject:self.clientReadableVersion forKey:@"clientReadableVersion"];
+    [aCoder encodeInteger:self.attrRequest forKey:@"attrRequest"];
+    [aCoder encodeBool:self.needBasisVisualInfo forKey:@"needBasisVisualInfo"];
+    [aCoder encodeBool:self.needSubitems forKey:@"needSubitems"];
+}
+
+- (instancetype)initWithCoder:(NSCoder *)aDecoder {
+    if (self = [super init]) {
+        self.oid = [[aDecoder decodeObjectForKey:@"oid"] unsignedLongValue];
+        self.taskType = [aDecoder decodeIntegerForKey:@"taskType"];
+        self.clientReadableVersion = [aDecoder decodeObjectForKey:@"clientReadableVersion"];
+        if ([aDecoder containsValueForKey:@"attrRequest"]) {
+            NSInteger value = [aDecoder decodeIntegerForKey:@"attrRequest"];
+            if (value >= LayerLens_DetailUpdateTaskAttrRequest_Automatic && value <= LayerLens_DetailUpdateTaskAttrRequest_NotNeed) {
+                self.attrRequest = value;
+            } else {
+                self.attrRequest = LayerLens_DetailUpdateTaskAttrRequest_Automatic;
+            }
+        } else {
+            self.attrRequest = LayerLens_DetailUpdateTaskAttrRequest_Automatic;
+        }
+
+        if ([aDecoder containsValueForKey:@"needBasisVisualInfo"]) {
+            self.needBasisVisualInfo = [aDecoder decodeBoolForKey:@"needBasisVisualInfo"];
+        } else {
+            self.needBasisVisualInfo = NO;
+        }
+        
+        if ([aDecoder containsValueForKey:@"needSubitems"]) {
+            self.needSubitems = [aDecoder decodeBoolForKey:@"needSubitems"];
+        } else {
+            self.needSubitems = NO;
+        }
+        
+    }
+    return self;
+}
+
++ (BOOL)supportsSecureCoding {
+    return YES;
+}
+
+- (NSUInteger)hash {
+    return self.oid ^ self.taskType ^ self.attrRequest ^ self.needBasisVisualInfo ^ self.needSubitems;
+}
+
+- (BOOL)isEqual:(id)object {
+    if (self == object) {
+        return YES;
+    }
+    if (![object isKindOfClass:[LayerLens_StaticAsyncUpdateTask class]]) {
+        return NO;
+    }
+    LayerLens_StaticAsyncUpdateTask *targetTask = object;
+    if (self.oid == targetTask.oid
+        && self.taskType == targetTask.taskType
+        && self.attrRequest == targetTask.attrRequest
+        && self.needBasisVisualInfo == targetTask.needBasisVisualInfo
+        && self.needSubitems == targetTask.needSubitems) {
+        return YES;
+    }
+    return NO;
+}
+
+@end
+
+@implementation LayerLens_StaticAsyncUpdateTasksPackage
+
+- (void)encodeWithCoder:(NSCoder *)aCoder {
+    [aCoder encodeObject:self.tasks forKey:@"tasks"];
+}
+
+- (instancetype)initWithCoder:(NSCoder *)aDecoder {
+    if (self = [super init]) {
+        self.tasks = [aDecoder decodeObjectForKey:@"tasks"];
+    }
+    return self;
+}
+
++ (BOOL)supportsSecureCoding {
+    return YES;
+}
+
+@end
+

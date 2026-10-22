@@ -7,25 +7,25 @@
 //
 
 #import "LayerLensLookinSerializer.h"
-#import "LookinDisplayItem.h"
-#import "LookinObject.h"
-#import "LookinIvarTrace.h"
-#import "LookinAttributesGroup.h"
-#import "LookinAttributesSection.h"
-#import "LookinAttribute.h"
-#import "LookinDashboardBlueprint.h"
-#import "LookinEventHandler.h"
-#import "LookinTuple.h"
-#import "NSObject+LookinServer.h"
-#import "CALayer+LookinServer.h"
+#import "LayerLens_DisplayItem.h"
+#import "LayerLens_Object.h"
+#import "LayerLens_IvarTrace.h"
+#import "LayerLens_AttributesGroup.h"
+#import "LayerLens_AttributesSection.h"
+#import "LayerLens_Attribute.h"
+#import "LayerLens_DashboardBlueprint.h"
+#import "LayerLens_EventHandler.h"
+#import "LayerLens_Tuple.h"
+#import "NSObject+LayerLens_Server.h"
+#import "CALayer+LayerLens_Server.h"
 
 @implementation LayerLensLookinSerializer
 
 #pragma mark - Node
 
-+ (NSDictionary *)nodeFromDisplayItem:(LookinDisplayItem *)item parentRect:(CGRect)parentRect {
-    LookinObject *displayObject = item.viewObject ?: item.layerObject;
-    CALayer *layer = item.layerObject ? (CALayer *)[NSObject lks_objectWithOid:item.layerObject.oid] : nil;
++ (NSDictionary *)nodeFromDisplayItem:(LayerLens_DisplayItem *)item parentRect:(CGRect)parentRect {
+    LayerLens_Object *displayObject = item.viewObject ?: item.layerObject;
+    CALayer *layer = item.layerObject ? (CALayer *)[NSObject layerlens_objectWithOid:item.layerObject.oid] : nil;
 
     CGRect rect = CGRectZero;
     if ([layer isKindOfClass:CALayer.class]) {
@@ -36,12 +36,12 @@
     }
 
     NSMutableArray<NSDictionary *> *children = [NSMutableArray arrayWithCapacity:item.subitems.count];
-    for (LookinDisplayItem *subitem in item.subitems) {
+    for (LayerLens_DisplayItem *subitem in item.subitems) {
         [children addObject:[self nodeFromDisplayItem:subitem parentRect:rect]];
     }
 
     NSMutableArray<NSString *> *traces = [NSMutableArray array];
-    for (LookinIvarTrace *trace in displayObject.ivarTraces) {
+    for (LayerLens_IvarTrace *trace in displayObject.ivarTraces) {
         [traces addObject:[NSString stringWithFormat:@"%@.%@", trace.hostClassName ?: @"?", trace.ivarName ?: @"?"]];
     }
 
@@ -56,7 +56,7 @@
     node[@"ivarTraces"] = traces;
     node[@"specialTrace"] = displayObject.specialTrace ?: [NSNull null];
     node[@"title"] = item.customDisplayTitle ?: [NSNull null];
-    node[@"text"] = [self displayTextOfView:[layer isKindOfClass:CALayer.class] ? layer.lks_hostView : nil] ?: [NSNull null];
+    node[@"text"] = [self displayTextOfView:[layer isKindOfClass:CALayer.class] ? layer.layerlens_hostView : nil] ?: [NSNull null];
     node[@"frame"] = [self arrayFromRect:item.frame];
     node[@"rect"] = [self arrayFromRect:rect];
     node[@"hidden"] = @(item.isHidden);
@@ -90,7 +90,7 @@
 }
 
 + (CGRect)screenRectOfLayer:(CALayer *)layer {
-    UIWindow *window = layer.lks_window;
+    UIWindow *window = layer.layerlens_window;
     if (!window) {
         return layer.frame;
     }
@@ -103,23 +103,23 @@
 
 #pragma mark - Attribute
 
-+ (NSArray<NSDictionary *> *)attrGroupsFromGroups:(NSArray<LookinAttributesGroup *> *)groups custom:(BOOL)custom {
++ (NSArray<NSDictionary *> *)attrGroupsFromGroups:(NSArray<LayerLens_AttributesGroup *> *)groups custom:(BOOL)custom {
     NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:groups.count];
-    for (LookinAttributesGroup *group in groups) {
+    for (LayerLens_AttributesGroup *group in groups) {
         NSMutableArray<NSDictionary *> *sections = [NSMutableArray array];
-        for (LookinAttributesSection *section in group.attrSections) {
+        for (LayerLens_AttributesSection *section in group.attrSections) {
             NSMutableArray<NSDictionary *> *attrs = [NSMutableArray array];
-            for (LookinAttribute *attr in section.attributes) {
+            for (LayerLens_Attribute *attr in section.attributes) {
                 [attrs addObject:[self attrFromAttribute:attr custom:custom]];
             }
-            NSString *sectionTitle = custom ? nil : [LookinDashboardBlueprint sectionTitleWithSectionID:section.identifier];
+            NSString *sectionTitle = custom ? nil : [LayerLens_DashboardBlueprint sectionTitleWithSectionID:section.identifier];
             [sections addObject:@{
                 @"id": section.identifier ?: @"",
                 @"title": sectionTitle ?: [NSNull null],
                 @"attrs": attrs,
             }];
         }
-        NSString *title = group.userCustomTitle ?: [LookinDashboardBlueprint groupTitleWithGroupID:group.identifier];
+        NSString *title = group.userCustomTitle ?: [LayerLens_DashboardBlueprint groupTitleWithGroupID:group.identifier];
         [result addObject:@{
             @"id": group.identifier ?: @"",
             @"title": title ?: group.identifier ?: @"",
@@ -130,14 +130,14 @@
     return result;
 }
 
-+ (NSDictionary *)attrFromAttribute:(LookinAttribute *)attr custom:(BOOL)custom {
++ (NSDictionary *)attrFromAttribute:(LayerLens_Attribute *)attr custom:(BOOL)custom {
     NSString *title = attr.displayTitle;
     NSString *enumList = nil;
     BOOL editable = NO;
     if (!custom) {
-        title = [LookinDashboardBlueprint briefTitleWithAttrID:attr.identifier] ?: title;
-        enumList = [LookinDashboardBlueprint enumListNameWithAttrID:attr.identifier];
-        editable = [LookinDashboardBlueprint setterWithAttrID:attr.identifier] != nil && [self isEditableAttrType:attr.attrType];
+        title = [LayerLens_DashboardBlueprint briefTitleWithAttrID:attr.identifier] ?: title;
+        enumList = [LayerLens_DashboardBlueprint enumListNameWithAttrID:attr.identifier];
+        editable = [LayerLens_DashboardBlueprint setterWithAttrID:attr.identifier] != nil && [self isEditableAttrType:attr.attrType];
     }
     return @{
         @"id": attr.identifier ?: @"",
@@ -149,15 +149,15 @@
     };
 }
 
-+ (NSArray<NSDictionary *> *)eventHandlersFromHandlers:(NSArray<LookinEventHandler *> *)handlers {
++ (NSArray<NSDictionary *> *)eventHandlersFromHandlers:(NSArray<LayerLens_EventHandler *> *)handlers {
     NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:handlers.count];
-    for (LookinEventHandler *handler in handlers) {
+    for (LayerLens_EventHandler *handler in handlers) {
         NSMutableArray<NSArray<NSString *> *> *targetActions = [NSMutableArray array];
-        for (LookinStringTwoTuple *tuple in handler.targetActions) {
+        for (LayerLens_StringTwoTuple *tuple in handler.targetActions) {
             [targetActions addObject:@[tuple.first ?: @"", tuple.second ?: @""]];
         }
         [result addObject:@{
-            @"type": handler.handlerType == LookinEventHandlerTypeGesture ? @"gesture" : @"targetAction",
+            @"type": handler.handlerType == LayerLens_EventHandlerTypeGesture ? @"gesture" : @"targetAction",
             @"name": handler.eventName ?: @"",
             @"inherited": handler.inheritedRecognizerName ?: [NSNull null],
             @"enabled": @(handler.gestureRecognizerIsEnabled),
@@ -171,68 +171,68 @@
 
 #pragma mark - Value
 
-+ (BOOL)isEditableAttrType:(LookinAttrType)attrType {
++ (BOOL)isEditableAttrType:(LayerLens_AttrType)attrType {
     switch (attrType) {
-        case LookinAttrTypeChar:
-        case LookinAttrTypeInt:
-        case LookinAttrTypeShort:
-        case LookinAttrTypeLong:
-        case LookinAttrTypeLongLong:
-        case LookinAttrTypeUnsignedChar:
-        case LookinAttrTypeUnsignedInt:
-        case LookinAttrTypeUnsignedShort:
-        case LookinAttrTypeUnsignedLong:
-        case LookinAttrTypeUnsignedLongLong:
-        case LookinAttrTypeFloat:
-        case LookinAttrTypeDouble:
-        case LookinAttrTypeBOOL:
-        case LookinAttrTypeEnumInt:
-        case LookinAttrTypeEnumLong:
-        case LookinAttrTypeCGPoint:
-        case LookinAttrTypeCGVector:
-        case LookinAttrTypeCGSize:
-        case LookinAttrTypeCGRect:
-        case LookinAttrTypeCGAffineTransform:
-        case LookinAttrTypeUIEdgeInsets:
-        case LookinAttrTypeUIOffset:
-        case LookinAttrTypeNSString:
-        case LookinAttrTypeUIColor:
+        case LayerLens_AttrTypeChar:
+        case LayerLens_AttrTypeInt:
+        case LayerLens_AttrTypeShort:
+        case LayerLens_AttrTypeLong:
+        case LayerLens_AttrTypeLongLong:
+        case LayerLens_AttrTypeUnsignedChar:
+        case LayerLens_AttrTypeUnsignedInt:
+        case LayerLens_AttrTypeUnsignedShort:
+        case LayerLens_AttrTypeUnsignedLong:
+        case LayerLens_AttrTypeUnsignedLongLong:
+        case LayerLens_AttrTypeFloat:
+        case LayerLens_AttrTypeDouble:
+        case LayerLens_AttrTypeBOOL:
+        case LayerLens_AttrTypeEnumInt:
+        case LayerLens_AttrTypeEnumLong:
+        case LayerLens_AttrTypeCGPoint:
+        case LayerLens_AttrTypeCGVector:
+        case LayerLens_AttrTypeCGSize:
+        case LayerLens_AttrTypeCGRect:
+        case LayerLens_AttrTypeCGAffineTransform:
+        case LayerLens_AttrTypeUIEdgeInsets:
+        case LayerLens_AttrTypeUIOffset:
+        case LayerLens_AttrTypeNSString:
+        case LayerLens_AttrTypeUIColor:
             return YES;
         default:
             return NO;
     }
 }
 
-+ (id)JSONValueFromValue:(id)value attrType:(LookinAttrType)attrType {
++ (id)JSONValueFromValue:(id)value attrType:(LayerLens_AttrType)attrType {
     if (!value || value == [NSNull null]) {
         return [NSNull null];
     }
     if ([value isKindOfClass:NSValue.class] && ![value isKindOfClass:NSNumber.class]) {
         NSValue *v = value;
         switch (attrType) {
-            case LookinAttrTypeCGPoint: {
+            case LayerLens_AttrTypeCGPoint: {
                 CGPoint p = v.CGPointValue;
                 return @[[self safeNumber:p.x], [self safeNumber:p.y]];
             }
-            case LookinAttrTypeCGVector: {
+            case LayerLens_AttrTypeCGVector: {
                 CGVector p = v.CGVectorValue;
                 return @[[self safeNumber:p.dx], [self safeNumber:p.dy]];
             }
-            case LookinAttrTypeCGSize: {
+            case LayerLens_AttrTypeCGSize: {
                 CGSize s = v.CGSizeValue;
                 return @[[self safeNumber:s.width], [self safeNumber:s.height]];
             }
-            case LookinAttrTypeCGRect:
+            case LayerLens_AttrTypeCGRect:
                 return [self arrayFromRect:v.CGRectValue];
-            case LookinAttrTypeCGAffineTransform: {
+            case LayerLens_AttrTypeCGAffineTransform: {
                 CGAffineTransform t = v.CGAffineTransformValue;
                 return @[[self safeNumber:t.a], [self safeNumber:t.b], [self safeNumber:t.c], [self safeNumber:t.d], [self safeNumber:t.tx], [self safeNumber:t.ty]];
             }
-            case LookinAttrTypeUIEdgeInsets: {
+            case LayerLens_AttrTypeUIEdgeInsets: {
                 UIEdgeInsets i = v.UIEdgeInsetsValue;
                 return @[[self safeNumber:i.top], [self safeNumber:i.left], [self safeNumber:i.bottom], [self safeNumber:i.right]];
             }
-            case LookinAttrTypeUIOffset: {
+            case LayerLens_AttrTypeUIOffset: {
                 UIOffset o = v.UIOffsetValue;
                 return @[[self safeNumber:o.horizontal], [self safeNumber:o.vertical]];
             }
@@ -249,14 +249,14 @@
     if ([value isKindOfClass:NSArray.class]) {
         NSMutableArray *array = [NSMutableArray arrayWithCapacity:[value count]];
         for (id obj in value) {
-            [array addObject:[self JSONValueFromValue:obj attrType:LookinAttrTypeNone]];
+            [array addObject:[self JSONValueFromValue:obj attrType:LayerLens_AttrTypeNone]];
         }
         return array;
     }
     if ([value isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *dict = [NSMutableDictionary dictionary];
         [(NSDictionary *)value enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
-            dict[[key description]] = [self JSONValueFromValue:obj attrType:LookinAttrTypeNone];
+            dict[[key description]] = [self JSONValueFromValue:obj attrType:LayerLens_AttrTypeNone];
         }];
         return dict;
     }
@@ -268,62 +268,62 @@
     return [value description] ?: @"";
 }
 
-+ (id)modificationValueFromJSONValue:(id)value attrType:(LookinAttrType)attrType supported:(BOOL *)supported {
++ (id)modificationValueFromJSONValue:(id)value attrType:(LayerLens_AttrType)attrType supported:(BOOL *)supported {
     BOOL ok = YES;
     id result = nil;
     NSArray<NSNumber *> *numbers = [value isKindOfClass:NSArray.class] ? value : nil;
     switch (attrType) {
-        case LookinAttrTypeChar:
-        case LookinAttrTypeInt:
-        case LookinAttrTypeShort:
-        case LookinAttrTypeLong:
-        case LookinAttrTypeLongLong:
-        case LookinAttrTypeUnsignedChar:
-        case LookinAttrTypeUnsignedInt:
-        case LookinAttrTypeUnsignedShort:
-        case LookinAttrTypeUnsignedLong:
-        case LookinAttrTypeUnsignedLongLong:
-        case LookinAttrTypeFloat:
-        case LookinAttrTypeDouble:
-        case LookinAttrTypeEnumInt:
-        case LookinAttrTypeEnumLong:
+        case LayerLens_AttrTypeChar:
+        case LayerLens_AttrTypeInt:
+        case LayerLens_AttrTypeShort:
+        case LayerLens_AttrTypeLong:
+        case LayerLens_AttrTypeLongLong:
+        case LayerLens_AttrTypeUnsignedChar:
+        case LayerLens_AttrTypeUnsignedInt:
+        case LayerLens_AttrTypeUnsignedShort:
+        case LayerLens_AttrTypeUnsignedLong:
+        case LayerLens_AttrTypeUnsignedLongLong:
+        case LayerLens_AttrTypeFloat:
+        case LayerLens_AttrTypeDouble:
+        case LayerLens_AttrTypeEnumInt:
+        case LayerLens_AttrTypeEnumLong:
             result = [value isKindOfClass:NSNumber.class] ? value : @([[value description] doubleValue]);
             break;
-        case LookinAttrTypeBOOL:
+        case LayerLens_AttrTypeBOOL:
             result = @([value boolValue]);
             break;
-        case LookinAttrTypeNSString:
+        case LayerLens_AttrTypeNSString:
             result = [value isKindOfClass:NSString.class] ? value : nil;
             break;
-        case LookinAttrTypeUIColor:
+        case LayerLens_AttrTypeUIColor:
             // nil 表示清除颜色
             result = numbers.count == 4 ? numbers : nil;
             break;
-        case LookinAttrTypeCGPoint:
+        case LayerLens_AttrTypeCGPoint:
             ok = numbers.count == 2;
             result = ok ? [NSValue valueWithCGPoint:CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue)] : nil;
             break;
-        case LookinAttrTypeCGVector:
+        case LayerLens_AttrTypeCGVector:
             ok = numbers.count == 2;
             result = ok ? [NSValue valueWithCGVector:CGVectorMake(numbers[0].doubleValue, numbers[1].doubleValue)] : nil;
             break;
-        case LookinAttrTypeCGSize:
+        case LayerLens_AttrTypeCGSize:
             ok = numbers.count == 2;
             result = ok ? [NSValue valueWithCGSize:CGSizeMake(numbers[0].doubleValue, numbers[1].doubleValue)] : nil;
             break;
-        case LookinAttrTypeCGRect:
+        case LayerLens_AttrTypeCGRect:
             ok = numbers.count == 4;
             result = ok ? [NSValue valueWithCGRect:CGRectMake(numbers[0].doubleValue, numbers[1].doubleValue, numbers[2].doubleValue, numbers[3].doubleValue)] : nil;
             break;
-        case LookinAttrTypeCGAffineTransform:
+        case LayerLens_AttrTypeCGAffineTransform:
             ok = numbers.count == 6;
             result = ok ? [NSValue valueWithCGAffineTransform:CGAffineTransformMake(numbers[0].doubleValue, numbers[1].doubleValue, numbers[2].doubleValue, numbers[3].doubleValue, numbers[4].doubleValue, numbers[5].doubleValue)] : nil;
             break;
-        case LookinAttrTypeUIEdgeInsets:
+        case LayerLens_AttrTypeUIEdgeInsets:
             ok = numbers.count == 4;
             result = ok ? [NSValue valueWithUIEdgeInsets:UIEdgeInsetsMake(numbers[0].doubleValue, numbers[1].doubleValue, numbers[2].doubleValue, numbers[3].doubleValue)] : nil;
             break;
-        case LookinAttrTypeUIOffset:
+        case LayerLens_AttrTypeUIOffset:
             ok = numbers.count == 2;
             result = ok ? [NSValue valueWithUIOffset:UIOffsetMake(numbers[0].doubleValue, numbers[1].doubleValue)] : nil;
             break;

@@ -1,0 +1,29 @@
+
+//
+//  LayerLens_HierarchyDisplayItemsMaker.h
+//  LayerLens_Server
+//
+//  Created by Li Kai on 2019/2/19.
+//  https://lookin.work
+//
+
+
+
+#import "LayerLens_Defines.h"
+
+@class LayerLens_DisplayItem;
+
+@interface LayerLens_HierarchyDisplayItemsMaker : NSObject
+
+/// @param hasScreenshots 是否包含 soloScreenshots 和 groupScreenshot 属性
+/// @param hasAttrList 是否包含 attributesGroupList 属性
+/// @param lowQuality screenshots 是否为低质量（当 hasScreenshots 为 NO 时，该属性无意义）
+/// @param readCustomInfo 是否读取 layerlens_customDebugInfos，比如低版本的 Lookin 发请求时，就无需读取（因为 Lookin 解析不了、还可能出 Bug）
+/// @param saveCustomSetter 是否要读取并保存用户给 attribute 配置的 custom setter
++ (NSArray<LayerLens_DisplayItem *> *)itemsWithScreenshots:(BOOL)hasScreenshots attrList:(BOOL)hasAttrList lowImageQuality:(BOOL)lowQuality readCustomInfo:(BOOL)readCustomInfo saveCustomSetter:(BOOL)saveCustomSetter;
+
+/// 把 layer 的 sublayers 转换为 displayItem 数组并返回
++ (NSArray<LayerLens_DisplayItem *> *)subitemsOfLayer:(CALayer *)layer;
+
+@end
+

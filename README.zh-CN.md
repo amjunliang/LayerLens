@@ -37,20 +37,6 @@ Mac App 的窗口就是这个网页, 也可以在浏览器中打开 `http://127.
 pod 'LayerLens', :git => 'https://github.com/amjunliang/LayerLens.git', :configurations => ['Debug']
 ```
 
-依赖的 LookinServer 声明了 iOS 9, 新版 Xcode 已不支持, 在 Podfile 末尾添加:
-
-```ruby
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    target.build_configurations.each do |config|
-      if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 12.0
-        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
-      end
-    end
-  end
-end
-```
-
 执行 `pod install` 后以 Debug 配置运行 App 即可, 无需编写代码. 启动后 Xcode 控制台输出:
 
 ```
@@ -59,7 +45,7 @@ end
 
 - 端口从 9527 开始, 被占用时依次尝试到 9536, 多个 App 可以同时运行.
 - 服务只监听本机回环地址; 非 `DEBUG` 编译时不会启动.
-- LookinServer 会作为依赖自动引入, 已经在用 Lookin 的话, Lookin 的 Mac 客户端照常可用.
+- 没有第三方依赖. 层级采集基于内置的 LookinServer 代码, 已改为 `LayerLens_` 前缀, 与项目中原有的 LookinServer 互不影响, Lookin 的 Mac 客户端照常可用.
 
 ## 2. 运行 Mac App
 
@@ -126,7 +112,8 @@ open build/Build/Products/Release/LayerLens.app
 ## 实现
 
 - `Pod/Classes/Server`: 基于 Network.framework 的 HTTP/1.1 服务, 另有一个事件流让网页感知 App 重启.
-- `Pod/Classes/Lookin`: 唯一调用 LookinServer 的地方, 由它采集层级、属性和截图. 用到了 LookinServer 的内部类, 因此限定了版本.
+- `Pod/Classes/Lookin`: 唯一调用内置 Lookin 代码的地方, 由它采集层级、属性和截图.
+- `Pod/Classes/Vendor/Lookin`: 内置的 [LookinServer](https://github.com/QMUI/LookinServer) (develop `ae39613`), 类名、分类方法和宏改为 `LayerLens_` 前缀, 去掉了与 Lookin 客户端通信的部分 (Peertalk、连接与请求处理、导出).
 - `Pod/Classes/Runtime`: 读取类信息的 Objective-C runtime 工具.
 - `Mac/LayerLens/HubServer.swift`: Mac 端服务 (端口 9523), 提供网页并把 `/t/<设备>/<App>/...` 转发给对应的 iOS App; 只监听 127.0.0.1, 并校验 Host 和 Origin.
 - `Mac/LayerLens/TargetRegistry.swift`, `Usbmux.swift`: 发现模拟器和 USB 真机上的 App.

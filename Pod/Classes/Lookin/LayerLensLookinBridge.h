@@ -10,7 +10,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 对 LookinServer 内部 API 的唯一封装, 所有方法必须在主线程调用
+/// 对内置 Lookin 代码(Vendor/Lookin)的唯一封装, 所有方法必须在主线程调用
 @interface LayerLensLookinBridge : NSObject
 
 + (NSDictionary *)appInfo;

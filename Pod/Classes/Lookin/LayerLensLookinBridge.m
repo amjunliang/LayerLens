@@ -9,17 +9,17 @@
 #import "LayerLensLookinBridge.h"
 #import "LayerLens.h"
 #import "LayerLensLookinSerializer.h"
-#import "LKS_HierarchyDisplayItemsMaker.h"
-#import "LKS_AttrGroupsMaker.h"
-#import "LKS_CustomAttrGroupsMaker.h"
-#import "LKS_EventHandlerMaker.h"
-#import "LKS_InbuiltAttrModificationHandler.h"
-#import "LookinDisplayItem.h"
-#import "LookinDisplayItemDetail.h"
-#import "LookinAttributeModification.h"
-#import "LookinDashboardBlueprint.h"
-#import "NSObject+LookinServer.h"
-#import "CALayer+LookinServer.h"
+#import "LayerLens_HierarchyDisplayItemsMaker.h"
+#import "LayerLens_AttrGroupsMaker.h"
+#import "LayerLens_CustomAttrGroupsMaker.h"
+#import "LayerLens_EventHandlerMaker.h"
+#import "LayerLens_InbuiltAttrModificationHandler.h"
+#import "LayerLens_DisplayItem.h"
+#import "LayerLens_DisplayItemDetail.h"
+#import "LayerLens_AttributeModification.h"
+#import "LayerLens_DashboardBlueprint.h"
+#import "NSObject+LayerLens_Server.h"
+#import "CALayer+LayerLens_Server.h"
 #import <sys/utsname.h>
 
 @implementation LayerLensLookinBridge
@@ -68,9 +68,9 @@
 }
 
 + (NSArray<NSDictionary *> *)hierarchy {
-    NSArray<LookinDisplayItem *> *items = [LKS_HierarchyDisplayItemsMaker itemsWithScreenshots:NO attrList:NO lowImageQuality:NO readCustomInfo:YES saveCustomSetter:YES];
+    NSArray<LayerLens_DisplayItem *> *items = [LayerLens_HierarchyDisplayItemsMaker itemsWithScreenshots:NO attrList:NO lowImageQuality:NO readCustomInfo:YES saveCustomSetter:YES];
     NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:items.count];
-    for (LookinDisplayItem *item in items) {
+    for (LayerLens_DisplayItem *item in items) {
         [result addObject:[LayerLensLookinSerializer nodeFromDisplayItem:item parentRect:CGRectZero]];
     }
     return result;
@@ -81,15 +81,15 @@
     if (!layer) {
         return nil;
     }
-    NSArray *groups = [LKS_AttrGroupsMaker attrGroupsForLayer:layer];
-    LKS_CustomAttrGroupsMaker *maker = [[LKS_CustomAttrGroupsMaker alloc] initWithLayer:layer];
+    NSArray *groups = [LayerLens_AttrGroupsMaker attrGroupsForLayer:layer];
+    LayerLens_CustomAttrGroupsMaker *maker = [[LayerLens_CustomAttrGroupsMaker alloc] initWithLayer:layer];
     [maker execute];
-    NSArray *events = layer.lks_hostView ? [LKS_EventHandlerMaker makeForView:layer.lks_hostView] : nil;
+    NSArray *events = layer.layerlens_hostView ? [LayerLens_EventHandlerMaker makeForView:layer.layerlens_hostView] : nil;
 
     return @{
         @"oid": @(oid),
-        @"rect": [LayerLensLookinSerializer JSONValueFromValue:[NSValue valueWithCGRect:[LayerLensLookinSerializer screenRectOfLayer:layer]] attrType:LookinAttrTypeCGRect],
-        @"frame": [LayerLensLookinSerializer JSONValueFromValue:[NSValue valueWithCGRect:layer.frame] attrType:LookinAttrTypeCGRect],
+        @"rect": [LayerLensLookinSerializer JSONValueFromValue:[NSValue valueWithCGRect:[LayerLensLookinSerializer screenRectOfLayer:layer]] attrType:LayerLens_AttrTypeCGRect],
+        @"frame": [LayerLensLookinSerializer JSONValueFromValue:[NSValue valueWithCGRect:layer.frame] attrType:LayerLens_AttrTypeCGRect],
         @"hidden": @(layer.isHidden),
         @"alpha": @(layer.opacity),
         @"groups": [LayerLensLookinSerializer attrGroupsFromGroups:groups custom:NO],
@@ -105,7 +105,7 @@
     }
     // 拉取层级后视图可能已移出 window(如列表页被回收), 此时 drawViewHierarchyInRect 会把视图挪到临时 window,
     // 遇到 VC 父子关系不一致时 UIKit 直接 abort, 已离开 window 的视图不再截图; UIWindow 自身的 window 为 nil, 需排除
-    UIView *hostView = layer.lks_hostView;
+    UIView *hostView = layer.layerlens_hostView;
     if (hostView && ![hostView isKindOfClass:UIWindow.class] && !hostView.window) {
         return nil;
     }
@@ -117,7 +117,7 @@
 /// 触发 willMoveToSuperview 等回调, 遇到 MJRefresh 这类在回调里移除 KVO 的视图会直接崩溃; 此时改用 renderInContext, 不移动视图
 + (UIImage *)groupScreenshotOfLayer:(CALayer *)layer {
     if ([self canDrawHierarchyOfLayer:layer]) {
-        return [layer lks_groupScreenshotWithLowQuality:NO];
+        return [layer layerlens_groupScreenshotWithLowQuality:NO];
     }
     CGSize size = layer.frame.size;
     if (size.width <= 0 || size.height <= 0 || size.width > 20000 || size.height > 20000) {
@@ -134,7 +134,7 @@
     if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
         return NO;
     }
-    UIView *view = layer.lks_hostView;
+    UIView *view = layer.layerlens_hostView;
     UIWindow *window = [view isKindOfClass:UIWindow.class] ? (UIWindow *)view : view.window;
     if (!window) {
         // 纯 CALayer 由 Lookin 走 renderInContext, 不受影响
@@ -152,8 +152,8 @@
         completion(nil, @"Object not found, please refresh");
         return;
     }
-    SEL setter = [LookinDashboardBlueprint setterWithAttrID:attrId];
-    SEL getter = [LookinDashboardBlueprint getterWithAttrID:attrId];
+    SEL setter = [LayerLens_DashboardBlueprint setterWithAttrID:attrId];
+    SEL getter = [LayerLens_DashboardBlueprint getterWithAttrID:attrId];
     if (!setter) {
         completion(nil, @"Attribute is read-only");
         return;
@@ -166,34 +166,34 @@
         return;
     }
 
-    NSObject *target = [LookinDashboardBlueprint isUIViewPropertyWithAttrID:attrId] ? layer.lks_hostView : layer;
+    NSObject *target = [LayerLens_DashboardBlueprint isUIViewPropertyWithAttrID:attrId] ? layer.layerlens_hostView : layer;
     if (!target) {
         completion(nil, @"Target not found");
         return;
     }
 
-    LookinAttributeModification *modification = [[LookinAttributeModification alloc] init];
-    modification.targetOid = [target lks_registerOid];
+    LayerLens_AttributeModification *modification = [[LayerLens_AttributeModification alloc] init];
+    modification.targetOid = [target layerlens_registerOid];
     modification.setterSelector = setter;
     modification.getterSelector = getter;
     modification.attrType = attrType;
     modification.value = modificationValue;
 
-    [LKS_InbuiltAttrModificationHandler handleModification:modification completion:^(LookinDisplayItemDetail *data, NSError *error) {
+    [LayerLens_InbuiltAttrModificationHandler handleModification:modification completion:^(LayerLens_DisplayItemDetail *data, NSError *error) {
         NSString *message = error ? (error.localizedRecoverySuggestion ?: error.localizedDescription) : nil;
         completion([self detailWithOid:oid], message);
     }];
 }
 
 + (NSObject *)objectWithOid:(unsigned long)oid {
-    return [NSObject lks_objectWithOid:oid];
+    return [NSObject layerlens_objectWithOid:oid];
 }
 
 + (unsigned long)nodeOidForObject:(NSObject *)object {
     if ([object isKindOfClass:UIView.class]) {
-        return [((UIView *)object).layer lks_registerOid];
+        return [((UIView *)object).layer layerlens_registerOid];
     }
-    return [object lks_registerOid];
+    return [object layerlens_registerOid];
 }
 
 #pragma mark - Private
@@ -202,7 +202,7 @@
 + (UIImage *)soloScreenshotOfLayer:(CALayer *)layer hideLayers:(BOOL)hideLayers {
     NSMutableArray<CALayer *> *hiddenSublayers = [NSMutableArray array];
     for (CALayer *sublayer in [layer.sublayers copy]) {
-        if (!sublayer.hidden && (hideLayers || sublayer.lks_hostView)) {
+        if (!sublayer.hidden && (hideLayers || sublayer.layerlens_hostView)) {
             sublayer.hidden = YES;
             [hiddenSublayers addObject:sublayer];
         }
@@ -215,7 +215,7 @@
 }
 
 + (CALayer *)layerWithOid:(unsigned long)oid {
-    NSObject *object = [NSObject lks_objectWithOid:oid];
+    NSObject *object = [NSObject layerlens_objectWithOid:oid];
     if ([object isKindOfClass:UIView.class]) {
         return ((UIView *)object).layer;
     }

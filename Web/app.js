@@ -3713,16 +3713,6 @@ function applyTheme(theme, save) {
 
 const REPO_URL = 'https://github.com/amjunliang/LayerLens';
 const POD_LINE = `pod 'LayerLens', :git => '${REPO_URL}.git', :configurations => ['Debug']`;
-const POST_INSTALL = `post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    target.build_configurations.each do |config|
-      if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 12.0
-        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
-      end
-    end
-  end
-end`;
-
 // 常显滚动条会占用底部高度, 在顶部补同样的高度, 让单行代码和复制按钮对齐
 function balanceScrollbar(node) {
   new ResizeObserver(() => {
@@ -3760,13 +3750,10 @@ function integrationPanel() {
   return [
     el('h5', null, t('1. 在 Podfile 中添加, 只在 Debug 集成')),
     codeBlock(POD_LINE),
-    el('h5', null, t('2. 设置最低系统版本')),
-    paragraph(t('依赖的 LookinServer 声明了 iOS 9, 新版 Xcode 已不支持, 在 Podfile 末尾添加:')),
-    codeBlock(POST_INSTALL),
-    el('h5', null, t('3. 安装并运行')),
+    el('h5', null, t('2. 安装并运行')),
     codeBlock('pod install'),
     paragraph(t('以 Debug 配置运行 App 即可, 无需编写代码; Release 包不包含 LayerLens.')),
-    el('h5', null, t('4. 确认连接')),
+    el('h5', null, t('3. 确认连接')),
     paragraph(t('Xcode 控制台输出 [LayerLens] Running on port …, 左上角的设备列表中出现该 App.')),
     el('h5', null, t('真机调试')),
     paragraph(t('通过 USB 连接即可使用, 无需额外配置; 暂不支持 Wi-Fi 连接.')),

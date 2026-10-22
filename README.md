@@ -37,20 +37,6 @@ Add it to the `Debug` configuration only, so it never ships in a release build:
 pod 'LayerLens', :git => 'https://github.com/amjunliang/LayerLens.git', :configurations => ['Debug']
 ```
 
-LookinServer, a dependency, declares iOS 9, which recent Xcode versions no longer support. Add this to the end of your Podfile:
-
-```ruby
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    target.build_configurations.each do |config|
-      if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 12.0
-        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
-      end
-    end
-  end
-end
-```
-
 Run `pod install`, then run the app in the Debug configuration. No code is needed. The Xcode console prints:
 
 ```
@@ -59,7 +45,7 @@ Run `pod install`, then run the app in the Debug configuration. No code is neede
 
 - Ports start at 9527 and go up to 9536 when taken, so several apps can run at once.
 - The server listens on the loopback address only, and does not start in non-`DEBUG` builds.
-- LookinServer comes in as a dependency. If you already use Lookin, its Mac client keeps working.
+- No third-party dependencies. Hierarchy collection is based on bundled LookinServer code renamed with a `LayerLens_` prefix, so it does not conflict with a LookinServer already in your project, and the Lookin Mac client keeps working.
 
 ## 2. Run the Mac app
 
@@ -126,7 +112,8 @@ Press `?` for the full list. The common ones:
 ## Implementation
 
 - `Pod/Classes/Server`: HTTP/1.1 server on Network.framework, plus an event stream that lets the page notice app restarts.
-- `Pod/Classes/Lookin`: the only code that calls LookinServer, which collects the hierarchy, attributes and screenshots. It uses LookinServer internals, so the version is pinned.
+- `Pod/Classes/Lookin`: the only code that calls the bundled Lookin code, which collects the hierarchy, attributes and screenshots.
+- `Pod/Classes/Vendor/Lookin`: bundled [LookinServer](https://github.com/QMUI/LookinServer) (develop `ae39613`), with classes, category methods and macros renamed to a `LayerLens_` prefix and the Lookin client transport (Peertalk, connection and request handling, export) removed.
 - `Pod/Classes/Runtime`: Objective-C runtime helpers for class info.
 - `Mac/LayerLens/HubServer.swift`: the Mac server (port 9523). Serves the web UI and forwards `/t/<device>/<app>/...` to the matching iOS app. Listens on 127.0.0.1 only and checks Host and Origin.
 - `Mac/LayerLens/TargetRegistry.swift`, `Usbmux.swift`: discover apps on simulators and USB devices.
