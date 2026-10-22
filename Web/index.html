@@ -43,6 +43,12 @@
     <symbol id="i-picker" viewBox="0 0 24 24"><path d="M2 22l1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="M15 6l3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4z"/></symbol>
     <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 7a8 8 0 1 0 11.4 0"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></symbol>
+    <symbol id="i-wrap" viewBox="0 0 24 24"><path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4"/><path d="M15 16l-2 2 2 2M4 18h5"/></symbol>
+    <symbol id="i-to-top" viewBox="0 0 24 24"><path d="M5 4h14M12 20V8M7 13l5-5 5 5"/></symbol>
+    <symbol id="i-to-bottom" viewBox="0 0 24 24"><path d="M5 20h14M12 4v12M7 11l5 5 5-5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
   </defs>
 </svg>
 
@@ -98,6 +104,7 @@
     <div class="popover-anchor help-anchor">
       <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
     </div>
+    <button class="icon-btn toggle" id="logToggle" title="日志面板 (L)" aria-label="日志面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
     <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
 </header>
@@ -183,6 +190,49 @@
         <div class="live-waiting" id="liveWaiting">正在等待连接…</div>
       </div>
     </div>
+  </section>
+
+  <div class="splitter horizontal" data-split="s4"></div>
+
+  <section class="pane log-pane" id="logPane">
+    <div class="log-head">
+      <label class="search-box log-search" id="logSearch">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input id="logFilter" type="search" placeholder="过滤, 多个关键词用 | 分隔, 以 \ 开头为正则" spellcheck="false" autocomplete="off">
+      </label>
+      <span class="log-count" id="logCount"></span>
+      <div class="log-source" id="logSource" hidden>
+        <span class="log-source-name" id="logSourceName"></span>
+        <button class="log-source-back" id="logBackLive">返回实时日志</button>
+      </div>
+      <button class="icon-btn toggle" id="logWrap" title="换行" aria-label="换行" aria-pressed="false"><svg class="icon"><use href="#i-wrap"/></svg></button>
+      <button class="icon-btn" id="logTop" title="跳到顶部" aria-label="跳到顶部"><svg class="icon"><use href="#i-to-top"/></svg></button>
+      <button class="icon-btn" id="logBottom" title="跳到底部, 跟随最新" aria-label="跳到底部"><svg class="icon"><use href="#i-to-bottom"/></svg></button>
+      <button class="icon-btn" id="logClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <div class="popover-anchor">
+        <button class="icon-btn" id="logMore" title="更多" aria-label="更多"><svg class="icon"><use href="#i-more"/></svg></button>
+        <div class="popover menu log-menu" id="logMenu" hidden>
+          <button class="menu-row menu-action" id="logCopy">复制选中行</button>
+          <button class="menu-row menu-action" id="logExportAll">导出全部</button>
+          <button class="menu-row menu-action" id="logExportView">导出过滤结果</button>
+          <div class="menu-sep"></div>
+          <button class="menu-row menu-action" id="logDeviceFiles">设备日志文件…</button>
+          <button class="menu-row menu-action" id="logOpenFile">打开本地文件…</button>
+          <button class="menu-row menu-action" id="logReveal">在访达中显示</button>
+        </div>
+      </div>
+      <button class="icon-btn" id="logClose" title="关闭 (L)" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+      <input type="file" id="logFileInput" accept=".log,.txt,text/plain" hidden>
+    </div>
+    <div class="log-body">
+      <div class="log-list" id="logList" tabindex="0">
+        <div class="log-spacer" id="logSpacer"></div>
+        <div class="log-rows" id="logRows"></div>
+      </div>
+      <div class="log-empty" id="logEmpty" hidden></div>
+      <button class="log-new" id="logNew" hidden>新日志 ↓</button>
+    </div>
+    <div class="log-detail" id="logDetail" hidden></div>
   </section>
 
   <div class="splitter vertical" data-split="s2"></div>

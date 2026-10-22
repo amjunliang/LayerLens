@@ -1,6 +1,6 @@
 Pod::Spec.new do |spec|
   spec.name         = "LayerLens"
-  spec.version      = "0.2.0"
+  spec.version      = "0.4.0"
   spec.summary      = "Inspect, edit and explore your iOS view hierarchy from the LayerLens Mac app or your browser."
   spec.description  = <<-DESC
   LayerLens runs a tiny HTTP server inside your debug build. The LayerLens Mac app discovers simulators and

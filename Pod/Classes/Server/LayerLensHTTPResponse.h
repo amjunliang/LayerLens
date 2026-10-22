@@ -18,6 +18,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *headers;
 /// 发送后保持连接不关闭, 用于事件流
 @property (nonatomic, assign) BOOL keepOpen;
+/// 保持打开的连接所属的推送频道, 为空时为默认的 events
+@property (nonatomic, copy, nullable) NSString *channel;
 
 + (instancetype)responseWithStatus:(NSInteger)status contentType:(NSString *)contentType body:(nullable NSData *)body;
 /// JSON 序列化失败时返回 500

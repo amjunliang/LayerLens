@@ -2934,6 +2934,7 @@ function syncPanels() {
     $(name + 'Toggle').classList.toggle('on', on);
     $(name + 'Toggle').setAttribute('aria-pressed', String(on));
   });
+  syncLogPanel();
 }
 
 function togglePanel(name) {
@@ -3007,6 +3008,9 @@ function setupLayout() {
         if (name === 's1') {
           prop = '--tree-w';
           value = clamp(ev.clientX - box.left, 180, box.width * 0.6) + 'px';
+        } else if (name === 's4') {
+          prop = '--log-h';
+          value = clamp(box.bottom - ev.clientY, 100, box.height - 160) + 'px';
         } else {
           prop = '--detail-w';
           value = clamp(box.right - ev.clientX, 260, box.width * 0.6) + 'px';
@@ -3032,7 +3036,7 @@ function setupLayout() {
     });
     // 双击恢复默认尺寸
     splitter.addEventListener('dblclick', () => {
-      ['--tree-w', '--detail-w', '--side-w', '--tree-h'].forEach((p) => layout.style.removeProperty(p));
+      ['--tree-w', '--detail-w', '--side-w', '--tree-h', '--log-h'].forEach((p) => layout.style.removeProperty(p));
       saved = {};
       try {
         localStorage.removeItem(LAYOUT_KEY);
@@ -3566,6 +3570,9 @@ function handleViewKey(key) {
     case 'd':
       togglePanel('detail');
       return true;
+    case 'l':
+      toggleLogPanel();
+      return true;
     case '[':
     case ']':
       if (!three) return false;
@@ -3767,6 +3774,7 @@ const SHORTCUT_GROUPS = [
     [['右键'], '复制菜单'],
     [['T'], '显示 / 隐藏层级面板'],
     [['D'], '显示 / 隐藏详情面板'],
+    [['L'], '显示 / 隐藏日志面板'],
     [['?'], '显示此面板'],
   ]],
   ['层级树', false, [
@@ -3816,7 +3824,7 @@ function shortcutsPanel() {
 }
 
 function openPanel(name) {
-  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel] };
+  const panels = { about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel] };
   const panel = panels[name];
   if (!panel) return;
   state.panel = name;
@@ -3844,6 +3852,739 @@ function setupPanels() {
     if (value) copyText(value, '复制');
   });
   $('modalClose').addEventListener('click', closePanel);
+}
+
+// MARK: - Logs
+// 日志面板: 只在打开时连接 Hub 的日志流, 关闭即断开并释放; 列表只渲染可见区域
+
+const LOG_ROW_H = 20;
+const LOG_MAX_LINES = 100000;
+const LOG_OVERSCAN = 10;
+// 单条日志渲染的字符上限, 完整内容在详情区和复制中
+const LOG_ROW_CHARS = 2000;
+const LOG_WRAP_CHARS = 20000;
+const LOG_FILE_CHUNK = 1024 * 1024;
+const LOG_OPEN_KEY = 'layerlens_log_open';
+const LOG_WRAP_KEY = 'layerlens_log_wrap';
+const LOG_LINE_RE = /^\[(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{3})\] ?/;
+
+// lines: 全部日志, 按 id 递增; view: 过滤后的日志, 无过滤时与 lines 为同一数组
+// anchor / focus: 选中范围两端的 id; heights / offsets: 换行模式下每行的高度与累计偏移
+const logs = {
+  open: false,
+  active: false,
+  es: null,
+  key: '',
+  timer: null,
+  source: 'live',
+  file: null,
+  unsupported: false,
+  loading: false,
+  nextId: 1,
+  lines: [],
+  view: [],
+  filter: { raw: '', terms: [], regex: null },
+  follow: true,
+  unseen: false,
+  wrap: false,
+  anchor: 0,
+  focus: 0,
+  heights: [],
+  offsets: [0],
+  charW: 7.2,
+  raf: 0,
+};
+
+function logVisible() {
+  return isNarrow() ? document.body.dataset.view === 'log' : logs.open;
+}
+
+function syncLogPanel() {
+  const visible = logVisible();
+  document.body.classList.toggle('log-open', !isNarrow() && logs.open);
+  $('logToggle').classList.toggle('on', visible);
+  $('logToggle').setAttribute('aria-pressed', String(visible));
+  if (visible && !logs.active) {
+    logs.active = true;
+    if (logs.source === 'live') logConnect();
+    logs.timer = setInterval(() => {
+      if (logs.source === 'live' && logTargetKey() !== logs.key) logConnect();
+    }, 1000);
+    scheduleLogRender();
+  } else if (!visible && logs.active) {
+    logs.active = false;
+    clearInterval(logs.timer);
+    logDisconnect();
+    // 关闭后释放内存, 下次打开由 Hub 重新补齐
+    logs.source = 'live';
+    logs.file = null;
+    resetLogLines();
+  }
+}
+
+function toggleLogPanel() {
+  if (isNarrow()) {
+    toggleView('log');
+    return;
+  }
+  logs.open = !logs.open;
+  try {
+    localStorage.setItem(LOG_OPEN_KEY, logs.open ? '1' : '0');
+  } catch (e) {
+    // 无痕模式等场景下不可用, 忽略
+  }
+  syncPanels();
+}
+
+function logTargetKey() {
+  return targets.deviceId && targets.bundleId ? targets.deviceId + '|' + targets.bundleId : '';
+}
+
+function logConnect() {
+  logDisconnect();
+  logs.key = logTargetKey();
+  logs.unsupported = false;
+  resetLogLines();
+  if (!logs.key) return;
+  logs.loading = true;
+  const query = `device=${encodeURIComponent(targets.deviceId)}&app=${encodeURIComponent(targets.bundleId)}`;
+  const es = new EventSource(`/api/hub/app-logs/stream?${query}`);
+  const parse = (e) => {
+    try {
+      return JSON.parse(e.data) || {};
+    } catch (err) {
+      return {};
+    }
+  };
+  // 连接或重连时 Hub 先发 reset 再补发内存中的日志
+  es.addEventListener('reset', (e) => {
+    logs.unsupported = !!parse(e).unsupported;
+    logs.loading = false;
+    resetLogLines();
+  });
+  es.addEventListener('status', (e) => {
+    logs.unsupported = !!parse(e).unsupported;
+    scheduleLogRender();
+  });
+  es.addEventListener('logs', (e) => {
+    const entries = parse(e).entries || [];
+    appendLogLines(entries.map((entry) => ({ id: logs.nextId++, t: entry.t, m: entry.k ? '' : String(entry.m ?? ''), k: entry.k })));
+  });
+  logs.es = es;
+}
+
+function logDisconnect() {
+  logs.es?.close();
+  logs.es = null;
+  logs.key = '';
+  logs.loading = false;
+}
+
+function resetLogLines() {
+  logs.lines = [];
+  logs.view = logs.lines;
+  logs.anchor = logs.focus = 0;
+  logs.follow = logs.source === 'live';
+  logs.unseen = false;
+  rebuildLogHeights();
+  $('logList').scrollTop = 0;
+  scheduleLogRender();
+}
+
+function appendLogLines(lines) {
+  if (!lines.length) return;
+  logs.lines.push(...lines);
+  if (logs.view !== logs.lines) {
+    lines.forEach((line) => {
+      if (logMatches(line)) logs.view.push(line);
+    });
+  }
+  if (logs.wrap) {
+    for (let i = logs.heights.length; i < logs.view.length; i++) pushLogHeight(logs.view[i]);
+  }
+  if (logs.lines.length > LOG_MAX_LINES) trimLogLines();
+  if (!logs.follow) logs.unseen = true;
+  scheduleLogRender();
+}
+
+// 超出上限时一次删掉最早的 10%, 避免每条都整体移动数组
+function trimLogLines() {
+  const remove = logs.lines.length - Math.floor(LOG_MAX_LINES * 0.9);
+  const firstId = logs.lines[remove].id;
+  logs.lines.splice(0, remove);
+  const removed = logs.view === logs.lines ? remove : logIndexOf(logs.view, firstId);
+  if (logs.view !== logs.lines) logs.view.splice(0, removed);
+  const removedH = logs.wrap ? logs.offsets[removed] : removed * LOG_ROW_H;
+  if (logs.wrap) {
+    logs.heights.splice(0, removed);
+    rebuildLogOffsets();
+  }
+  if (!logs.follow) $('logList').scrollTop -= removedH;
+}
+
+// 有序数组中第一个 id >= 给定值的下标
+function logIndexOf(list, id) {
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid].id < id) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function logLineById(id) {
+  const line = logs.lines[logIndexOf(logs.lines, id)];
+  return line?.id === id ? line : null;
+}
+
+// MARK: Filter
+
+// 多个关键词用 | 分隔, 匹配任意一个即显示; 以 \ 开头时整体按正则匹配
+function parseLogFilter(raw) {
+  const filter = { raw, terms: [], regex: null, invalid: false };
+  if (raw.startsWith('\\')) {
+    try {
+      if (raw.length > 1) filter.regex = new RegExp(raw.slice(1), 'gi');
+    } catch (e) {
+      filter.invalid = true;
+    }
+    return filter;
+  }
+  filter.terms = [...new Set(raw.split('|').map((s) => s.trim().toLowerCase()).filter(Boolean))];
+  return filter;
+}
+
+function logMatches(line) {
+  const { terms, regex } = logs.filter;
+  // 重启标记始终显示, 便于看出日志属于哪次运行
+  if (line.k) return true;
+  if (regex) {
+    regex.lastIndex = 0;
+    return regex.test(line.m);
+  }
+  if (!terms.length) return true;
+  const text = line.m.toLowerCase();
+  return terms.some((term) => text.includes(term));
+}
+
+function applyLogFilter(raw) {
+  logs.filter = parseLogFilter(raw);
+  $('logSearch').classList.toggle('invalid', logs.filter.invalid);
+  const active = logs.filter.regex || logs.filter.terms.length;
+  logs.view = active ? logs.lines.filter(logMatches) : logs.lines;
+  rebuildLogHeights();
+  // 切换过滤后保持选中行可见, 便于在上下文中查看
+  if (logs.focus && !logs.follow) scrollLogTo(logs.focus, true);
+  else if (logs.follow) logs.pendingBottom = true;
+  scheduleLogRender();
+}
+
+function logHighlight(text) {
+  const { terms, regex } = logs.filter;
+  const ranges = [];
+  if (regex) {
+    regex.lastIndex = 0;
+    for (let match = regex.exec(text); match && ranges.length < 500; match = regex.exec(text)) {
+      if (!match[0].length) {
+        regex.lastIndex++;
+        continue;
+      }
+      ranges.push([match.index, match.index + match[0].length, 0]);
+    }
+  } else if (terms.length) {
+    const lower = text.toLowerCase();
+    terms.forEach((term, i) => {
+      for (let at = lower.indexOf(term); at >= 0 && ranges.length < 500; at = lower.indexOf(term, at + term.length)) {
+        ranges.push([at, at + term.length, i % 5]);
+      }
+    });
+    ranges.sort((a, b) => a[0] - b[0]);
+  }
+  let html = '';
+  let pos = 0;
+  ranges.forEach(([start, end, color]) => {
+    if (start < pos) return;
+    html += escapeLog(text.slice(pos, start)) + `<mark class="hl${color + 1}">${escapeLog(text.slice(start, end))}</mark>`;
+    pos = end;
+  });
+  return html + escapeLog(text.slice(pos));
+}
+
+function escapeLog(text) {
+  return text.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'));
+}
+
+// MARK: Render
+
+const logPad = (v, n = 2) => String(v).padStart(n, '0');
+
+function logTime(t) {
+  if (!t) return '';
+  const d = new Date(t);
+  return `${logPad(d.getHours())}:${logPad(d.getMinutes())}:${logPad(d.getSeconds())}.${logPad(d.getMilliseconds(), 3)}`;
+}
+
+function logFullTime(t) {
+  if (!t) return '';
+  const d = new Date(t);
+  return `${d.getFullYear()}-${logPad(d.getMonth() + 1)}-${logPad(d.getDate())} ${logTime(t)}`;
+}
+
+function logLineText(line) {
+  return line.t ? `[${logFullTime(line.t)}] ${line.m}` : line.m;
+}
+
+// 按等宽字符估算换行后的行数, 中日韩字符按两个字符宽; 渲染后再按实际高度校正
+function pushLogHeight(line) {
+  const cols = logs.cols || 80;
+  let rows = 0;
+  const text = line.k ? '' : line.m.slice(0, LOG_WRAP_CHARS);
+  text.split('\n').forEach((part) => {
+    const wide = part.length > 2000 ? 0 : (part.match(/[^\x00-\xff]/g) || []).length;
+    rows += Math.max(1, Math.ceil((part.length + wide) / cols));
+  });
+  const h = rows * LOG_ROW_H;
+  logs.heights.push(h);
+  logs.offsets.push(logs.offsets[logs.offsets.length - 1] + h);
+}
+
+function rebuildLogHeights() {
+  logs.heights = [];
+  logs.offsets = [0];
+  if (!logs.wrap) return;
+  const list = $('logList');
+  logs.cols = Math.max(10, Math.floor((list.clientWidth - 16 - 10) / logs.charW) - 12);
+  logs.view.forEach(pushLogHeight);
+}
+
+function rebuildLogOffsets(from = 0) {
+  logs.offsets.length = from + 1;
+  for (let i = from; i < logs.heights.length; i++) logs.offsets.push(logs.offsets[i] + logs.heights[i]);
+}
+
+function logOffset(index) {
+  return logs.wrap ? logs.offsets[Math.min(index, logs.offsets.length - 1)] : index * LOG_ROW_H;
+}
+
+function logIndexAt(y) {
+  if (!logs.wrap) return Math.floor(y / LOG_ROW_H);
+  let lo = 0;
+  let hi = logs.heights.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (logs.offsets[mid + 1] <= y) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function scheduleLogRender() {
+  if (!logs.raf) logs.raf = requestAnimationFrame(renderLogs);
+}
+
+function renderLogs() {
+  logs.raf = 0;
+  if (!logs.active) return;
+  const list = $('logList');
+  const view = logs.view;
+  $('logSpacer').style.height = logOffset(view.length) + 'px';
+  if (logs.follow || logs.pendingBottom) {
+    list.scrollTop = list.scrollHeight;
+    logs.pendingBottom = false;
+  }
+  const top = list.scrollTop;
+  const start = Math.max(0, logIndexAt(top) - LOG_OVERSCAN);
+  const end = Math.min(view.length, logIndexAt(top + list.clientHeight) + LOG_OVERSCAN + 1);
+  const [selA, selB] = [Math.min(logs.anchor, logs.focus), Math.max(logs.anchor, logs.focus)];
+  let html = '';
+  for (let i = start; i < end; i++) {
+    const line = view[i];
+    const cls = 'log-row' + (line.k ? ' mark' : '') + (logs.focus && line.id >= selA && line.id <= selB ? ' sel' : '');
+    let msg;
+    if (line.k) {
+      msg = escapeLog('—— ' + t('App 已重新启动') + ' ——');
+    } else if (logs.wrap) {
+      msg = logHighlight(line.m.length > LOG_WRAP_CHARS ? line.m.slice(0, LOG_WRAP_CHARS) + '…' : line.m);
+    } else {
+      // 单行模式下换行符显示为 ⏎, 行高保持固定
+      msg = logHighlight((line.m.length > LOG_ROW_CHARS ? line.m.slice(0, LOG_ROW_CHARS) + '…' : line.m).replace(/\r?\n/g, '⏎'));
+    }
+    html += `<div class="${cls}" data-i="${i}"><span class="log-time">${logTime(line.t)}</span><span class="log-msg">${msg}</span></div>`;
+  }
+  const rows = $('logRows');
+  rows.innerHTML = html;
+  rows.style.transform = `translateY(${logOffset(start)}px)`;
+  if (logs.wrap) measureLogRows(rows, start, top);
+  renderLogStatus();
+}
+
+// 换行模式: 用实际高度校正估算值; 视口上方的行变化时同步调整滚动位置, 内容不跳动
+function measureLogRows(rows, start, top) {
+  let from = -1;
+  let above = 0;
+  [...rows.children].forEach((row, n) => {
+    const i = start + n;
+    const h = row.offsetHeight;
+    if (h && h !== logs.heights[i]) {
+      if (logs.offsets[i + 1] <= top) above += h - logs.heights[i];
+      logs.heights[i] = h;
+      if (from < 0) from = i;
+    }
+  });
+  if (from < 0) return;
+  rebuildLogOffsets(from);
+  $('logSpacer').style.height = logOffset(logs.view.length) + 'px';
+  rows.style.transform = `translateY(${logOffset(start)}px)`;
+  const list = $('logList');
+  if (logs.follow) list.scrollTop = list.scrollHeight;
+  else if (above) list.scrollTop += above;
+}
+
+function renderLogStatus() {
+  const total = logs.lines.length;
+  const count = $('logCount');
+  if (logs.view !== logs.lines) {
+    count.replaceChildren(el('span', 'hit', String(logs.view.length)), document.createTextNode(' / ' + total));
+  } else {
+    count.textContent = total ? String(total) : '';
+  }
+  const file = logs.file;
+  $('logSource').hidden = logs.source === 'live';
+  if (file) $('logSourceName').textContent = file.name + (file.done ? '' : ` · ${Math.round((file.offset / (file.total || 1)) * 100)}%`);
+  $('logNew').hidden = logs.follow || !logs.unseen;
+  let empty = '';
+  if (logs.source === 'live' && !logs.key) empty = t('未连接 App');
+  else if (logs.source === 'live' && logs.unsupported) empty = t('App 集成的 LayerLens 版本过低, 升级到 0.4.0 后可查看日志');
+  else if (!total) empty = logs.loading || file?.loading ? t('正在加载…') : logs.source === 'live' ? t('暂无日志, App 调用 [LayerLens log:] 后显示在这里') : t('文件中没有日志');
+  else if (!logs.view.length) empty = t('没有匹配的日志');
+  $('logEmpty').textContent = empty;
+  $('logEmpty').hidden = !empty;
+  const focus = logs.focus && !logs.wrap ? logLineById(logs.focus) : null;
+  const detail = $('logDetail');
+  detail.hidden = !focus || !!focus.k;
+  if (focus && !focus.k && detail.dataset.id !== String(focus.id)) {
+    detail.dataset.id = focus.id;
+    detail.replaceChildren(el('span', 'log-time', logFullTime(focus.t)), document.createTextNode(focus.m));
+    detail.scrollTop = 0;
+  }
+}
+
+function scrollLogTo(id, center) {
+  const index = logIndexOf(logs.view, id);
+  if (index >= logs.view.length) return;
+  const list = $('logList');
+  const top = logOffset(index);
+  const bottom = logOffset(index + 1);
+  if (center) list.scrollTop = top - (list.clientHeight - (bottom - top)) / 2;
+  else if (top < list.scrollTop) list.scrollTop = top;
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+}
+
+function scrollLogEdge(bottom) {
+  const list = $('logList');
+  logs.follow = bottom && logs.source === 'live';
+  logs.unseen = false;
+  list.scrollTop = bottom ? list.scrollHeight : 0;
+  if (bottom) loadLogChunk();
+  scheduleLogRender();
+}
+
+function setLogWrap(wrap) {
+  const list = $('logList');
+  const first = logs.view[logIndexAt(list.scrollTop)]?.id;
+  logs.wrap = wrap;
+  $('logPane').classList.toggle('wrap', wrap);
+  $('logWrap').classList.toggle('on', wrap);
+  $('logWrap').setAttribute('aria-pressed', String(wrap));
+  measureLogChar();
+  rebuildLogHeights();
+  $('logSpacer').style.height = logOffset(logs.view.length) + 'px';
+  if (!logs.follow && first) list.scrollTop = logOffset(logIndexOf(logs.view, first));
+  scheduleLogRender();
+}
+
+function measureLogChar() {
+  const probe = el('span', null, 'M'.repeat(100));
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+  $('logList').appendChild(probe);
+  logs.charW = probe.getBoundingClientRect().width / 100 || 7.2;
+  probe.remove();
+}
+
+// MARK: Selection
+
+function selectedLogLines() {
+  if (!logs.focus) return [];
+  const [a, b] = [Math.min(logs.anchor, logs.focus), Math.max(logs.anchor, logs.focus)];
+  return logs.view.slice(logIndexOf(logs.view, a), logIndexOf(logs.view, b + 1)).filter((line) => !line.k);
+}
+
+function copyLogSelection() {
+  const lines = selectedLogLines();
+  if (!lines.length) {
+    toast(t('没有选中的日志'));
+    return;
+  }
+  copyText(lines.map(logLineText).join('\n'), '复制');
+}
+
+function selectLog(id, extend) {
+  logs.focus = id;
+  if (!extend || !logs.anchor) logs.anchor = id;
+  scheduleLogRender();
+}
+
+function moveLogSelection(step, extend) {
+  const view = logs.view;
+  if (!view.length) return;
+  let index = logs.focus ? logIndexOf(view, logs.focus) + step : step > 0 ? 0 : view.length - 1;
+  index = Math.max(0, Math.min(view.length - 1, index));
+  logs.follow = false;
+  selectLog(view[index].id, extend);
+  scrollLogTo(view[index].id, false);
+}
+
+// MARK: Files
+
+function logSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+// 设备上的日志文件: 先列出文件, 点击后分段加载
+function deviceLogsPanel() {
+  const list = el('div', 'log-files');
+  list.appendChild(el('p', 'log-files-empty', t('正在加载…')));
+  fetch(`${targetBase()}/api/logs/files`).then(async (res) => {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(res.status === 404 ? t('App 集成的 LayerLens 版本过低, 升级到 0.4.0 后可查看日志') : data.error || `HTTP ${res.status}`);
+    const files = data.files || [];
+    if (!files.length) {
+      list.replaceChildren(el('p', 'log-files-empty', t('设备上还没有日志文件')));
+      return;
+    }
+    list.replaceChildren(...files.map((file) => {
+      const row = el('button', 'log-file');
+      row.append(el('span', 'log-file-name', file.name), el('span', 'log-file-meta', `${logSize(file.size)} · ${logFullTime(file.modified).slice(0, 16)}`));
+      row.addEventListener('click', () => {
+        closePanel();
+        openLogFile(file.name, file.size, (offset, length) => fetch(`${targetBase()}/api/logs/file?name=${encodeURIComponent(file.name)}&offset=${offset}&length=${length}`).then(async (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return { data: await r.arrayBuffer(), total: Number(r.headers.get('X-Total-Size')) || 0 };
+        }));
+      });
+      return row;
+    }));
+  }).catch((e) => list.replaceChildren(el('p', 'log-files-empty', t('无法读取设备日志: {0}', e.message))));
+  return [list];
+}
+
+function openLocalLog(file) {
+  if (!file) return;
+  openLogFile(file.name, file.size, (offset, length) => file.slice(offset, offset + length).arrayBuffer().then((data) => ({ data, total: file.size })));
+}
+
+// read(offset, length) 返回 { data, total }; 滚动接近底部时加载下一段
+function openLogFile(name, total, read) {
+  if (isNarrow()) setView('log');
+  else if (!logs.open) toggleLogPanel();
+  logDisconnect();
+  logs.source = 'file';
+  logs.file = { name, total, read, offset: 0, decoder: new TextDecoder(), rest: '', loading: false, done: false, plain: null };
+  resetLogLines();
+  loadLogChunk();
+}
+
+async function loadLogChunk() {
+  const file = logs.file;
+  if (!file || file.loading || file.done) return;
+  file.loading = true;
+  scheduleLogRender();
+  try {
+    const { data, total } = await file.read(file.offset, LOG_FILE_CHUNK);
+    if (logs.file !== file) return;
+    file.total = total || file.total;
+    file.offset += data.byteLength;
+    file.done = !data.byteLength || file.offset >= file.total;
+    const parts = (file.rest + file.decoder.decode(data, { stream: !file.done })).split('\n');
+    file.rest = file.done ? '' : parts.pop();
+    // 文件末尾的换行不算续行
+    if (file.done && parts[parts.length - 1] === '') parts.pop();
+    appendLogLines(parseLogText(parts, file));
+  } catch (e) {
+    if (logs.file !== file) return;
+    file.done = true;
+    toast(t('无法读取日志文件: {0}', e.message), true);
+  } finally {
+    file.loading = false;
+    scheduleLogRender();
+  }
+  // 内容不足两屏时继续加载; 按计算的内容高度判断, 不依赖还未渲染的 DOM
+  const list = $('logList');
+  if (logs.file === file && logOffset(logs.view.length) - list.scrollTop <= list.clientHeight * 3) loadLogChunk();
+}
+
+// [yyyy-MM-dd HH:mm:ss.SSS] 开头为新的一条, 其余行属于上一条; 没有时间前缀的文件按行显示
+function parseLogText(parts, file) {
+  const result = [];
+  let last = logs.lines[logs.lines.length - 1] || null;
+  let changed = false;
+  parts.forEach((raw) => {
+    const text = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    const match = LOG_LINE_RE.exec(text);
+    if (file.plain === null && text) file.plain = !match;
+    if (match && !file.plain) {
+      const [, y, mo, d, h, mi, s, ms] = match.map(Number);
+      last = { id: logs.nextId++, t: new Date(y, mo - 1, d, h, mi, s, ms).getTime(), m: text.slice(match[0].length) };
+      result.push(last);
+    } else if (!file.plain && last) {
+      last.m += '\n' + text;
+      if (!result.includes(last)) changed = true;
+    } else if (text || file.plain) {
+      last = { id: logs.nextId++, t: 0, m: text };
+      result.push(last);
+    }
+  });
+  // 上一段的最后一条有续行时重新计算高度
+  if (changed && logs.wrap) rebuildLogHeights();
+  return result;
+}
+
+// MARK: Actions
+
+async function logAction(action, body) {
+  const res = await fetch('/api/hub/app-logs/' + action, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device: targets.deviceId || '', app: targets.bundleId || '', ...body }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function exportLogs(lines) {
+  hidePopovers();
+  const body = lines ? { text: lines.filter((line) => !line.k).map((line) => logLineText(line) + '\n').join('') } : {};
+  logAction('export', body).then((data) => toast(t('已导出到 {0}', data.path))).catch((e) => toast(t('导出失败: {0}', e.message), true));
+}
+
+function clearLogs() {
+  if (logs.source === 'live') {
+    // Hub 清空后通过 reset 事件通知所有打开的面板
+    logAction('clear').catch((e) => toast(e.message, true));
+  } else {
+    logs.file = null;
+    resetLogLines();
+  }
+}
+
+function setupLogs() {
+  try {
+    logs.open = localStorage.getItem(LOG_OPEN_KEY) === '1';
+    logs.wrap = localStorage.getItem(LOG_WRAP_KEY) === '1';
+  } catch (e) {
+    // ignore
+  }
+  setLogWrap(logs.wrap);
+  const list = $('logList');
+  $('logToggle').addEventListener('click', toggleLogPanel);
+  $('logClose').addEventListener('click', toggleLogPanel);
+  let filterTimer = null;
+  $('logFilter').addEventListener('input', (e) => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => applyLogFilter(e.target.value), 150);
+  });
+  $('logWrap').addEventListener('click', () => {
+    setLogWrap(!logs.wrap);
+    try {
+      localStorage.setItem(LOG_WRAP_KEY, logs.wrap ? '1' : '0');
+    } catch (e) {
+      // ignore
+    }
+  });
+  $('logTop').addEventListener('click', () => scrollLogEdge(false));
+  $('logBottom').addEventListener('click', () => scrollLogEdge(true));
+  $('logNew').addEventListener('click', () => scrollLogEdge(true));
+  $('logClear').addEventListener('click', clearLogs);
+  $('logMore').addEventListener('click', () => togglePopover('logMenu'));
+  $('logCopy').addEventListener('click', () => {
+    hidePopovers();
+    copyLogSelection();
+  });
+  $('logExportAll').addEventListener('click', () => exportLogs(logs.source === 'live' ? null : logs.lines));
+  $('logExportView').addEventListener('click', () => exportLogs(logs.view));
+  $('logDeviceFiles').addEventListener('click', () => openPanel('deviceLogs'));
+  $('logOpenFile').addEventListener('click', () => {
+    hidePopovers();
+    $('logFileInput').click();
+  });
+  $('logFileInput').addEventListener('change', (e) => {
+    openLocalLog(e.target.files[0]);
+    e.target.value = '';
+  });
+  $('logReveal').addEventListener('click', () => {
+    hidePopovers();
+    logAction('reveal').catch((e) => toast(e.message, true));
+  });
+  $('logBackLive').addEventListener('click', () => {
+    logs.source = 'live';
+    logs.file = null;
+    logConnect();
+  });
+  // 用户向上滚动后停止跟随, 回到底部恢复
+  list.addEventListener('scroll', () => {
+    const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
+    if (logs.source === 'live' && atBottom !== logs.follow) {
+      logs.follow = atBottom;
+      if (atBottom) logs.unseen = false;
+    }
+    if (logs.file && list.scrollTop + list.clientHeight * 3 >= logOffset(logs.view.length)) loadLogChunk();
+    scheduleLogRender();
+  });
+  list.addEventListener('click', (e) => {
+    const row = e.target.closest('.log-row');
+    if (!row || window.getSelection().toString()) return;
+    const line = logs.view[Number(row.dataset.i)];
+    if (line) selectLog(line.id, e.shiftKey);
+  });
+  list.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveLogSelection(e.key === 'ArrowUp' ? -1 : 1, e.shiftKey);
+    } else if (e.key === 'c' && (e.metaKey || e.ctrlKey) && !window.getSelection().toString()) {
+      e.preventDefault();
+      e.stopPropagation();
+      copyLogSelection();
+    }
+  });
+  const pane = $('logPane');
+  pane.addEventListener('dragover', (e) => {
+    if (![...e.dataTransfer.types].includes('Files')) return;
+    e.preventDefault();
+    pane.classList.add('dragover');
+  });
+  pane.addEventListener('dragleave', (e) => {
+    if (!pane.contains(e.relatedTarget)) pane.classList.remove('dragover');
+  });
+  pane.addEventListener('drop', (e) => {
+    e.preventDefault();
+    pane.classList.remove('dragover');
+    openLocalLog(e.dataTransfer.files[0]);
+  });
+  // 宽度变化后换行模式重新估算高度
+  let lastWidth = 0;
+  new ResizeObserver(() => {
+    if (logs.wrap && list.clientWidth !== lastWidth) {
+      lastWidth = list.clientWidth;
+      rebuildLogHeights();
+    }
+    scheduleLogRender();
+  }).observe(list);
 }
 
 // MARK: - Setup
@@ -4033,6 +4774,7 @@ function setup() {
   setupCanvasEvents();
   setupLiveEvents();
   setupColorPicker();
+  setupLogs();
   setupLayout();
 
   applyTheme(loadTheme(), false);

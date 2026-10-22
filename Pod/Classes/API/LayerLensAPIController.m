@@ -12,6 +12,7 @@
 #import "LayerLensHTTPResponse.h"
 #import "LayerLensLookinBridge.h"
 #import "LayerLensRuntimeReader.h"
+#import "LayerLensLogger.h"
 #import <UIKit/UIKit.h>
 
 @implementation LayerLensAPIController
@@ -28,6 +29,40 @@
         [self onMain:^{
             BOOL foreground = UIApplication.sharedApplication.applicationState != UIApplicationStateBackground;
             responder([LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"state" object:@{@"foreground": @(foreground)}]);
+        }];
+    }];
+
+    // 日志流: 先补齐序号大于 since 的缓冲日志, 之后每批新日志推送一次; 连上时带上 instanceId, 对方据此判断 App 是否重启过
+    [router addRoute:@"GET" path:@"/api/logs" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        uint64_t since = strtoull(request.query[@"since"].UTF8String ?: "0", NULL, 10);
+        [LayerLensLogger.sharedLogger entriesSince:since completion:^(NSArray<NSDictionary *> *entries) {
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"logs" object:@{@"instanceId": [LayerLensLookinBridge instanceId], @"entries": entries}];
+            response.channel = @"logs";
+            responder(response);
+        }];
+    }];
+
+    [router addRoute:@"GET" path:@"/api/logs/files" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [LayerLensLogger.sharedLogger filesWithCompletion:^(NSArray<NSDictionary *> *files) {
+            responder([LayerLensHTTPResponse JSONResponse:@{@"files": files}]);
+        }];
+    }];
+
+    // 分段读取日志文件, 网页按需加载; 往日的文件不再变化, 读满一段时允许缓存
+    [router addRoute:@"GET" path:@"/api/logs/file" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSString *name = request.query[@"name"] ?: @"";
+        unsigned long long offset = strtoull(request.query[@"offset"].UTF8String ?: "0", NULL, 10);
+        NSUInteger length = MIN((NSUInteger)strtoul(request.query[@"length"].UTF8String ?: "0", NULL, 10) ?: 1024 * 1024, 4 * 1024 * 1024);
+        [LayerLensLogger.sharedLogger readFile:name offset:offset length:length completion:^(NSData *data, unsigned long long total) {
+            if (!data) {
+                responder([LayerLensHTTPResponse errorResponse:404 message:@"File not found"]);
+                return;
+            }
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse responseWithStatus:200 contentType:@"text/plain; charset=utf-8" body:data];
+            response.headers[@"X-Total-Size"] = [NSString stringWithFormat:@"%llu", total];
+            NSString *today = [NSString stringWithFormat:@"%@.log", [self dayString]];
+            response.headers[@"Cache-Control"] = data.length == length && ![name isEqualToString:today] ? @"max-age=86400" : @"no-store";
+            responder(response);
         }];
     }];
 
@@ -99,6 +134,13 @@
 }
 
 #pragma mark - Private
+
+- (NSString *)dayString {
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.dateFormat = @"yyyy-MM-dd";
+    return [formatter stringFromDate:[NSDate date]];
+}
 
 - (NSData *)transparentPNG {
     static NSData *data = nil;

@@ -26,6 +26,7 @@
 		C3328F67A77FE0E4F668B64C /* SimulatorKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */; };
 		C9CDC699FE2578D78BE232EC /* HubServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */; };
 		D1B3FD3F79A4FF247AB49D3D /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CD20781F27975DD00515545 /* MainWindowController.swift */; };
+		EFFB1F8A6ACE5C4B93B2CC80 /* AppLogRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 591B590B9F1B317AD096335C /* AppLogRecorder.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -37,6 +38,7 @@
 		4643A7B6CBF41019EE8D9D7B /* LayerLens.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LayerLens.entitlements; sourceTree = "<group>"; };
 		4EA9476CF005F0D8805106BB /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
 		541966EE0D953E021F155FB9 /* SimulatorBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorBridge.swift; sourceTree = "<group>"; };
+		591B590B9F1B317AD096335C /* AppLogRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogRecorder.swift; sourceTree = "<group>"; };
 		5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorKeyboard.swift; sourceTree = "<group>"; };
 		78F1AD52529F3E51E363B48B /* LayerLens.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LayerLens.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorStream.swift; sourceTree = "<group>"; };
@@ -77,6 +79,7 @@
 			isa = PBXGroup;
 			children = (
 				DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */,
+				591B590B9F1B317AD096335C /* AppLogRecorder.swift */,
 				3C8CE72D1DFF6E56990FF617 /* Assets.xcassets */,
 				BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */,
 				1DE7C2F9FBD5F5BB31EB46AB /* HTTPMessage.swift */,
@@ -181,6 +184,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4B606CC7F77C28B4B516E660 /* AppDelegate.swift in Sources */,
+				EFFB1F8A6ACE5C4B93B2CC80 /* AppLogRecorder.swift in Sources */,
 				44A7FDB4C38BD8E2AA69EB05 /* HTTPClient.swift in Sources */,
 				1F92C6B485796F8B4DFD7632 /* HTTPMessage.swift in Sources */,
 				C9CDC699FE2578D78BE232EC /* HubServer.swift in Sources */,
@@ -220,7 +224,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.mac;
 				PRODUCT_NAME = LayerLens;
 				SDKROOT = macosx;
@@ -308,7 +312,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.layerlens.mac;
 				PRODUCT_NAME = LayerLens;
 				SDKROOT = macosx;

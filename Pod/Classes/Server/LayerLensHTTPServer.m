@@ -22,8 +22,8 @@
 //已停止: 阻止停止后的 ready 回调和换端口重试
 @property (nonatomic, assign) BOOL stopped;
 @property (nonatomic, strong) NSMutableArray<nw_connection_t> *connections;
-//保持打开的事件流连接, 用于推送事件
-@property (nonatomic, strong) NSMutableArray<nw_connection_t> *eventConnections;
+//保持打开的事件流连接, 按频道分组, 用于推送事件
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<nw_connection_t> *> *streamConnections;
 @property (nonatomic, assign, readwrite) uint16_t port;
 //最近一次启动的参数, 监听失效后按原参数重新监听
 @property (nonatomic, assign) BOOL loopbackOnly;
@@ -40,7 +40,7 @@
         _router = router;
         _queue = dispatch_queue_create("com.layerlens.server", DISPATCH_QUEUE_SERIAL);
         _connections = [NSMutableArray array];
-        _eventConnections = [NSMutableArray array];
+        _streamConnections = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -218,7 +218,7 @@
             nw_connection_cancel(connection);
         }
         [self.connections removeAllObjects];
-        [self.eventConnections removeAllObjects];
+        [self.streamConnections removeAllObjects];
         self.port = 0;
     });
 }
@@ -232,7 +232,9 @@
     nw_connection_set_state_changed_handler(connection, ^(nw_connection_state_t state, nw_error_t error) {
         if (state == nw_connection_state_cancelled || state == nw_connection_state_failed) {
             [weakSelf.connections removeObject:connection];
-            [weakSelf.eventConnections removeObject:connection];
+            for (NSMutableArray *connections in weakSelf.streamConnections.allValues) {
+                [connections removeObject:connection];
+            }
         }
     });
     nw_connection_start(connection);
@@ -289,7 +291,13 @@
                 nw_connection_cancel(connection);
             }
         });
-        [self.eventConnections addObject:connection];
+        NSString *channel = response.channel ?: @"events";
+        NSMutableArray *connections = self.streamConnections[channel];
+        if (!connections) {
+            connections = [NSMutableArray array];
+            self.streamConnections[channel] = connections;
+        }
+        [connections addObject:connection];
         [self waitCloseOnConnection:connection];
         return;
     }
@@ -299,9 +307,19 @@
 }
 
 - (void)broadcastEvent:(NSString *)name object:(id)object {
-    NSData *data = [LayerLensHTTPResponse eventDataWithName:name object:object];
+    [self broadcastEvent:name channel:@"events" objectBlock:^id{
+        return object;
+    }];
+}
+
+- (void)broadcastEvent:(NSString *)name channel:(NSString *)channel objectBlock:(id (^)(void))objectBlock {
     dispatch_async(self.queue, ^{
-        for (nw_connection_t connection in [self.eventConnections copy]) {
+        NSArray<nw_connection_t> *connections = [self.streamConnections[channel] copy];
+        if (connections.count == 0) {
+            return;
+        }
+        NSData *data = [LayerLensHTTPResponse eventDataWithName:name object:objectBlock()];
+        for (nw_connection_t connection in connections) {
             dispatch_data_t content = dispatch_data_create(data.bytes, data.length, self.queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
             nw_connection_send(connection, content, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, false, ^(nw_error_t error) {
                 if (error) {

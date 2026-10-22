@@ -17,11 +17,14 @@ final class HubServer {
     /// 与 iOS 端 LayerLensAPIVersion 对应
     static let apiVersion = 1
     static let maxBodyLength = 1024 * 1024
+    /// 导出过滤后的日志由网页上传全文, 单独放宽
+    static let maxExportLength = 64 * 1024 * 1024
 
     let queue = DispatchQueue(label: "com.layerlens.hub")
     let registry: TargetRegistry
     private let xcode = XcodeController()
     private let live = SimulatorLive()
+    private let appLogs = AppLogRecorder()
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     private let webRoot: URL
@@ -31,6 +34,9 @@ final class HubServer {
     init(registry: TargetRegistry) {
         self.registry = registry
         webRoot = Self.locateWebRoot()
+        registry.onAppsChanged = { [appLogs] apps in
+            appLogs.update(apps: apps)
+        }
     }
 
     var baseURL: URL {
@@ -112,6 +118,9 @@ final class HubServer {
             registry.snapshot { devices, simulators in
                 connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators]))
             }
+        case "/api/hub/app-logs/stream":
+            // 日志面板的事件流, 连接交给日志记录持有, 网页断开时释放
+            appLogs.subscribe(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "", connection: connection.detach())
         case "/api/hub/run-status":
             let sourceFile = registry.sourceFile(bundleId: head.query["app"] ?? "")
             workQueue.async { [self] in
@@ -226,6 +235,17 @@ final class HubServer {
             // 在访达中定位日志文件, 排查问题时方便拿到
             workQueue.async {
                 let ok = LiveLog.reveal()
+                connection.respond(ok ? .json(["ok": true]) : .error(500, "Open failed"))
+            }
+        case "/api/hub/app-logs/clear":
+            appLogs.clear(deviceId: json["device"] as? String ?? "", bundleId: json["app"] as? String ?? "")
+            connection.respond(.json(["ok": true]))
+        case "/api/hub/app-logs/export":
+            appLogs.export(deviceId: json["device"] as? String ?? "", bundleId: json["app"] as? String ?? "", text: json["text"] as? String) { url in
+                connection.respond(url.map { .json(["ok": true, "path": $0.path]) } ?? .error(500, "Export failed"))
+            }
+        case "/api/hub/app-logs/reveal":
+            appLogs.reveal(deviceId: json["device"] as? String ?? "", bundleId: json["app"] as? String ?? "") { ok in
                 connection.respond(ok ? .json(["ok": true]) : .error(500, "Open failed"))
             }
         case "/api/hub/activate":
@@ -364,7 +384,7 @@ final class HubConnection {
             server.handle(head, leftover: leftover, connection: self)
             return
         }
-        guard head.contentLength <= HubServer.maxBodyLength else {
+        guard head.contentLength <= (head.path == "/api/hub/app-logs/export" ? HubServer.maxExportLength : HubServer.maxBodyLength) else {
             respond(.error(413, "Payload Too Large"))
             return
         }

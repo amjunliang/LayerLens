@@ -18,6 +18,15 @@ FOUNDATION_EXPORT const NSInteger LayerLensAPIVersion;
 /// 集成即用: DEBUG 编译时随 App 启动, 由 Mac 上的 LayerLens 自动发现并连接
 @interface LayerLens : NSObject
 
+/// 记录一条日志: 实时显示在 Mac 端的日志面板, 同时写入设备上的日志文件. 任意线程可调用, 非 DEBUG 编译时不做任何事
++ (void)log:(NSString *)message;
+
+/// 设备上的日志目录, 每天一个文件, 保留最近 7 天, 可用于分享
++ (NSString *)logDirectory;
+
 @end
+
+/// 格式化后调用 [LayerLens log:]
+FOUNDATION_EXPORT void LayerLensLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 
 NS_ASSUME_NONNULL_END

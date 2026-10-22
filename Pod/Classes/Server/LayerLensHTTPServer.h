@@ -28,7 +28,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 监听已失效(如挂起期间被系统回收)时按原参数重新监听; 监听器仍为 ready 时先连接自检, 连不上同样重新监听. 已有连接保持不变
 - (void)resumeIfNeeded;
 
-/// 向所有打开的事件流推送一个事件
+/// 向指定频道推送; 频道没有连接时不调用 objectBlock, 省去序列化
+- (void)broadcastEvent:(NSString *)name channel:(NSString *)channel objectBlock:(id (^)(void))objectBlock;
+
+/// 向默认频道(events)的所有事件流推送一个事件
 - (void)broadcastEvent:(NSString *)name object:(id)object;
 
 @end

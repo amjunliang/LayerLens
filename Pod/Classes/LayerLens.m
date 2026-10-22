@@ -11,9 +11,10 @@
 #import "LayerLensRouter.h"
 #import "LayerLensAPIController.h"
 #import "LayerLensLookinBridge.h"
+#import "LayerLensLogger.h"
 #import <UIKit/UIKit.h>
 
-NSString * const LayerLensVersion = @"0.2.0";
+NSString * const LayerLensVersion = @"0.4.0";
 const NSInteger LayerLensAPIVersion = 1;
 
 #if DEBUG
@@ -27,6 +28,7 @@ static const NSInteger kLayerLensPortAttempts = 10;
 @property (nonatomic, strong) LayerLensRouter *router;
 @property (nonatomic, strong) LayerLensAPIController *apiController;
 @property (nonatomic, strong) LayerLensHTTPServer *server;
+@property (nonatomic, strong) dispatch_source_t heartbeatTimer;
 
 @end
 
@@ -48,6 +50,16 @@ static const NSInteger kLayerLensPortAttempts = 10;
     });
 }
 #endif
+
++ (void)log:(NSString *)message {
+#if DEBUG
+    [LayerLensLogger.sharedLogger log:message];
+#endif
+}
+
++ (NSString *)logDirectory {
+    return LayerLensLogger.sharedLogger.directory;
+}
 
 + (instancetype)sharedInstance {
     static LayerLens *instance = nil;
@@ -75,6 +87,21 @@ static const NSInteger kLayerLensPortAttempts = 10;
     // 进入后台后很快被挂起, 事件流不会断开, 主动告知网页 App 不在前台
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(didEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(didBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    __weak typeof(self) weakSelf = self;
+    LayerLensLogger.sharedLogger.onFlush = ^(NSArray<NSDictionary *> *entries) {
+        [weakSelf.server broadcastEvent:@"logs" channel:@"logs" objectBlock:^id{
+            return @{@"entries": entries};
+        }];
+    };
+    // 日志流心跳: Mac 端据此发现静默失效的连接(如锁屏期间被系统回收)并重新连接; 没有连接时不发送
+    self.heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(self.heartbeatTimer, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), 15 * NSEC_PER_SEC, NSEC_PER_SEC);
+    dispatch_source_set_event_handler(self.heartbeatTimer, ^{
+        [weakSelf.server broadcastEvent:@"ping" channel:@"logs" objectBlock:^id{
+            return @{};
+        }];
+    });
+    dispatch_resume(self.heartbeatTimer);
     [self startServer];
 #endif
 }
@@ -105,3 +132,13 @@ static const NSInteger kLayerLensPortAttempts = 10;
 #endif
 
 @end
+
+void LayerLensLog(NSString *format, ...) {
+#if DEBUG
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    [LayerLens log:message];
+#endif
+}

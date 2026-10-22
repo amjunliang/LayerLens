@@ -7,6 +7,12 @@
 //
 
 #import "LLEListViewController.h"
+#if DEBUG && __has_include(<LayerLens/LayerLens.h>)
+#import <LayerLens/LayerLens.h>
+#define LLELog(...) LayerLensLog(__VA_ARGS__)
+#else
+#define LLELog(...)
+#endif
 
 @interface LLEListViewController () <UITableViewDataSource>
 
@@ -72,6 +78,8 @@
 - (void)toggleColor {
     BOOL indigo = [self.headerCard.backgroundColor isEqual:UIColor.systemIndigoColor];
     self.headerCard.backgroundColor = indigo ? UIColor.systemTealColor : UIColor.systemIndigoColor;
+    // 日志显示在 LayerLens 的日志面板中
+    LLELog(@"Toggle color: %@", indigo ? @"teal" : @"indigo");
 }
 
 #pragma mark - UITableViewDataSource

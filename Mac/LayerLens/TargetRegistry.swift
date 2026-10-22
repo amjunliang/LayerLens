@@ -79,6 +79,8 @@ final class TargetRegistry {
     /// Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
     private var sourceFiles: [String: String]
     private static let sourceFilesKey = "LayerLensSourceFiles"
+    /// 每次扫描完成后在 queue 上回调当前的 App 列表, 启动前设置
+    var onAppsChanged: (([AppRecord]) -> Void)?
 
     init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -359,6 +361,7 @@ final class TargetRegistry {
             found = Self.uniqueInstances(found)
             apps = found + suspendedApps(found: found, devices: devices, transientPorts: transientPorts)
             rememberSourceFiles()
+            onAppsChanged?(apps)
             scanning = false
             let waiters = scanWaiters
             scanWaiters = []
