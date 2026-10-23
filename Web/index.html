@@ -51,6 +51,10 @@
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
     <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
     <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M10 14l-7 7M14 10l7-7"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l1.2-4.6L15.6 5a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h13M13 7l5 5-5 5"/></symbol>
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
     <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
@@ -215,6 +219,7 @@
       <span class="git-repo git-only" id="gitRepo"></span>
       <span class="git-branch git-only" id="gitBranch"></span>
       <span class="log-count git-only" id="gitSync"></span>
+      <button class="icon-btn git-only" id="gitTreeMode" title="树形显示" aria-label="树形显示"><svg class="icon"><use href="#i-tree"/></svg></button>
       <button class="icon-btn git-only" id="gitPull" title="拉取 (仅快进)" aria-label="拉取"><svg class="icon"><use href="#i-download"/></svg></button>
       <button class="icon-btn git-only" id="gitPush" title="推送" aria-label="推送"><svg class="icon"><use href="#i-upload"/></svg></button>
       <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
@@ -265,13 +270,15 @@
       <div class="git-side">
         <div class="git-files" id="gitFiles"></div>
         <div class="git-commit" id="gitCommitBox">
+          <div class="git-amend-warn" id="gitAmendWarn" hidden>上一次提交已推送, 修改后需要强制推送</div>
           <div class="git-commit-row">
             <textarea id="gitMessage" rows="1" placeholder="提交说明, ⌘↩ 提交" spellcheck="false"></textarea>
+            <label class="git-amend" title="修改上次提交"><input type="checkbox" class="git-check" id="gitAmend"> <span>修改上次</span></label>
             <button class="primary" id="gitCommit">提交</button>
           </div>
-          <label class="git-amend"><input type="checkbox" id="gitAmend"> <span>修改上次提交</span></label>
         </div>
       </div>
+      <div class="net-splitter git-splitter" id="gitSplitter"></div>
       <div class="git-diff" id="gitDiff"></div>
       <div class="log-empty" id="gitEmpty" hidden></div>
     </div>
@@ -338,7 +345,9 @@
 <script src="/assets/net-columns.js"></script>
 <script src="/assets/stage-gl.js"></script>
 <script src="/assets/live-size.js"></script>
+<script src="/assets/git-graph.js"></script>
 <script src="/assets/git.js"></script>
+<script src="/assets/git-menu.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

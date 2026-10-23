@@ -3951,6 +3951,13 @@ const SHORTCUT_GROUPS = [
     [['1', '2', '3'], '实时 / 2D / 3D'],
     [['C'], '取色, 点击复制色值'],
   ]],
+  ['改动', false, [
+    [['⌘', '点击'], '多选文件或提交'],
+    [['⇧', '点击'], '范围选择'],
+    [['空格'], '暂存 / 取消暂存选中文件'],
+    [['双击'], '打开文件'],
+    [['⌘', '↩'], '提交'],
+  ]],
   ['3D', false, [
     [['拖动'], '旋转'],
     [['S'], '独立显示选中元素'],
@@ -6601,6 +6608,13 @@ function setupNetwork() {
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest('.context-menu')) hideMenu();
   });
+  // 没有自定义菜单的区域不弹 WebView 自带的菜单(重新加载、播放动画); 输入框和选中文字时保留, 便于复制粘贴
+  document.addEventListener('contextmenu', (e) => {
+    if (e.defaultPrevented) return;
+    if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]')) return;
+    if (window.getSelection().toString()) return;
+    e.preventDefault();
+  });
   setupFindKey();
   const splitter = $('netSplitter');
   splitter.addEventListener('pointerdown', (e) => {
@@ -6842,6 +6856,10 @@ function setup() {
     }
     if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
     if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
+    if (gitHandleKey(e)) {
+      e.preventDefault();
+      return;
+    }
     if (e.code === 'Space' && state.mode !== 'live') {
       // 阻止页面滚动和触发聚焦中的按钮
       e.preventDefault();

@@ -331,10 +331,24 @@ final class HubServer {
                 git.diff(repo: root, path: head.query["path"] ?? "", origin: origin, group: head.query["group"] ?? "") { result in
                     connection.respond(.json(result, status: result["error"] == nil ? 200 : 500))
                 }
+            case ("GET", "show"):
+                git.show(repo: root, commits: (head.query["commits"] ?? "").split(separator: ",").map(String.init)) { result in
+                    connection.respond(.json(result, status: result["error"] == nil ? 200 : 500))
+                }
             case ("GET", "log"):
-                git.log(repo: root) { result in
+                git.log(repo: root, skip: Int(head.query["skip"] ?? "") ?? 0) { result in
                     connection.respond(.json(result))
                 }
+            case ("GET", "patch"):
+                git.patch(repo: root, commit: head.query["commit"] ?? "") { result in
+                    connection.respond(.json(result, status: result["error"] == nil ? 200 : 500))
+                }
+            case ("POST", "reveal"):
+                let ok = git.reveal(repo: root, path: json["path"] as? String ?? "")
+                connection.respond(.json(ok ? ["ok": true] : ["error": "File not found"], status: ok ? 200 : 404))
+            case ("POST", "open"):
+                let ok = git.open(repo: root, path: json["path"] as? String ?? "")
+                connection.respond(.json(ok ? ["ok": true] : ["error": "File not found"], status: ok ? 200 : 404))
             case ("POST", _):
                 git.perform(action, repo: root, json: json) { result, status in
                     connection.respond(.json(result, status: status))

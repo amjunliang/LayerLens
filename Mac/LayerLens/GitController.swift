@@ -7,6 +7,7 @@
 //
 
 import CoreServices
+import AppKit
 import Foundation
 import Network
 
@@ -84,7 +85,7 @@ final class GitController {
     // MARK: - Commands
 
     /// 在仓库中执行 git; 交互提示全部关闭, 需要凭据时直接失败而不是卡住
-    static func run(_ repo: String, _ arguments: [String], timeout: TimeInterval, readOnly: Bool = false) -> Output {
+    static func run(_ repo: String, _ arguments: [String], timeout: TimeInterval, readOnly: Bool = false, input: Data? = nil) -> Output {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: git)
         process.arguments = ["-C", repo] + arguments
@@ -100,11 +101,18 @@ final class GitController {
         let error = Pipe()
         process.standardOutput = output
         process.standardError = error
-        process.standardInput = FileHandle.nullDevice
+        let inputPipe = input.map { _ in Pipe() }
+        process.standardInput = inputPipe ?? FileHandle.nullDevice
         do {
             try process.run()
         } catch {
             return Output(status: -1, stdout: Data(), stderr: error.localizedDescription)
+        }
+        if let input, let inputPipe {
+            DispatchQueue.global().async {
+                inputPipe.fileHandleForWriting.write(input)
+                try? inputPipe.fileHandleForWriting.close()
+            }
         }
         let timedOut = Flag()
         let timer = DispatchWorkItem { [weak process] in
@@ -233,9 +241,69 @@ final class GitController {
         }
     }
 
-    func log(repo: String, completion: @escaping ([String: Any]) -> Void) {
+    /// 一个或多个提交的全部改动; 每个提交前有一行 "\0短哈希 标题"
+    func show(repo: String, commits: [String], completion: @escaping ([String: Any]) -> Void) {
+        guard !commits.isEmpty, commits.count <= 50, commits.allSatisfy({ $0.range(of: "^[0-9a-f]{4,40}$", options: .regularExpression) != nil }) else {
+            completion(["error": "Invalid commit"])
+            return
+        }
         readQueue.async {
-            let output = Self.run(repo, ["log", "-n", "20", "--format=%h%x1f%s%x1f%an%x1f%ar"], timeout: 15, readOnly: true)
+            let output = Self.run(repo, ["-c", "core.quotePath=false", "show", "--format=%x00%h %s", "-M", "--no-color", "--no-ext-diff"] + commits, timeout: 30, readOnly: true)
+            guard output.ok else {
+                completion(["error": output.message])
+                return
+            }
+            let truncated = output.stdout.count > Self.maxDiffBytes
+            let text = String(decoding: truncated ? output.stdout.prefix(Self.maxDiffBytes) : output.stdout, as: UTF8.self)
+            completion(["text": text, "truncated": truncated])
+        }
+    }
+
+    /// 用默认 App 打开仓库内的文件; 只接受仓库内已存在的路径
+    func open(repo: String, path: String) -> Bool {
+        let root = URL(fileURLWithPath: repo).standardizedFileURL.path
+        let url = URL(fileURLWithPath: root).appendingPathComponent(path).standardizedFileURL
+        guard !path.isEmpty, url.path.hasPrefix(root + "/"), FileManager.default.fileExists(atPath: url.path) else { return false }
+        DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+        return true
+    }
+
+    /// 在 Finder 中选中仓库内的文件; 已删除的文件退到最近的存在的上级目录
+    func reveal(repo: String, path: String) -> Bool {
+        let root = URL(fileURLWithPath: repo).standardizedFileURL.path
+        var url = URL(fileURLWithPath: root).appendingPathComponent(path).standardizedFileURL
+        guard !path.isEmpty, url.path.hasPrefix(root + "/") else { return false }
+        while !FileManager.default.fileExists(atPath: url.path), url.path.count > root.count {
+            url = url.deletingLastPathComponent()
+        }
+        DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        return true
+    }
+
+    /// 单个提交的补丁文本(git format-patch)
+    func patch(repo: String, commit: String, completion: @escaping ([String: Any]) -> Void) {
+        guard commit.range(of: "^[0-9a-f]{4,40}$", options: .regularExpression) != nil else {
+            completion(["error": "Invalid commit"])
+            return
+        }
+        readQueue.async {
+            let output = Self.run(repo, ["format-patch", "-1", "--stdout", "--no-color", commit], timeout: 30, readOnly: true)
+            guard output.ok else {
+                completion(["error": output.message])
+                return
+            }
+            let truncated = output.stdout.count > Self.maxDiffBytes
+            let text = String(decoding: truncated ? output.stdout.prefix(Self.maxDiffBytes) : output.stdout, as: UTF8.self)
+            completion(["text": text, "truncated": truncated])
+        }
+    }
+
+    /// 提交记录, 每页 50 条, skip 用于滑动加载更多
+    func log(repo: String, skip: Int, completion: @escaping ([String: Any]) -> Void) {
+        readQueue.async {
+            // 网页按完整哈希和父提交画分支图; 引用用完整名区分本地分支、远端分支和标签
+            let format = "--format=%h%x1f%s%x1f%an%x1f%ar%x1f%ct%x1f%H%x1f%P%x1f%D"
+            let output = Self.run(repo, ["log", "-n", "50", "--skip", String(max(skip, 0)), "--date-order", "--decorate=full", format], timeout: 15, readOnly: true)
             // 还没有提交的新仓库没有日志
             guard output.ok else {
                 completion(["commits": []])
@@ -243,7 +311,7 @@ final class GitController {
             }
             let commits = output.text.split(separator: "\n").map { line -> [String: String] in
                 let parts = line.split(separator: "\u{1f}", omittingEmptySubsequences: false).map(String.init)
-                return ["hash": parts[safe: 0] ?? "", "subject": parts[safe: 1] ?? "", "author": parts[safe: 2] ?? "", "date": parts[safe: 3] ?? ""]
+                return ["hash": parts[safe: 0] ?? "", "subject": parts[safe: 1] ?? "", "author": parts[safe: 2] ?? "", "date": parts[safe: 3] ?? "", "time": parts[safe: 4] ?? "", "oid": parts[safe: 5] ?? "", "parents": parts[safe: 6] ?? "", "refs": parts[safe: 7] ?? ""]
             }
             completion(["commits": commits])
         }
@@ -254,6 +322,7 @@ final class GitController {
         let paths = (json["paths"] as? [String] ?? []).filter { !$0.isEmpty }
         let untracked = (json["untracked"] as? [String] ?? []).filter { !$0.isEmpty }
         var commands: [(arguments: [String], timeout: TimeInterval)] = []
+        var input: Data?
         switch action {
         case "stage" where !paths.isEmpty:
             commands = [(["add", "-A", "--"] + paths, 30)]
@@ -274,6 +343,31 @@ final class GitController {
             arguments += message.isEmpty ? ["--no-edit"] : ["-m", message]
             // 提交钩子可能较慢
             commands = [(arguments, 120)]
+        case "hunk":
+            // 按块暂存 / 取消暂存 / 放弃: 网页提交单个块的补丁, 通过标准输入交给 git apply
+            let patch = json["patch"] as? String ?? ""
+            let modes = ["stage": ["--cached"], "unstage": ["--cached", "-R"], "discard": ["-R"]]
+            guard patch.hasPrefix("diff --git "), let mode = modes[json["mode"] as? String ?? ""] else {
+                completion(["error": "Invalid request"], 400)
+                return
+            }
+            input = Data(patch.utf8)
+            commands = [(["apply", "--whitespace=nowarn"] + mode + ["-"], 30)]
+        case "reset":
+            // 只移动当前分支, 工作区和暂存区保持不变; 原提交仍可从 reflog 找回
+            let commit = json["commit"] as? String ?? ""
+            guard commit.range(of: "^[0-9a-f]{4,40}$", options: .regularExpression) != nil else {
+                completion(["error": "Invalid commit"], 400)
+                return
+            }
+            commands = [(["reset", "--soft", commit], 30)]
+        case "revert":
+            let commit = json["commit"] as? String ?? ""
+            guard commit.range(of: "^[0-9a-f]{4,40}$", options: .regularExpression) != nil else {
+                completion(["error": "Invalid commit"], 400)
+                return
+            }
+            commands = [(["revert", "--no-edit", commit], 120)]
         case "pull":
             commands = [(["pull", "--ff-only"], 120)]
         case "push":
@@ -283,6 +377,11 @@ final class GitController {
             return
         }
         writeQueue.async { [self] in
+            // 已有进行中的回滚时不再回滚, 也不能替用户撤销它
+            if action == "revert", Self.run(repo, ["rev-parse", "-q", "--verify", "REVERT_HEAD"], timeout: 10, readOnly: true).ok {
+                completion(["error": "A revert is already in progress"], 409)
+                return
+            }
             var last: Output?
             for command in commands {
                 var arguments = command.arguments
@@ -291,9 +390,13 @@ final class GitController {
                     let upstream = Self.run(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout: 10, readOnly: true)
                     arguments = upstream.ok ? ["push"] : ["push", "-u", "origin", "HEAD"]
                 }
-                let output = Self.run(repo, arguments, timeout: command.timeout)
+                let output = Self.run(repo, arguments, timeout: command.timeout, input: input)
                 last = output
                 if !output.ok { break }
+            }
+            // 回滚冲突或失败时撤销, 不让仓库停在回滚中途
+            if action == "revert", let last, !last.ok {
+                _ = Self.run(repo, ["revert", "--abort"], timeout: 30)
             }
             refresh(root: repo)
             if let last, !last.ok {
