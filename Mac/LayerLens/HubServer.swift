@@ -279,19 +279,46 @@ final class HubServer {
                     let arguments = kind == .simulator
                         ? ["simctl", "launch", device, app]
                         : ["devicectl", "device", "process", "launch", "--device", device, app]
-                    guard TargetRegistry.run("/usr/bin/xcrun", arguments) != nil else {
-                        connection.respond(.error(500, "Launch failed"))
+                    let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments)
+                    guard result.ok else {
+                        let failure = Self.launchFailure(result.error)
+                        connection.respond(.json(["ok": false, "reason": failure.reason, "error": failure.detail], status: 500))
                         return
                     }
                     // 等 App 在(可能换了的)端口上响应后再返回, 网页随后加载时不会连到旧端口
                     registry.waitForApp(deviceId: device, bundleId: app, timeout: 5) { ready in
-                        connection.respond(.json(["ok": true, "ready": ready]))
+                        // 真机锁屏时启动请求会被接受, 但 App 到不了前台, 由 kind 让网页提示可能的原因
+                        connection.respond(.json(["ok": true, "ready": ready, "kind": kind == .simulator ? "simulator" : "device"]))
                     }
                 }
             }
         default:
             connection.respond(.error(404, "Not Found"))
         }
+    }
+
+    /// 启动失败的原因分类, 网页据此显示本地化提示; 无法归类时为 unknown, 附带原始错误中最有用的一行
+    static func launchFailure(_ output: String) -> (reason: String, detail: String) {
+        let text = output.lowercased()
+        let rules: [(String, [String])] = [
+            ("locked", ["locked"]),
+            ("developerMode", ["developer mode"]),
+            // simctl 找不到 App 时只给出 FBSOpenApplicationServiceErrorDomain 的 code=4
+            ("notInstalled", ["not installed", "fbsopenapplicationserviceerrordomain, code=4"]),
+            ("untrustedDeveloper", ["explicitly trusted", "untrusted developer", "code signature"]),
+            ("unpaired", ["not paired", "pairing"]),
+            ("unavailable", ["unavailable", "not connected", "disconnected"]),
+        ]
+        let reason = rules.first { $0.1.contains { text.contains($0) } }?.0 ?? "unknown"
+        let lines = output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        // devicectl 的 NSLocalizedFailureReason 比首行的笼统描述更具体
+        let failure = lines.first { $0.hasPrefix("NSLocalizedFailureReason = ") }.map { String($0.dropFirst("NSLocalizedFailureReason = ".count)) }
+        // simctl 首行是以冒号结尾的笼统描述, 取第一条具体说明
+        var detail = failure ?? lines.first { !$0.isEmpty && !$0.hasSuffix(":") } ?? "Launch failed"
+        if detail.hasPrefix("ERROR: ") { detail = String(detail.dropFirst(7)) }
+        // 去掉末尾的 (domain error code) 部分
+        if let range = detail.range(of: " (", options: .backwards), detail.hasSuffix(")") { detail = String(detail[..<range.lowerBound]) }
+        return (reason, detail)
     }
 
     /// /sim/<UDID>/stream 为内置实时画面的 WebSocket, /sim/<UDID>/info 返回屏幕尺寸, /sim/<UDID>/screenshot 返回原始分辨率截图

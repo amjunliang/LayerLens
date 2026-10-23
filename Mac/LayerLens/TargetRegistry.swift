@@ -446,6 +446,37 @@ final class TargetRegistry {
         process.waitUntilExit()
         return process.terminationStatus == 0 ? data : nil
     }
+
+    /// 与 run 相同, 但失败时返回错误输出, 用于向网页说明原因
+    static func runReportingError(_ path: String, _ arguments: [String]) -> (ok: Bool, error: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        let output = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = output
+        process.standardError = errorPipe
+        do {
+            try process.run()
+        } catch {
+            return (false, error.localizedDescription)
+        }
+        // 错误输出在后台读取, 两个管道任一写满都不会互相阻塞
+        var errorData = Data()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        let outputData = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        group.wait()
+        guard process.terminationStatus != 0 else { return (true, "") }
+        // devicectl 把错误写在标准输出, simctl 写在错误输出
+        let text = [errorData, outputData].compactMap { String(data: $0, encoding: .utf8) }.joined(separator: "\n")
+        return (false, text)
+    }
 }
 
 private extension String {

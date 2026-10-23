@@ -489,14 +489,16 @@ function pumpImages() {
   }
 }
 
-function toast(message, isError) {
+// force: 与当前 App 无关的错误(如启动其他 App 失败), App 不在线时也显示
+function toast(message, isError, force) {
   // App 不在线时请求失败是预期的, 由提示条说明
-  if (isError && appState.value !== 'online') return;
+  if (isError && !force && appState.value !== 'online') return;
   const node = $('toast');
   node.textContent = message;
   node.className = 'toast show' + (isError ? ' error' : '');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (node.className = 'toast'), 2600);
+  // 需要用户处理的错误多停留一会儿, 留出读完的时间
+  toast.timer = setTimeout(() => (node.className = 'toast'), force ? 5000 : 2600);
 }
 
 // MARK: - View state
@@ -2066,15 +2068,47 @@ function firstAppId(device) {
 }
 
 // 选择在后台的 App 时先把它切到前台, 否则层级和实时画面都不是它
+const LAUNCH_FAILURES = {
+  locked: '设备已锁屏, 请解锁后重试',
+  developerMode: '设备未开启开发者模式',
+  notInstalled: '该设备上没有安装这个 App',
+  untrustedDeveloper: '开发者证书未被信任, 请在设备的「设置 - 通用 - VPN 与设备管理」中信任',
+  unpaired: '设备未信任这台 Mac, 请重新连接并在设备上点「信任」',
+  // 菜单里能点到的真机 USB 是连着的, 开发者通道不可用基本是锁屏或休眠后被系统断开
+  unavailable: '设备已锁屏或休眠, 请解锁后重试',
+};
+
+// failure: 启动失败的原因, 不再切换; hint: 已启动但没有在前台响应, 照常切换并提示可能的原因
 async function activateApp(deviceId, bundleId) {
   try {
-    await fetch('/api/hub/activate', {
+    const response = await fetch('/api/hub/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device: deviceId, app: bundleId }),
     });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok) {
+      if (result.ready !== false) return {};
+      return { hint: t(result.kind === 'device' ? 'App 没有响应, 设备可能已锁屏, 解锁后自动连接' : 'App 没有响应, 可能还在启动') };
+    }
+    const known = LAUNCH_FAILURES[result.reason];
+    return { failure: known ? t(known) : t('启动失败: {0}', result.error || response.status) };
   } catch (e) {
-    // 失败时仍切换, 由页面提示在后台
+    // 请求本身失败(如 LayerLens 正在重启)时仍切换, 由页面提示连接状态
+    return {};
+  }
+}
+
+// 切换设备会重新加载页面, 提示存到加载后再显示
+const PENDING_TOAST_KEY = 'layerlens_pending_toast';
+
+function showPendingToast() {
+  try {
+    const message = sessionStorage.getItem(PENDING_TOAST_KEY);
+    sessionStorage.removeItem(PENDING_TOAST_KEY);
+    if (message) toast(message, true, true);
+  } catch (e) {
+    // 不可用时没有提示
   }
 }
 
@@ -2213,7 +2247,17 @@ function targetAppRow(deviceId, app, background) {
     if (live && (inBackground || away || !current)) {
       // 激活要等 App 响应, 最多几秒
       toast(t('正在切换到 {0}…', app.appName || app.bundleId));
-      await activateApp(deviceId, app.bundleId);
+      const { failure, hint } = await activateApp(deviceId, app.bundleId);
+      // 启动失败时留在当前 App, 切过去也只能看到离线
+      if (failure) return toast(failure, true, true);
+      if (hint) toast(hint, true, true);
+      if (hint && !current && !(deviceId === targets.deviceId && targets.bundleId)) {
+        try {
+          sessionStorage.setItem(PENDING_TOAST_KEY, hint);
+        } catch (e) {
+          // 不可用时没有提示
+        }
+      }
     }
     // 当前 App 回到前台后由事件流恢复, 不必重新加载; 同一设备上换 App 原地切换, 实时画面不中断
     if (current) return;
@@ -6635,6 +6679,7 @@ function setup() {
   }
   applyI18n();
   loadViewState();
+  showPendingToast();
   window.addEventListener('pagehide', saveViewState);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveViewState();
