@@ -176,11 +176,12 @@
 
   <div class="splitter horizontal" data-split="s4"></div>
 
-  <section class="pane log-pane" id="logPane">
+  <section class="pane log-pane" id="logPane" data-tab="log">
     <div class="log-head">
       <div class="segmented small pane-tabs" id="paneTabs">
         <button data-pane="log" class="active">日志</button>
         <button data-pane="net">网络</button>
+        <button data-pane="git">改动</button>
       </div>
       <label class="search-box log-search log-only" id="logSearch">
         <svg class="icon"><use href="#i-search"/></svg>
@@ -211,6 +212,11 @@
       <button class="icon-btn toggle net-only" id="netPause" title="暂停" aria-label="暂停" aria-pressed="false"><svg class="icon"><use href="#i-pause"/></svg></button>
       <button class="icon-btn net-only" id="netHar" title="导出 HAR" aria-label="导出 HAR"><svg class="icon"><use href="#i-download"/></svg></button>
       <button class="icon-btn net-only" id="netClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <span class="git-repo git-only" id="gitRepo"></span>
+      <span class="git-branch git-only" id="gitBranch"></span>
+      <span class="log-count git-only" id="gitSync"></span>
+      <button class="icon-btn git-only" id="gitPull" title="拉取 (仅快进)" aria-label="拉取"><svg class="icon"><use href="#i-download"/></svg></button>
+      <button class="icon-btn git-only" id="gitPush" title="推送" aria-label="推送"><svg class="icon"><use href="#i-upload"/></svg></button>
       <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
       <button class="icon-btn" id="logPopout" title="在独立窗口打开" aria-label="在独立窗口打开"><svg class="icon"><use href="#i-external"/></svg></button>
       <button class="icon-btn" id="logDock" title="停靠回主窗口" aria-label="停靠回主窗口"><svg class="icon"><use href="#i-dock"/></svg></button>
@@ -254,6 +260,20 @@
       </div>
       <div class="net-splitter" id="netSplitter" hidden></div>
       <div class="net-detail" id="netDetail" hidden></div>
+    </div>
+    <div class="git-body git-only" id="gitBody">
+      <div class="git-side">
+        <div class="git-files" id="gitFiles"></div>
+        <div class="git-commit" id="gitCommitBox">
+          <div class="git-commit-row">
+            <textarea id="gitMessage" rows="1" placeholder="提交说明, ⌘↩ 提交" spellcheck="false"></textarea>
+            <button class="primary" id="gitCommit">提交</button>
+          </div>
+          <label class="git-amend"><input type="checkbox" id="gitAmend"> <span>修改上次提交</span></label>
+        </div>
+      </div>
+      <div class="git-diff" id="gitDiff"></div>
+      <div class="log-empty" id="gitEmpty" hidden></div>
     </div>
   </section>
 
@@ -318,6 +338,7 @@
 <script src="/assets/net-columns.js"></script>
 <script src="/assets/stage-gl.js"></script>
 <script src="/assets/live-size.js"></script>
+<script src="/assets/git.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

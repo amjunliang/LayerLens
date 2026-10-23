@@ -3743,6 +3743,9 @@ function handleViewKey(key) {
     case 'n':
       showPaneTab('net');
       return true;
+    case 'g':
+      showPaneTab('git');
+      return true;
     case '[':
     case ']':
       if (!three) return false;
@@ -3929,6 +3932,7 @@ const SHORTCUT_GROUPS = [
     [['D'], '显示 / 隐藏详情面板'],
     [['L'], '显示 / 隐藏日志面板'],
     [['N'], '显示 / 隐藏网络面板'],
+    [['G'], '显示 / 隐藏改动面板'],
     [['⌘', 'F'], '在当前区域查找: 层级树, 日志, 网络列表或请求详情'],
     [['?'], '显示此面板'],
   ]],
@@ -5284,6 +5288,7 @@ function setupLogsWindow() {
   applyTheme(loadTheme(), false);
   setupLogs();
   setupNetwork();
+  setupGit();
   setPaneTab(params.get('tab'));
   setupPanels();
   document.addEventListener('pointerdown', (e) => {
@@ -5490,6 +5495,8 @@ function netVisible() {
 
 function syncNetPanel() {
   $('logPane').classList.toggle('net', net.tab === 'net');
+  $('logPane').dataset.tab = net.tab;
+  syncGitPanel();
   $('paneTabs').querySelectorAll('button').forEach((button) => button.classList.toggle('active', button.dataset.pane === net.tab));
   const visible = netVisible();
   if (visible && !net.active) {
@@ -5508,13 +5515,13 @@ function syncNetPanel() {
 }
 
 function setPaneTab(tab) {
-  net.tab = tab === 'net' ? 'net' : 'log';
+  net.tab = tab === 'net' || tab === 'git' ? tab : 'log';
   try {
     localStorage.setItem(NET_TAB_KEY, net.tab);
   } catch (e) {
     // ignore
   }
-  if (logs.window) document.title = `${targets.bundleId || 'LayerLens'} · ${net.tab === 'net' ? t('网络') : t('日志')}`;
+  if (logs.window) document.title = `${targets.bundleId || 'LayerLens'} · ${t({ net: '网络', git: '改动' }[net.tab] || '日志')}`;
   syncNetPanel();
   if (net.tab === 'log') scheduleLogRender();
 }
@@ -6529,7 +6536,8 @@ function setNetDetailWidth(width, save) {
 
 function setupNetwork() {
   try {
-    net.tab = localStorage.getItem(NET_TAB_KEY) === 'net' ? 'net' : 'log';
+    const tab = localStorage.getItem(NET_TAB_KEY);
+    net.tab = tab === 'net' || tab === 'git' ? tab : 'log';
     const width = Number(localStorage.getItem(NET_DETAIL_W_KEY));
     if (width) $('netBody').style.setProperty('--net-detail-w', width + 'px');
   } catch (e) {
@@ -6864,6 +6872,7 @@ function setup() {
   setupColorPicker();
   setupLogs();
   setupNetwork();
+  setupGit();
   setupLayout();
 
   applyTheme(loadTheme(), false);

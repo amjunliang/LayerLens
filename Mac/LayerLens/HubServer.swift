@@ -25,6 +25,7 @@ final class HubServer {
     private let xcode = XcodeController()
     private let live = SimulatorLive()
     private let appLogs = AppLogRecorder()
+    private let git = GitController()
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     private let webRoot: URL
@@ -99,6 +100,10 @@ final class HubServer {
         }
         if head.path.hasPrefix("/sim/") {
             handleSimulator(head, leftover: leftover, connection: connection)
+            return
+        }
+        if head.path.hasPrefix("/api/hub/git/") {
+            handleGit(head, body: leftover, connection: connection)
             return
         }
         if head.method == "POST" {
@@ -294,6 +299,49 @@ final class HubServer {
             }
         default:
             connection.respond(.error(404, "Not Found"))
+        }
+    }
+
+    /// 改动面板: /api/hub/git/<操作>?app=<Bundle ID>. 仓库由该 App 上报的源文件路径推断, 找不到时返回 reason 供网页提示
+    private func handleGit(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
+        let action = String(head.path.dropFirst("/api/hub/git/".count))
+        let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        let bundleId = head.query["app"] ?? json["app"] as? String ?? ""
+        let sourceFile = registry.sourceFile(bundleId: bundleId)
+        // 事件流先在本队列分离连接, 解析仓库较慢, 放到工作队列
+        let stream = head.method == "GET" && action == "events" ? connection.detach() : nil
+        workQueue.async { [self] in
+            guard let root = git.repository(sourceFile: sourceFile) else {
+                let reason = sourceFile.isEmpty ? "noSource" : "notRepo"
+                if let stream {
+                    // 返回错误码让浏览器停止重连, 由网页按 repo 接口的结果提示
+                    stream.send(content: Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), completion: .contentProcessed { _ in stream.cancel() })
+                } else {
+                    connection.respond(.json(["error": reason, "reason": reason], status: 404))
+                }
+                return
+            }
+            switch (head.method, action) {
+            case ("GET", "events"):
+                if let stream { git.subscribe(root: root, connection: stream) }
+            case ("GET", "repo"):
+                connection.respond(.json(["root": root, "name": (root as NSString).lastPathComponent]))
+            case ("GET", "diff"):
+                let origin = head.query["origin"].flatMap { $0.isEmpty ? nil : $0 }
+                git.diff(repo: root, path: head.query["path"] ?? "", origin: origin, group: head.query["group"] ?? "") { result in
+                    connection.respond(.json(result, status: result["error"] == nil ? 200 : 500))
+                }
+            case ("GET", "log"):
+                git.log(repo: root) { result in
+                    connection.respond(.json(result))
+                }
+            case ("POST", _):
+                git.perform(action, repo: root, json: json) { result, status in
+                    connection.respond(.json(result, status: status))
+                }
+            default:
+                connection.respond(.error(404, "Not Found"))
+            }
         }
     }
 
