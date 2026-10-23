@@ -152,8 +152,8 @@ final class HubServer {
         }
         let rest = parts[3].drop { $0 != "/" }
         let upstreamTarget = rest.isEmpty ? "/" : String(rest)
-        // 事件流断开表示 App 停止, 目标不可用时直接断开连接让浏览器按网络错误重连, 返回错误码会使其停止重连
-        let isEventStream = upstreamTarget.hasPrefix("/api/events")
+        // 事件流(App 状态、网络请求等)目标不可用时直接断开连接让浏览器按网络错误重连, 返回错误码会使其停止重连
+        let isEventStream = upstreamTarget.hasPrefix("/api/events") || head.header("Accept")?.contains("text/event-stream") == true
         let unavailable = {
             isEventStream ? connection.abort() : connection.respond(.error(503, "App is not running"))
         }

@@ -122,6 +122,27 @@
         }];
     }];
 
+    // 启用 / 禁用手势, 便于排查手势冲突
+    [router addRoute:@"POST" path:@"/api/gesture" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSDictionary *body = [request JSONBody];
+        if (![body isKindOfClass:NSDictionary.class] || ![body[@"enabled"] isKindOfClass:NSNumber.class]) {
+            responder([LayerLensHTTPResponse errorResponse:400 message:@"Invalid body"]);
+            return;
+        }
+        unsigned long oid = [self oidFromString:[body[@"oid"] description]];
+        BOOL enabled = [body[@"enabled"] boolValue];
+        [self onMain:^{
+            NSObject *object = [LayerLensLookinBridge objectWithOid:oid];
+            if (![object isKindOfClass:UIGestureRecognizer.class]) {
+                responder([LayerLensHTTPResponse errorResponse:404 message:@"Object not found, please refresh"]);
+                return;
+            }
+            UIGestureRecognizer *recognizer = (UIGestureRecognizer *)object;
+            recognizer.enabled = enabled;
+            responder([LayerLensHTTPResponse JSONResponse:@{@"enabled": @(recognizer.enabled)}]);
+        }];
+    }];
+
     [router addRoute:@"GET" path:@"/api/class" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         unsigned long oid = [self oidFromString:request.query[@"oid"]];
         [self onMain:^{

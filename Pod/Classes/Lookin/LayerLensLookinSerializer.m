@@ -158,6 +158,7 @@
         }
         [result addObject:@{
             @"type": handler.handlerType == LayerLens_EventHandlerTypeGesture ? @"gesture" : @"targetAction",
+            @"oid": @(handler.recognizerOid),
             @"name": handler.eventName ?: @"",
             @"inherited": handler.inheritedRecognizerName ?: [NSNull null],
             @"enabled": @(handler.gestureRecognizerIsEnabled),

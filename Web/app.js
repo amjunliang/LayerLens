@@ -3442,9 +3442,28 @@ function showEventPop(node, anchor) {
       const box = el('input');
       box.type = 'checkbox';
       box.checked = !!event.enabled;
-      // 只读展示, 不用 disabled 以免变灰看不清
-      box.tabIndex = -1;
-      add('Enabled', box);
+      // 结果直接显示在开关旁边: 禁用时常驻"已禁用", 手势名划掉
+      const status = el('span', 'ev-state');
+      const toggle = el('span', 'ev-toggle');
+      toggle.append(status, box);
+      const sync = (message, isError) => {
+        item.classList.toggle('disabled', !event.enabled);
+        status.textContent = message || (event.enabled ? '' : t('已禁用'));
+        status.classList.toggle('error', !!isError);
+        status.classList.toggle('on', !isError && event.enabled);
+        status.classList.remove('flash');
+        void status.offsetWidth;
+        clearTimeout(status.timer);
+        if (message === undefined) return;
+        status.classList.add('flash');
+        // 结果显示一会儿后回到常驻状态
+        status.timer = setTimeout(() => sync(), isError ? 3000 : 1500);
+      };
+      sync();
+      // 旧版 Pod 不返回手势的 oid, 只读展示; 不用 disabled 以免变灰看不清
+      if (event.oid) box.addEventListener('change', () => setGestureEnabled(event, box, sync));
+      else box.classList.add('readonly');
+      add('Enabled', toggle);
       if (event.delegate) add('Delegate', event.delegate);
     }
     event.targetActions.forEach(([target, action]) => {
@@ -3463,6 +3482,23 @@ function showEventPop(node, anchor) {
   const y = Math.max(4, Math.min(rect.top - 6, window.innerHeight - h - 4));
   pop.style.left = x + 'px';
   pop.style.top = y + 'px';
+}
+
+async function setGestureEnabled(event, box, sync) {
+  try {
+    const result = await api('/api/gesture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ oid: event.oid, enabled: box.checked }),
+    });
+    event.enabled = !!result.enabled;
+    // 部分系统手势(如 _UISystemGestureGateGestureRecognizer)忽略修改
+    if (event.enabled !== box.checked) sync(t('系统不允许修改该手势'), true);
+    else sync(t(event.enabled ? '已启用' : '已禁用'));
+  } catch (e) {
+    sync(e.message, true);
+  }
+  box.checked = !!event.enabled;
 }
 
 function eventsCard(events) {
@@ -5448,6 +5484,8 @@ function showPaneTab(tab) {
   if (!open) toggleLogPanel();
 }
 
+const NET_RETRY_MS = 2000;
+
 async function netConnect() {
   netDisconnect();
   const key = logTargetKey();
@@ -5481,19 +5519,33 @@ async function netConnect() {
   };
   es.addEventListener('network', (e) => {
     const data = parse(e);
-    net.connecting = false;
+    // 连上时可能还没有请求, 也要重新渲染以去掉"正在连接"
+    if (net.connecting) {
+      net.connecting = false;
+      scheduleNetRender();
+    }
     // App 重启后序号从头开始, 上一次的请求内容已不在设备上
     if (data.instanceId && net.instanceId && data.instanceId !== net.instanceId) resetNet();
     if (data.instanceId) net.instanceId = data.instanceId;
     receiveNetRecords(data.records || []);
   });
   es.addEventListener('clear', () => resetNet());
-  // 断开后由浏览器自动重连; 期间 App 可能换成了旧版 Pod, 重新检查一次
+  // 断开后由浏览器自动重连; 期间 App 可能换成了旧版 Pod, 重新检查一次.
+  // 收到错误状态码(如 App 未运行时旧版 Mac App 返回 503)时浏览器不再重连, 稍后自己重新连接
   es.onerror = async () => {
-    if (token !== net.token || !(await netOutdated()) || token !== net.token) return;
-    netDisconnect();
-    net.unsupported = true;
-    scheduleNetRender();
+    if (token !== net.token) return;
+    if (await netOutdated()) {
+      if (token !== net.token) return;
+      netDisconnect();
+      net.unsupported = true;
+      scheduleNetRender();
+      return;
+    }
+    if (token === net.token && es.readyState === EventSource.CLOSED) {
+      setTimeout(() => {
+        if (token === net.token && net.active) netConnect();
+      }, NET_RETRY_MS);
+    }
   };
   net.es = es;
 }

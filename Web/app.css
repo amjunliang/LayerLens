@@ -426,7 +426,15 @@ body.log-open .splitter[data-split="s4"] { display: block; }
 .ev-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 24px; margin-top: 8px; }
 .ev-kv > span:nth-child(odd) { color: var(--muted); }
 .ev-kv .ev-value { text-align: right; font-family: var(--mono); word-break: break-all; }
-.ev-kv input { justify-self: end; margin: 0; pointer-events: none; accent-color: var(--accent); }
+.ev-kv input { justify-self: end; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.ev-kv input.readonly { pointer-events: none; }
+.ev-toggle { justify-self: end; display: inline-flex; align-items: center; gap: 8px; }
+.ev-state { color: var(--danger); font-size: 12px; border-radius: 4px; padding: 0 4px; }
+.ev-state:empty { display: none; }
+.ev-state.on { color: var(--accent); }
+.ev-state.flash { animation: ev-flash 0.8s ease-out; }
+@keyframes ev-flash { from { background: color-mix(in srgb, currentColor 25%, transparent); } to { background: transparent; } }
+.ev-item.disabled .ev-name { color: var(--muted); text-decoration: line-through; }
 .row .vc-dot { width: 7px; height: 7px; margin-right: 5px; flex: none; border-radius: 50%; background: var(--vc); }
 .row .vc { margin-left: 6px; flex: none; color: var(--vc); }
 .row mark { background: #ffd54a; color: #000; border-radius: 2px; }
