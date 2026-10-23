@@ -102,13 +102,18 @@ function icon(name) {
 
 // MARK: - Copy
 
+// 自上而下的 Markdown 嵌套列表, 与复制元素信息格式一致
 function nodePath(node) {
   const parts = [];
   for (let n = node; n; n = n.parent) {
     const ivar = n.ivarTraces[0] ? n.ivarTraces[0].split('.').pop() : '';
-    parts.unshift(ivar ? `${n.cls}(${ivar})` : n.cls);
+    parts.unshift(ivar ? `${n.cls} (${ivar})` : n.cls);
   }
-  return parts.join(' > ');
+  return markdownTree(parts);
+}
+
+function markdownTree(parts) {
+  return parts.map((part, depth) => `${'  '.repeat(depth)}- ${part}`).join('\n');
 }
 
 function lldbCommand(node) {
@@ -148,11 +153,28 @@ function nearestView(node) {
   return p;
 }
 
-// 从元素向上定位, 省略成员变量持有者和系统容器; 控制器跳过导航和列表等容器
+const ELEMENT_TEXT_MAX = 40;
+
+// 元素自身一行: 成员变量名加类型, 有文字时附上(换行替换为空格, 过长截断), 便于搜索源码定位;
+// 没有声明在业务类中的成员变量时退回系统类的, 如 _UISystemBackgroundView._colorView
+function elementLine(node, ivars) {
+  const names = ivars.length ? ivars.map((r) => r.text) : [...new Set(node.ivarTraces.map((trace) => {
+    const dot = trace.lastIndexOf('.');
+    const [host, declaring = host] = trace.slice(0, dot).split(' : ');
+    return `${declaring}.${trace.slice(dot + 1)}`;
+  }))];
+  let line = names.length ? `${names.join(' and ')} (${node.cls})` : node.cls;
+  const text = String(node.text ?? '').replace(/\s+/g, ' ').trim();
+  if (text) line += ` "${text.length > ELEMENT_TEXT_MAX ? text.slice(0, ELEMENT_TEXT_MAX) + '…' : text}"`;
+  return line;
+}
+
+// 从元素向上定位, 省略成员变量持有者和系统容器; 控制器跳过导航和列表等容器.
+// 输出为自上而下的 Markdown 嵌套列表, 人和 AI 都能直接看出层级
 function elementSummary(node) {
   const ivars = codeIvars(node);
   const ownerClasses = new Set(ivars.flatMap((r) => [r.host, r.declaring]));
-  const parts = [ivars.length ? ivars.map((r) => r.text).join(' and ') : node.cls];
+  const parts = [elementLine(node, ivars)];
   let controller = '';
   for (let p = node; p; p = p.parent) {
     if (isCodeClass(p.vcClass) && !CONTAINER_CONTROLLER.test(p.vcClass)) {
@@ -169,14 +191,14 @@ function elementSummary(node) {
     }
   }
   if (controller && !parts.includes(controller)) parts.push(controller);
-  return parts.join(' < ');
+  return markdownTree(parts.reverse());
 }
 
 // more 为 true 的收进右键菜单的"更多复制"子菜单
 const COPY_ACTIONS = [
+  { title: '复制元素信息', value: elementSummary },
   { title: '复制类名', value: (n) => n.cls },
   { title: '复制层级路径', value: nodePath },
-  { title: '复制元素信息', value: elementSummary },
   { title: '复制成员变量名', value: (n) => [...new Set(n.ivarTraces.map((trace) => trace.split('.').pop()).filter(Boolean))].join('\n'), more: true },
   { title: '复制对象地址', value: (n) => n.address, more: true },
   { title: '复制 LLDB 命令', value: lldbCommand, more: true },
@@ -227,9 +249,9 @@ function liveCanvasPNG() {
   });
 }
 
-// 屏幕截图(画布右键菜单): 实时模式取当前画面, 2D/3D 取当前窗口的 App 截图
+// 屏幕截图(画布右键菜单): 实时模式取模拟器原始分辨率截图(画面按显示尺寸缩小编码), 取不到时用当前画面; 2D/3D 取当前窗口的 App 截图
 function screenShotPNG() {
-  if (state.mode === 'live') return liveCanvasPNG();
+  if (state.mode === 'live') return fetchPNG(`/sim/${encodeURIComponent(live.udid)}/screenshot`).catch(liveCanvasPNG);
   const win = currentWindow();
   return win ? fetchPNG(shotURL(win.oid, 'group')) : Promise.reject(new Error(t('暂无画面')));
 }

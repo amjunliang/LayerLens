@@ -294,7 +294,7 @@ final class HubServer {
         }
     }
 
-    /// /sim/<UDID>/stream 为内置实时画面的 WebSocket, /sim/<UDID>/info 返回屏幕尺寸
+    /// /sim/<UDID>/stream 为内置实时画面的 WebSocket, /sim/<UDID>/info 返回屏幕尺寸, /sim/<UDID>/screenshot 返回原始分辨率截图
     private func handleSimulator(_ head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
         let parts = head.path.split(separator: "/").map(String.init)
         // heal 会重启模拟器进程, 只接受 POST
@@ -313,6 +313,13 @@ final class HubServer {
             }
         case "stream":
             live.accept(udid: udid, head: head, leftover: leftover, connection: connection)
+        case "screenshot":
+            workQueue.async { [self] in
+                let png = live.screenshot(udid: udid)
+                queue.async {
+                    connection.respond(png.map { HTTPResponse(status: 200, contentType: "image/png", body: $0, headers: ["Cache-Control": "no-store"]) } ?? .error(404, "Simulator not available"))
+                }
+            }
         case "info":
             workQueue.async { [self] in
                 let info = live.info(udid: udid)

@@ -10,7 +10,7 @@ import Foundation
 import Network
 
 /// App 日志: 每个运行中的 App 保持一条到 /api/logs 的事件流, 收到的日志写入
-/// ~/Library/Logs/LayerLens/Apps/<Bundle ID>/, 并在内存保留最近的部分转发给打开了日志面板的网页.
+/// ~/Library/Logs/LayerLens/Apps/<Bundle ID>/(App 每次启动一个文件, LayerLens 重启后续写原文件), 并在内存保留最近的部分转发给打开了日志面板的网页.
 /// 没有网页订阅时只记录不转发. 所有状态只在 queue 上读写
 final class AppLogRecorder {
     static let memoryLimit = 50_000
@@ -20,6 +20,9 @@ final class AppLogRecorder {
     /// App 每 15 秒发一次心跳, 超过这个时间没有数据视为连接已失效(如锁屏期间被系统回收)
     static let staleInterval: TimeInterval = 40
     static let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/LayerLens/Apps")
+    /// 记在日志文件扩展属性上: 所属的 App 进程和已写入的最大序号, LayerLens 重启后据此找回文件续写
+    static let instanceAttribute = "com.layerlens.instance"
+    static let seqAttribute = "com.layerlens.seq"
 
     struct Entry {
         let id: Int
@@ -50,6 +53,8 @@ final class AppLogRecorder {
         var unsupported: Set<String> = []
         var file: FileHandle?
         var fileURL: URL?
+        /// 已写入文件的最大序号, LayerLens 重启后 App 会重发内存中的日志, 已写过的不再写入
+        var fileSeq: UInt64 = 0
         var subscribers: [ObjectIdentifier: NWConnection] = [:]
 
         init(deviceId: String, bundleId: String) {
@@ -224,22 +229,37 @@ final class AppLogRecorder {
             let restarted = !source.instanceId.isEmpty
             source.instanceId = instanceId
             source.lastSeq = 0
+            source.fileSeq = 0
             source.file?.closeFile()
             source.file = nil
+            if !restarted {
+                resumeFile(source)
+            }
             if restarted {
                 append([Entry(id: source.nextId, time: Date().timeIntervalSince1970 * 1000, text: "", kind: "restart")], to: source)
                 source.nextId += 1
             }
         }
         var added: [Entry] = []
+        var unwritten: [Entry] = []
         for item in json["entries"] as? [[String: Any]] ?? [] {
             guard let seq = (item["s"] as? NSNumber)?.uint64Value, seq > source.lastSeq else { continue }
             source.lastSeq = seq
-            added.append(Entry(id: source.nextId, time: (item["t"] as? NSNumber)?.doubleValue ?? 0, text: item["m"] as? String ?? ""))
+            let entry = Entry(id: source.nextId, time: (item["t"] as? NSNumber)?.doubleValue ?? 0, text: item["m"] as? String ?? "")
+            added.append(entry)
+            if seq > source.fileSeq {
+                unwritten.append(entry)
+            }
             source.nextId += 1
         }
         guard !added.isEmpty else { return }
-        write(added, source: source)
+        if !unwritten.isEmpty {
+            write(unwritten, source: source)
+            source.fileSeq = source.lastSeq
+            if let url = source.fileURL {
+                Self.setAttribute(Self.seqAttribute, String(source.fileSeq), of: url)
+            }
+        }
         append(added, to: source)
     }
 
@@ -263,10 +283,36 @@ final class AppLogRecorder {
             FileManager.default.createFile(atPath: url.path, contents: nil)
             source.file = try? FileHandle(forWritingTo: url)
             source.fileURL = url
+            Self.setAttribute(Self.instanceAttribute, source.instanceId, of: url)
             Self.removeOldFiles(in: folder)
         }
         let text = entries.map { "[\(timeFormatter.string(from: Date(timeIntervalSince1970: $0.time / 1000)))] \($0.text)\n" }.joined()
         try? source.file?.write(contentsOf: Data(text.utf8))
+    }
+
+    /// LayerLens 重启后找回同一次 App 运行的文件接着写
+    private func resumeFile(_ source: Source) {
+        let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        guard let url = files.first(where: { $0.pathExtension == "log" && Self.attribute(Self.instanceAttribute, of: $0) == source.instanceId }),
+              let file = try? FileHandle(forWritingTo: url) else { return }
+        _ = try? file.seekToEnd()
+        source.file = file
+        source.fileURL = url
+        source.fileSeq = UInt64(Self.attribute(Self.seqAttribute, of: url) ?? "") ?? 0
+    }
+
+    private static func attribute(_ name: String, of url: URL) -> String? {
+        let length = getxattr(url.path, name, nil, 0, 0, 0)
+        guard length > 0 else { return nil }
+        var data = Data(count: length)
+        let read = data.withUnsafeMutableBytes { getxattr(url.path, name, $0.baseAddress, length, 0, 0) }
+        return read == length ? String(decoding: data, as: UTF8.self) : nil
+    }
+
+    private static func setAttribute(_ name: String, _ value: String, of url: URL) {
+        let data = Data(value.utf8)
+        _ = data.withUnsafeBytes { setxattr(url.path, name, $0.baseAddress, data.count, 0, 0) }
     }
 
     private static func sanitize(_ name: String) -> String {

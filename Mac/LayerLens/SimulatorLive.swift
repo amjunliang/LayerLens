@@ -6,7 +6,8 @@
 //  Copyright © 2026 YueYou. Released under the MIT License.
 //
 
-import Foundation
+import AppKit
+import CoreImage
 import IOSurface
 
 /// 模拟器实时画面: 屏幕帧编码为 H.264 经 WebSocket 推给网页, 网页的触摸与按键消息注入模拟器
@@ -26,6 +27,17 @@ final class SimulatorLive {
         let scale = SimBridge.screenScale(device)
         guard let screen = SimScreen(device: device, queue: .global()), let surface = screen.surface() else { return nil }
         return ["screen": ["width": Double(IOSurfaceGetWidth(surface)) / scale, "height": Double(IOSurfaceGetHeight(surface)) / scale, "scale": scale]]
+    }
+
+    private static let imageContext = CIContext()
+
+    /// 当前屏幕原始分辨率的 PNG; 实时画面按显示尺寸缩小编码, 复制截图不能直接取网页画布
+    func screenshot(udid: String) -> Data? {
+        guard let device = SimBridge.device(udid: udid),
+              let screen = SimScreen(device: device, queue: .global()), let surface = screen.surface() else { return nil }
+        let image = CIImage(ioSurface: surface)
+        guard let cgImage = Self.imageContext.createCGImage(image, from: image.extent) else { return nil }
+        return NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
     }
 
     /// 修复触摸注入: 模拟器重新启动后 backboardd 偶尔不再接收注入的事件, 重启它即可恢复.
