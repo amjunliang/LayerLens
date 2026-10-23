@@ -3,6 +3,8 @@
 // 改动面板: 当前 App 源码所在 git 仓库的未提交改动, 可暂存、放弃、提交、拉取和推送, 可查看提交记录的改动.
 // 仓库由 Mac App 根据 App 上报的源文件路径推断. 只在页签可见时连接事件流, Mac App 此时才监听仓库文件变化并执行 git
 const GIT_RETRY_MS = 2000;
+// 页签隐藏后保持连接的时间, 期间切回来无需重新读取
+const GIT_IDLE_MS = 60000;
 const GIT_DIFF_MAX_LINES = 20000;
 // 多选文件时最多显示的 diff 数, 每次状态变化都要重新读取
 const GIT_DIFF_MAX_FILES = 30;
@@ -123,12 +125,14 @@ function gitVisible() {
   return logVisible() && net.tab === 'git';
 }
 
-// 面板显示状态或页签变化时调用
+// 面板显示状态或页签变化时调用. 隐藏后保留页面状态并延迟断开: 短时间内切回来直接显示,
+// 事件流仍在时状态已是最新; 已断开时先显示上次的内容, 重新连接后由状态推送更新
 function syncGitPanel() {
   const visible = gitVisible();
   if (visible && !git.active) {
     git.active = true;
-    gitConnect();
+    clearTimeout(git.idleTimer);
+    if (!git.es || git.es.readyState === EventSource.CLOSED || (targets.bundleId || '') !== git.key) gitConnect();
     // 同一窗口切换 App 时重新连接
     git.timer = setInterval(() => {
       if ((targets.bundleId || '') !== git.key) gitConnect();
@@ -136,7 +140,8 @@ function syncGitPanel() {
   } else if (!visible && git.active) {
     git.active = false;
     clearInterval(git.timer);
-    gitDisconnect();
+    clearTimeout(git.idleTimer);
+    git.idleTimer = setTimeout(gitDisconnect, GIT_IDLE_MS);
   }
 }
 
@@ -147,7 +152,13 @@ function gitDisconnect() {
 
 async function gitConnect() {
   gitDisconnect();
-  const key = (git.key = targets.bundleId || '');
+  const key = targets.bundleId || '';
+  // 同一个 App 重新连接时保留列表、选中和 diff, 只重新订阅状态
+  if (key && key === git.key && git.repo && git.status) {
+    gitSubscribe(key);
+    return;
+  }
+  git.key = key;
   git.repo = null;
   git.status = null;
   git.statusText = '';
@@ -170,6 +181,10 @@ async function gitConnect() {
   }
   git.repo = repo;
   gitRender();
+  gitSubscribe(key);
+}
+
+function gitSubscribe(key) {
   const es = new EventSource(`/api/hub/git/events?app=${encodeURIComponent(key)}`);
   git.es = es;
   es.addEventListener('status', (e) => {

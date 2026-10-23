@@ -26,6 +26,7 @@ final class HubServer {
     private let live = SimulatorLive()
     private let appLogs = AppLogRecorder()
     private let git = GitController()
+    let terminal = TerminalController()
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     private let webRoot: URL
@@ -104,6 +105,10 @@ final class HubServer {
         }
         if head.path.hasPrefix("/api/hub/git/") {
             handleGit(head, body: leftover, connection: connection)
+            return
+        }
+        if head.path.hasPrefix("/api/hub/term/") {
+            handleTerminal(head, body: leftover, connection: connection)
             return
         }
         if head.method == "POST" {
@@ -300,6 +305,59 @@ final class HubServer {
         default:
             connection.respond(.error(404, "Not Found"))
         }
+    }
+
+    /// 集成终端: events 为会话列表事件流, create 在 App 的仓库根目录(不在仓库时为源文件目录)新建会话, <id>/ws 为会话的 WebSocket
+    private func handleTerminal(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
+        let parts = head.path.dropFirst("/api/hub/term/".count).split(separator: "/").map(String.init)
+        let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        switch (head.method, parts.first ?? "", parts.count) {
+        case ("GET", "events", 1):
+            terminal.subscribe(connection: connection.detach())
+        case ("GET", let id, 2) where parts[1] == "ws":
+            terminal.accept(id: id, head: head, leftover: body, connection: connection)
+        case ("GET", "info", 1):
+            // 空状态展示将要打开的位置: 项目名、路径, 是 git 仓库时附带当前分支
+            let sourceFile = registry.sourceFile(bundleId: head.query["app"] ?? "")
+            workQueue.async { [self] in
+                guard let root = terminalRoot(sourceFile: sourceFile) else {
+                    connection.respond(.json(["error": "noSource", "reason": "noSource"], status: 404))
+                    return
+                }
+                var info: [String: Any] = ["root": root, "name": (root as NSString).lastPathComponent, "home": NSHomeDirectory()]
+                if git.repository(sourceFile: sourceFile) != nil {
+                    let branch = GitController.run(root, ["rev-parse", "--abbrev-ref", "HEAD"], timeout: 5, readOnly: true)
+                    if branch.ok { info["branch"] = branch.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                }
+                connection.respond(.json(info))
+            }
+        case ("POST", "create", 1):
+            let bundleId = json["app"] as? String ?? ""
+            let sourceFile = registry.sourceFile(bundleId: bundleId)
+            workQueue.async { [self] in
+                guard let root = terminalRoot(sourceFile: sourceFile) else {
+                    connection.respond(.json(["error": "noSource", "reason": "noSource"], status: 404))
+                    return
+                }
+                if let id = terminal.create(root: root, app: bundleId) {
+                    connection.respond(.json(["id": id]))
+                } else {
+                    connection.respond(.json(["error": "Failed to start shell"], status: 500))
+                }
+            }
+        case ("POST", "close", 1):
+            let ok = terminal.close(id: json["id"] as? String ?? "")
+            connection.respond(.json(ok ? ["ok": true] : ["error": "Session not found"], status: ok ? 200 : 404))
+        default:
+            connection.respond(.error(404, "Not Found"))
+        }
+    }
+
+    /// 终端的工作目录: App 源码所在仓库的根目录, 不在仓库中时为源文件所在目录
+    private func terminalRoot(sourceFile: String) -> String? {
+        if let root = git.repository(sourceFile: sourceFile) { return root }
+        let directory = (sourceFile as NSString).deletingLastPathComponent
+        return sourceFile.isEmpty || !FileManager.default.fileExists(atPath: directory) ? nil : directory
     }
 
     /// 改动面板: /api/hub/git/<操作>?app=<Bundle ID>. 仓库由该 App 上报的源文件路径推断, 找不到时返回 reason 供网页提示

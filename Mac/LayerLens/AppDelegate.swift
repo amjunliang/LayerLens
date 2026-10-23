@@ -42,6 +42,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// 有终端会话时提醒: 退出会结束所有终端
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let summary = server.terminal.summary()
+        guard summary.total > 0 else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = L("退出 LayerLens 会结束所有终端", "Quitting LayerLens ends all terminals")
+        alert.informativeText = summary.busy > 0
+            ? L("有 \(summary.total) 个终端会话, 其中 \(summary.busy) 个正在运行命令.", "\(summary.total) terminal sessions, \(summary.busy) running a command.")
+            : L("有 \(summary.total) 个终端会话.", "\(summary.total) terminal sessions.")
+        alert.addButton(withTitle: L("退出", "Quit"))
+        alert.addButton(withTitle: L("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        server.terminal.terminateAll()
+        return .terminateNow
+    }
+
     /// 关闭窗口后继续在菜单栏运行, 浏览器仍可访问
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false

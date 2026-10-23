@@ -931,7 +931,7 @@ body.log-open .log-pane { display: flex; }
 .pane-tabs { flex: none; margin-right: 6px; }
 .pane-tabs button { padding: 2px 12px; font-size: 13px; }
 .pane-tabs button.active { font-weight: 600; }
-.log-pane[data-tab="net"] .log-only, .log-pane[data-tab="git"] .log-only, .log-pane:not([data-tab="net"]) .net-only, .log-pane:not([data-tab="git"]) .git-only { display: none !important; }
+.log-pane[data-tab="net"] .log-only, .log-pane[data-tab="git"] .log-only, .log-pane[data-tab="term"] .log-only, .log-pane:not([data-tab="net"]) .net-only, .log-pane:not([data-tab="git"]) .git-only, .log-pane:not([data-tab="term"]) .term-only { display: none !important; }
 .net-type { flex: none; max-width: 90px; margin-right: 4px; font-size: 13px; }
 .log-head .icon-btn:disabled { opacity: 0.4; }
 .net-body { flex: 1; min-height: 0; display: flex; position: relative; }
@@ -1246,3 +1246,41 @@ body.log-open .log-pane { display: flex; }
 /* 可撤回但需确认的菜单项: 确认状态强调色底, 下方显示影响说明 */
 .menu-item.notice.confirm:not(:disabled) { background: var(--accent); color: #fff; }
 .menu-hint { display: block; max-width: 260px; margin-top: 2px; font-size: 12px; line-height: 16px; white-space: normal; opacity: 0.85; }
+/* 终端: 头部是会话标签, 下方是 xterm; 会话数显示在页签和顶栏按钮上, 有命令在运行时为强调色 */
+.tab-badge { display: inline-block; min-width: 15px; height: 15px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: color-mix(in srgb, var(--text) 16%, transparent); color: var(--text); font-size: 10px; font-weight: 600; line-height: 15px; text-align: center; vertical-align: 1px; }
+.tab-badge[hidden] { display: none; }
+.tab-badge.busy { background: var(--accent); color: #fff; }
+#logToggle { position: relative; }
+.toggle-badge { position: absolute; top: -3px; right: -5px; margin: 0; min-width: 14px; height: 14px; padding: 0 3px; font-size: 9px; line-height: 14px; pointer-events: none; }
+.term-tabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.term-tabs::-webkit-scrollbar { display: none; }
+.term-tab { flex: none; display: flex; align-items: center; gap: 5px; max-width: 240px; height: 22px; padding: 0 3px 0 8px; border-radius: 5px; color: var(--text-2); font-size: 12px; cursor: default; }
+.term-tab:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.term-tab.active { background: color-mix(in srgb, var(--text) 11%, transparent); color: var(--text); }
+.term-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: color-mix(in srgb, var(--text) 30%, transparent); }
+.term-tab.busy .term-dot { background: var(--accent); animation: term-pulse 1.2s ease-in-out infinite; }
+.term-tab.exited .term-dot { background: transparent; box-shadow: inset 0 0 0 1px var(--muted); }
+@keyframes term-pulse { 50% { opacity: 0.35; } }
+.term-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.term-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.term-tab.exited .term-name { color: var(--muted); }
+.term-close { flex: none; display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; border: none; border-radius: 4px; background: none; color: inherit; opacity: 0.55; }
+.term-close .icon { width: 11px; height: 11px; }
+.term-close:hover { opacity: 1; background: color-mix(in srgb, var(--text) 12%, transparent); }
+.term-close.confirm { width: auto; padding: 0 6px; background: var(--danger); color: #fff; opacity: 1; font-size: 11px; }
+.term-body { flex: 1; min-height: 0; display: flex; background: var(--panel); }
+.term-views { flex: 1; min-width: 0; position: relative; padding: 6px 0 2px 10px; }
+.term-views[hidden], .term-view[hidden], .term-empty[hidden] { display: none; }
+.term-view { height: 100%; }
+.term-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 12px 16px; color: var(--muted); font-size: 12px; text-align: center; }
+/* 将要打开的项目: 名称、路径、分支, 让用户确认终端会开在哪里 */
+.term-project { display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: 100%; }
+.term-project[hidden], .term-project-branch[hidden], .term-project-note[hidden] { display: none; }
+.term-project-name { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 15px; font-weight: 600; }
+.term-project-name .icon { width: 18px; height: 18px; fill: #6ec6ff; stroke: none; }
+.term-project-path { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-family: var(--mono); font-size: 12px; }
+.term-project-branch { display: flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-family: var(--mono); font-size: 12px; }
+.term-project-branch .icon { width: 12px; height: 12px; }
+.term-project-note { max-width: 420px; color: var(--text-2); }
+.term-empty-hint { font-size: 11px; }
+.term-size { flex: none; font-size: 12px; color: var(--text-2); }

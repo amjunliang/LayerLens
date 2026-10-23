@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5253D097907328635F744583 /* TerminalController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EE90C3A2EDC26546E9AE324 /* TerminalController.swift */; };
 		0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */; };
 		13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */; };
 		17193F2776181150A07D780F /* PageZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */; };
@@ -51,6 +52,7 @@
 		952DDBAAEE608BB432BB2E87 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		97DC8C75223B44DCC6264C99 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Web; path = ../Web; sourceTree = SOURCE_ROOT; };
 		A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageZoom.swift; sourceTree = "<group>"; };
+		7EE90C3A2EDC26546E9AE324 /* TerminalController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalController.swift; sourceTree = "<group>"; };
 		A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketConnection.swift; sourceTree = "<group>"; };
 		B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubServer.swift; sourceTree = "<group>"; };
 		BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
@@ -105,6 +107,7 @@
 				835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */,
 				C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */,
 				018BD14CAF3AA5013A6E67EA /* Usbmux.swift */,
+				7EE90C3A2EDC26546E9AE324 /* TerminalController.swift */,
 				A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */,
 				7BD19405B2FDC9FD18D3B5DF /* WindowFrameStore.swift */,
 				8BEB09D7814382476662F06E /* XcodeController.swift */,
@@ -209,6 +212,7 @@
 				89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */,
 				8CCD018F71C87A6C6F8B962C /* TargetRegistry.swift in Sources */,
 				5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */,
+				5253D097907328635F744583 /* TerminalController.swift in Sources */,
 				0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */,
 				217C92BE894BC97978F9F94C /* WindowFrameStore.swift in Sources */,
 				5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */,

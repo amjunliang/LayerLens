@@ -3746,6 +3746,9 @@ function handleViewKey(key) {
     case 'g':
       showPaneTab('git');
       return true;
+    case '`':
+      showPaneTab('term');
+      return true;
     case '[':
     case ']':
       if (!three) return false;
@@ -3933,6 +3936,7 @@ const SHORTCUT_GROUPS = [
     [['L'], '显示 / 隐藏日志面板'],
     [['N'], '显示 / 隐藏网络面板'],
     [['G'], '显示 / 隐藏改动面板'],
+    [['`'], '显示 / 隐藏终端'],
     [['⌘', 'F'], '在当前区域查找: 层级树, 日志, 网络列表或请求详情'],
     [['?'], '显示此面板'],
   ]],
@@ -3957,6 +3961,10 @@ const SHORTCUT_GROUPS = [
     [['空格'], '暂存 / 取消暂存选中文件'],
     [['双击'], '打开文件'],
     [['⌘', '↩'], '提交'],
+  ]],
+  ['终端', false, [
+    [['⌘', 'K'], '清屏'],
+    [['中键点击'], '关闭标签'],
   ]],
   ['3D', false, [
     [['拖动'], '旋转'],
@@ -5296,13 +5304,14 @@ function setupLogsWindow() {
   setupLogs();
   setupNetwork();
   setupGit();
+  setupTerminal();
   setPaneTab(params.get('tab'));
   setupPanels();
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest('.popover-anchor')) hidePopovers();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || (e.target instanceof Element && e.target.closest('.xterm'))) return;
     hidePopovers();
     closePanel();
   });
@@ -5504,6 +5513,7 @@ function syncNetPanel() {
   $('logPane').classList.toggle('net', net.tab === 'net');
   $('logPane').dataset.tab = net.tab;
   syncGitPanel();
+  syncTermPanel();
   $('paneTabs').querySelectorAll('button').forEach((button) => button.classList.toggle('active', button.dataset.pane === net.tab));
   const visible = netVisible();
   if (visible && !net.active) {
@@ -5522,13 +5532,13 @@ function syncNetPanel() {
 }
 
 function setPaneTab(tab) {
-  net.tab = tab === 'net' || tab === 'git' ? tab : 'log';
+  net.tab = tab === 'net' || tab === 'git' || tab === 'term' ? tab : 'log';
   try {
     localStorage.setItem(NET_TAB_KEY, net.tab);
   } catch (e) {
     // ignore
   }
-  if (logs.window) document.title = `${targets.bundleId || 'LayerLens'} · ${t({ net: '网络', git: '改动' }[net.tab] || '日志')}`;
+  if (logs.window) document.title = `${targets.bundleId || 'LayerLens'} · ${t({ net: '网络', git: '改动', term: '终端' }[net.tab] || '日志')}`;
   syncNetPanel();
   if (net.tab === 'log') scheduleLogRender();
 }
@@ -6544,7 +6554,7 @@ function setNetDetailWidth(width, save) {
 function setupNetwork() {
   try {
     const tab = localStorage.getItem(NET_TAB_KEY);
-    net.tab = tab === 'net' || tab === 'git' ? tab : 'log';
+    net.tab = tab === 'net' || tab === 'git' || tab === 'term' ? tab : 'log';
     const width = Number(localStorage.getItem(NET_DETAIL_W_KEY));
     if (width) $('netBody').style.setProperty('--net-detail-w', width + 'px');
   } catch (e) {
@@ -6842,6 +6852,8 @@ function setup() {
     }
   });
   document.addEventListener('keydown', (e) => {
+    // 终端中的按键全部交给 shell, 如 vim 的 Esc
+    if (e.target instanceof Element && e.target.closest('.xterm')) return;
     if (e.key === 'Escape') {
       if (document.body.classList.contains('log-max') && $('modal').hidden) setLogMax(false);
       setColorPicker(false);
@@ -6891,6 +6903,7 @@ function setup() {
   setupLogs();
   setupNetwork();
   setupGit();
+  setupTerminal();
   setupLayout();
 
   applyTheme(loadTheme(), false);

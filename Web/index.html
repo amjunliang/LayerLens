@@ -6,6 +6,7 @@
 <title>LayerLens</title>
 <link rel="icon" type="image/png" href="/assets/icon.png">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/xterm.css">
 <link rel="stylesheet" href="/assets/app.css">
 <script>
   // 首次绘制前应用保存的主题, 避免先显示默认主题再切换
@@ -52,6 +53,7 @@
     <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
     <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M10 14l-7 7M14 10l7-7"/></symbol>
     <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l1.2-4.6L15.6 5a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 4.5-4 6-11 8.2"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></symbol>
     <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
     <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h13M13 7l5 5-5 5"/></symbol>
@@ -90,7 +92,7 @@
       <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
     </div>
     <button class="icon-btn" id="sandboxBtn" title="沙盒文件" aria-label="沙盒文件"><svg class="icon"><use href="#i-folder"/></svg></button>
-    <button class="icon-btn toggle" id="logToggle" title="日志与网络面板 (L / N)" aria-label="日志与网络面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg></button>
+    <button class="icon-btn toggle" id="logToggle" title="日志与网络面板 (L / N)" aria-label="日志与网络面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg><span class="tab-badge toggle-badge" id="termToggleCount" hidden></span></button>
     <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
 </header>
@@ -186,6 +188,7 @@
         <button data-pane="log" class="active">日志</button>
         <button data-pane="net">网络</button>
         <button data-pane="git">改动</button>
+        <button data-pane="term">终端<span class="tab-badge" id="termCount" hidden></span></button>
       </div>
       <label class="search-box log-search log-only" id="logSearch">
         <svg class="icon"><use href="#i-search"/></svg>
@@ -222,6 +225,9 @@
       <button class="icon-btn git-only" id="gitTreeMode" title="树形显示" aria-label="树形显示"><svg class="icon"><use href="#i-tree"/></svg></button>
       <button class="icon-btn git-only" id="gitPull" title="拉取 (仅快进)" aria-label="拉取"><svg class="icon"><use href="#i-download"/></svg></button>
       <button class="icon-btn git-only" id="gitPush" title="推送" aria-label="推送"><svg class="icon"><use href="#i-upload"/></svg></button>
+      <div class="term-tabs term-only" id="termTabs"></div>
+      <span class="log-size term-size term-only" id="termSize"><button id="termSizeDown" title="减小字号" aria-label="减小字号">−</button><span id="termSizeLabel">12</span><button id="termSizeUp" title="增大字号" aria-label="增大字号">+</button></span>
+      <button class="icon-btn term-only" id="termNew" title="新建终端" aria-label="新建终端"><svg class="icon"><use href="#i-plus"/></svg></button>
       <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
       <button class="icon-btn" id="logPopout" title="在独立窗口打开" aria-label="在独立窗口打开"><svg class="icon"><use href="#i-external"/></svg></button>
       <button class="icon-btn" id="logDock" title="停靠回主窗口" aria-label="停靠回主窗口"><svg class="icon"><use href="#i-dock"/></svg></button>
@@ -281,6 +287,19 @@
       <div class="net-splitter git-splitter" id="gitSplitter"></div>
       <div class="git-diff" id="gitDiff"></div>
       <div class="log-empty" id="gitEmpty" hidden></div>
+    </div>
+    <div class="term-body term-only" id="termBody">
+      <div class="term-views" id="termViews"></div>
+      <div class="term-empty" id="termEmpty">
+        <div class="term-project" id="termProject" hidden>
+          <div class="term-project-name"><svg class="icon"><use href="#i-folder"/></svg><span id="termProjectName"></span></div>
+          <div class="term-project-path" id="termProjectPath"></div>
+          <div class="term-project-branch" id="termProjectBranch" hidden><svg class="icon"><use href="#i-branch"/></svg><span id="termProjectBranchName"></span></div>
+        </div>
+        <div class="term-project-note" id="termProjectNote" hidden></div>
+        <button class="primary" id="termOpen">打开终端</button>
+        <span class="term-empty-hint">LayerLens 退出时会结束所有终端</span>
+      </div>
     </div>
   </section>
 
@@ -348,6 +367,9 @@
 <script src="/assets/git-graph.js"></script>
 <script src="/assets/git.js"></script>
 <script src="/assets/git-menu.js"></script>
+<script src="/assets/xterm.js"></script>
+<script src="/assets/xterm-addon-fit.js"></script>
+<script src="/assets/terminal.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>
