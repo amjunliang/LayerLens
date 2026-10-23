@@ -1501,8 +1501,6 @@ const live = {
   screen: [0, 0],
   ws: null,
   decoder: null,
-  pending: null,
-  raf: 0,
   retryTimer: 0,
   connected: false,
   inspect: false,
@@ -1578,6 +1576,7 @@ function liveStart() {
   ws.onopen = () => {
     live.connected = true;
     $('liveGuide').hidden = true;
+    liveReportSize(true);
     if (live.restartOnOpen) {
       live.restartOnOpen = false;
       liveSend({ type: 'restart' });
@@ -1611,7 +1610,6 @@ function liveStart() {
     showLiveGuide(wasConnected ? t('实时画面连接已断开') : '');
     live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
-  if (!live.raf) live.raf = requestAnimationFrame(paintLive);
 }
 
 function liveStop() {
@@ -1633,10 +1631,6 @@ function liveStop() {
     }
     live.decoder = null;
   }
-  if (live.pending && live.pending.close) live.pending.close();
-  live.pending = null;
-  cancelAnimationFrame(live.raf);
-  live.raf = 0;
   live.connected = false;
   live.touch = null;
 }
@@ -1655,10 +1649,7 @@ function showLiveGuide(title) {
 function feedLiveFrame(buf) {
   const type = buf[0];
   const payload = buf.slice(1);
-  const onFrame = (frame) => {
-    if (live.pending && live.pending.close) live.pending.close();
-    live.pending = frame;
-  };
+  const onFrame = (frame) => paintLive(frame);
   if (type === 0x01) {
     if (live.decoder) live.decoder.close();
     live.decoder = new VideoDecoder({ output: onFrame, error: (e) => console.warn('live decoder:', e.message) });
@@ -1682,12 +1673,12 @@ function feedLiveFrame(buf) {
   }
 }
 
-// 每次刷新只绘制最新一帧, 旧帧直接丢弃, 延迟不会累积
-function paintLive() {
-  live.raf = requestAnimationFrame(paintLive);
-  const frame = live.pending;
-  if (!frame) return;
-  live.pending = null;
+// 解码出一帧立即绘制, 不等动画帧回调(否则平均多等半帧); 绘制只需零点几毫秒, 同一刷新周期内多画几次也无妨
+function paintLive(frame) {
+  if (!live.ws) {
+    if (frame.close) frame.close();
+    return;
+  }
   const canvas = $('liveCanvas');
   const w = frame.displayWidth || frame.width;
   const h = frame.displayHeight || frame.height;
@@ -1713,6 +1704,7 @@ function layoutLive() {
   canvas.style.height = sh * scale + 'px';
   canvas.style.borderRadius = LIVE_CORNER * scale + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
+  if (live.connected) liveReportSize();
 }
 
 // 触摸失效检测: 明显的拖动后画面一帧都没变化, 连续多次即提示修复.
@@ -2244,13 +2236,17 @@ function followForeground(next) {
 }
 
 // 同一设备上换 App: 只替换目标、事件流、App 信息和层级, 不重新加载页面, 实时画面不中断
-function switchTargetInPlace(bundleId) {
+function rememberTarget(deviceId, bundleId) {
   try {
-    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId: targets.deviceId, bundleId }));
+    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId }));
   } catch (e) {
     // 不可用时只依赖地址参数
   }
-  history.replaceState(null, '', '?' + new URLSearchParams({ device: targets.deviceId, app: bundleId }).toString());
+  history.replaceState(null, '', '?' + new URLSearchParams({ device: deviceId, app: bundleId }).toString());
+}
+
+function switchTargetInPlace(bundleId) {
+  rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
@@ -2270,6 +2266,31 @@ function connectAppInPlace(bundleId) {
   document.body.classList.remove('has-empty');
   document.body.classList.add('has-app');
   switchTargetInPlace(bundleId);
+}
+
+// 设备启动或 App 启动时原地连接, 不整页重新加载(页面会闪一下), 实时画面不中断;
+// 切换设备只发生在默认页(没有设备)上, 此时没有连接中的 App
+async function connectInPlace(deviceId, bundleId) {
+  targets.idle = false;
+  targets.hadDevice = true;
+  if (deviceId !== targets.deviceId) {
+    targets.deviceId = deviceId;
+    targets.bundleId = '';
+    renderTargetMenu();
+    await syncLive();
+  }
+  if (bundleId && bundleId !== targets.bundleId) {
+    connectAppInPlace(bundleId);
+    return;
+  }
+  // 已选的 App 未运行时等事件流连上, 由 reconnected 原地更新
+  if (targets.bundleId) return;
+  rememberTarget(deviceId, '');
+  $('appName').textContent = currentDevice()?.name || t('未连接');
+  if (currentDevice()?.kind === 'simulator' && liveAvailable()) setMode('live');
+  const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
+  showEmptyState(t('没有运行中的已集成 App'), body);
+  setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
 }
 
 // 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
@@ -2383,13 +2404,7 @@ function pollTargets() {
         if (state.mode !== 'live') refresh();
       }
       const next = nextTarget();
-      // 只选了设备时其上的 App 启动: 原地连接, 不重新加载页面, 实时画面不中断
-      if (next && next[0] === targets.deviceId && !targets.bundleId && next[1] && currentDevice()) {
-        connectAppInPlace(next[1]);
-      } else if (next) {
-        switchTarget(...next);
-        return;
-      }
+      if (next) await connectInPlace(...next);
       // 事件流里的后台通知可能丢失(如重连时被覆盖), 列表显示在后台时直接询问当前 App 确认
       if (appState.value === 'online' && currentApp() && appInBackground(currentApp()) && await probeCurrentBackground()) {
         setAppState('background');

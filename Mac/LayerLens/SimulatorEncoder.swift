@@ -11,7 +11,8 @@ import IOSurface
 import VideoToolbox
 
 /// 把模拟器屏幕 IOSurface 编码为 H.264 (AVCC), 输出与网页约定的帧类型:
-/// 0x01 解码配置(avcC), 0x02 关键帧, 0x03 增量帧
+/// 0x01 解码配置(avcC), 0x02 关键帧, 0x03 增量帧.
+/// 可按比例缩小后编码: 画面显示得比原始分辨率小时, 多出的像素编码、传输、解码都是浪费, 缩放在 GPU 上完成
 final class SimulatorEncoder {
     static let bitRate = 8_000_000
     static let keyFrameInterval = 240
@@ -23,6 +24,9 @@ final class SimulatorEncoder {
     private var height = 0
     private var forceKeyFrame = true
     private var lastConfig: Data?
+    /// 缩放用, 输出编码器原生的 YUV 格式, 编码器不必再转换
+    private var transfer: VTPixelTransferSession?
+    private var pool: CVPixelBufferPool?
 
     deinit {
         invalidate()
@@ -33,15 +37,25 @@ final class SimulatorEncoder {
         forceKeyFrame = true
     }
 
-    func encode(_ surface: IOSurface) {
-        let w = IOSurfaceGetWidth(surface)
-        let h = IOSurfaceGetHeight(surface)
+    /// scale 为相对原始分辨率的比例, 不大于 1
+    func encode(_ surface: IOSurface, scale: Double = 1) {
+        let sourceWidth = IOSurfaceGetWidth(surface)
+        let sourceHeight = IOSurfaceGetHeight(surface)
+        let ratio = min(max(scale, 0.1), 1)
+        // H.264 要求宽高为偶数
+        let w = ratio < 1 ? Int(Double(sourceWidth) * ratio / 2) * 2 : sourceWidth
+        let h = ratio < 1 ? Int(Double(sourceHeight) * ratio / 2) * 2 : sourceHeight
         if session == nil || w != width || h != height {
             guard setup(width: w, height: h) else { return }
         }
         var unmanaged: Unmanaged<CVPixelBuffer>?
         guard CVPixelBufferCreateWithIOSurface(nil, surface, nil, &unmanaged) == kCVReturnSuccess,
-              let buffer = unmanaged?.takeRetainedValue(), let session else { return }
+              let source = unmanaged?.takeRetainedValue(), let session else { return }
+        var buffer = source
+        if w != sourceWidth || h != sourceHeight {
+            guard let scaled = scaled(source) else { return }
+            buffer = scaled
+        }
         let options: CFDictionary? = forceKeyFrame ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         forceKeyFrame = false
         let time = CMClockGetTime(CMClockGetHostTimeClock())
@@ -62,6 +76,40 @@ final class SimulatorEncoder {
             VTCompressionSessionInvalidate(session)
         }
         session = nil
+        if let transfer {
+            VTPixelTransferSessionInvalidate(transfer)
+        }
+        transfer = nil
+        pool = nil
+    }
+
+    private func scaled(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        if transfer == nil {
+            var created: VTPixelTransferSession?
+            guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &created) == noErr, let created else {
+                LiveLog.write("pixel transfer create failed")
+                return nil
+            }
+            VTSessionSetProperty(created, key: kVTPixelTransferPropertyKey_RealTime, value: kCFBooleanTrue)
+            transfer = created
+        }
+        if pool == nil {
+            let attributes: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferWidthKey: width,
+                kCVPixelBufferHeightKey: height,
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            ]
+            CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool)
+        }
+        var output: CVPixelBuffer?
+        guard let transfer, let pool, CVPixelBufferPoolCreatePixelBuffer(nil, pool, &output) == kCVReturnSuccess, let output else { return nil }
+        let status = VTPixelTransferSessionTransferImage(transfer, from: source, to: output)
+        guard status == noErr else {
+            LiveLog.write("pixel transfer failed: \(status)")
+            return nil
+        }
+        return output
     }
 
     private func setup(width: Int, height: Int) -> Bool {
@@ -81,6 +129,9 @@ final class SimulatorEncoder {
             kVTCompressionPropertyKey_AverageBitRate: Self.bitRate,
             kVTCompressionPropertyKey_ExpectedFrameRate: 60,
             kVTCompressionPropertyKey_MaxKeyFrameInterval: Self.keyFrameInterval,
+            // 编码速度优先, 编码器不为画质多做分析; 不缓存帧, 每帧编完立即输出
+            kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality: kCFBooleanTrue!,
+            kVTCompressionPropertyKey_MaxFrameDelayCount: 0,
         ]
         for (key, value) in properties {
             VTSessionSetProperty(created, key: key, value: value as CFTypeRef)

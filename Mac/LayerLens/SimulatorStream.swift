@@ -50,6 +50,8 @@ final class SimulatorStream {
     /// 编码比采集慢时只保留最新一帧
     private var pendingSurface: IOSurface?
     private var encoding = false
+    /// 按观看者中最大的显示尺寸编码, nil 时为原始分辨率
+    private var targetSize: (width: Double, height: Double)?
 
     private final class Viewer {
         let socket: WebSocketConnection
@@ -58,6 +60,8 @@ final class SimulatorStream {
         var waitingKeyFrame = true
         /// 丢帧后等积压发完再申请关键帧, 收不动的页面(如被节流的后台标签)不会反复触发
         var recovering = false
+        /// 画面在页面上显示的像素尺寸, 未上报(旧版页面)时按原始分辨率编码
+        var size: (width: Double, height: Double)?
 
         init(socket: WebSocketConnection) {
             self.socket = socket
@@ -84,6 +88,7 @@ final class SimulatorStream {
         }
         queue.async { [self] in
             viewers[id] = Viewer(socket: socket)
+            updateTargetSize()
             guard running || start() else {
                 socket.close()
                 return
@@ -124,6 +129,7 @@ final class SimulatorStream {
 
     private func remove(_ id: ObjectIdentifier) {
         viewers[id] = nil
+        updateTargetSize()
         touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
         guard viewers.isEmpty, running else { return }
         running = false
@@ -248,7 +254,47 @@ final class SimulatorStream {
         defer { encoding = false }
         guard screen != nil, let surface = pendingSurface else { return }
         pendingSurface = nil
-        encoder.encode(surface)
+        encoder.encode(surface, scale: encodeScale(of: surface))
+    }
+
+    /// 编码比例按 1/16 取整(向上), 缩放画面时不会每一点变化都重建编码器
+    private func encodeScale(of surface: IOSurface) -> Double {
+        guard let targetSize else { return 1 }
+        let width = Double(IOSurfaceGetWidth(surface))
+        let height = Double(IOSurfaceGetHeight(surface))
+        guard width > 0, height > 0 else { return 1 }
+        let ratio = max(targetSize.width / width, targetSize.height / height)
+        return min((ratio * 16).rounded(.up) / 16, 1)
+    }
+
+    // MARK: - Size
+
+    private func setSize(_ size: (width: Double, height: Double), of id: ObjectIdentifier) {
+        guard let viewer = viewers[id] else { return }
+        viewer.size = size
+        updateTargetSize()
+    }
+
+    /// 取所有观看者中最大的显示尺寸; 有未上报的观看者时用原始分辨率. 变化后立即重编当前画面, 画面静止时也能更新
+    private func updateTargetSize() {
+        var target: (width: Double, height: Double)? = (0, 0)
+        for viewer in viewers.values {
+            guard let size = viewer.size, let current = target else {
+                target = nil
+                break
+            }
+            target = (max(current.width, size.width), max(current.height, size.height))
+        }
+        if let current = target, current.width <= 0 || current.height <= 0 {
+            target = nil
+        }
+        captureQueue.async { [self] in
+            let changed = targetSize?.width != target?.width || targetSize?.height != target?.height
+            targetSize = target
+            if changed, let surface = screen?.surface() {
+                capture(surface, trailing: false)
+            }
+        }
     }
 
     // MARK: - Orientation
@@ -310,6 +356,11 @@ final class SimulatorStream {
         }
         if type == "restart" {
             queue.async { [weak self] in self?.restartCapture() }
+            return
+        }
+        if type == "size" {
+            guard let width = message["width"] as? Double, let height = message["height"] as? Double, width > 0, height > 0 else { return }
+            queue.async { [weak self] in self?.setSize((width, height), of: id) }
             return
         }
         guard let touch else { return }
