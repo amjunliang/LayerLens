@@ -4799,6 +4799,8 @@ function renderLogs() {
     }
     const y = logOffset(i) + 'px';
     if (row.style.top !== y) row.style.top = y;
+    // 斑马纹按在过滤结果中的位置交替, 增删行后随位置更新
+    row.classList.toggle('odd', i % 2 === 1);
   }
   logs.rendered.forEach((row, id) => {
     if (keep.has(id)) return;
