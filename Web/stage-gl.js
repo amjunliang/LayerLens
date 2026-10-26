@@ -412,11 +412,8 @@ function stage3DColors() {
     }
     return new Float32Array([(r / 255) * a, (g / 255) * a, (b / 255) * a, a]);
   };
-  // 边线换算成叠在舞台背景上的不透明色: 多个节点的边重合时不会越叠越亮, 看起来粗细一致
-  const line = parse(style.getPropertyValue('--slab-line'));
-  const stage = parse(style.getPropertyValue('--stage-bg'));
   stage3D.colors = {
-    line: line.map((value, index) => value + stage[index] * (1 - line[3])),
+    line: parse(style.getPropertyValue('--slab-line')),
     accent: parse(style.getPropertyValue('--accent')),
     hoverTint: parse('rgba(47, 107, 255, 0.12)'),
     selectedTint: parse('rgba(47, 107, 255, 0.2)'),

@@ -117,11 +117,19 @@
     if ([self canDrawHierarchyOfLayer:layer]) {
         return [layer layerlens_groupScreenshotWithLowQuality:NO];
     }
+    return [self renderedImageOfLayer:layer];
+}
+
++ (UIImage *)renderedImageOfLayer:(CALayer *)layer {
     CGSize size = layer.frame.size;
     if (size.width <= 0 || size.height <= 0 || size.width > 20000 || size.height > 20000) {
         return nil;
     }
-    UIGraphicsBeginImageContextWithOptions(size, NO, 0);
+    // 与 Lookin 相同, 图片长边不超过 LayerLens_NodeImageMaxLengthInPx
+    CGFloat screenScale = UIScreen.mainScreen.scale;
+    CGFloat maxLength = MAX(size.width, size.height) * screenScale;
+    CGFloat scale = maxLength > LayerLens_NodeImageMaxLengthInPx ? MIN(screenScale * LayerLens_NodeImageMaxLengthInPx / maxLength, 1) : 0;
+    UIGraphicsBeginImageContextWithOptions(size, NO, scale);
     [layer renderInContext:UIGraphicsGetCurrentContext()];
     UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
@@ -196,20 +204,80 @@
 
 #pragma mark - Private
 
-// 与 Lookin 的 solo 截图相同: 临时隐藏单独绘制的子层后整体截图; 没有要隐藏的子层时与 group 等价
+// 与 Lookin 的 solo 截图相同: 临时隐藏单独绘制的子层后整体截图; 没有要隐藏的子层时与 group 等价.
+// drawViewHierarchyInRect:afterScreenUpdates:YES 会把隐藏子层的中间状态提交到屏幕, 每截一个节点 App 画面就闪一下;
+// 因此默认在不提交的事务里用 renderInContext 截图, 隐藏与恢复都在事务内完成, 屏幕上看不到.
+// renderInContext 画不出毛玻璃、视频、Metal、WebView 等内容, 自身含这类内容的节点仍走 drawViewHierarchy, 保证截图完整
 + (UIImage *)soloScreenshotOfLayer:(CALayer *)layer hideLayers:(BOOL)hideLayers {
     NSMutableArray<CALayer *> *hiddenSublayers = [NSMutableArray array];
     for (CALayer *sublayer in [layer.sublayers copy]) {
         if (!sublayer.hidden && (hideLayers || sublayer.layerlens_hostView)) {
-            sublayer.hidden = YES;
             [hiddenSublayers addObject:sublayer];
         }
     }
-    UIImage *image = [self groupScreenshotOfLayer:layer];
-    for (CALayer *sublayer in hiddenSublayers) {
-        sublayer.hidden = NO;
+    if (!hiddenSublayers.count) {
+        return [self groupScreenshotOfLayer:layer];
+    }
+    UIImage *image = nil;
+    if ([self canDrawHierarchyOfLayer:layer] && [self layer:layer needsHierarchyExcluding:hiddenSublayers]) {
+        [self setLayers:hiddenSublayers hidden:YES];
+        image = [layer layerlens_groupScreenshotWithLowQuality:NO];
+        [self setLayers:hiddenSublayers hidden:NO];
+    } else {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (CALayer *sublayer in hiddenSublayers) {
+            sublayer.hidden = YES;
+        }
+        image = [self renderedImageOfLayer:layer];
+        for (CALayer *sublayer in hiddenSublayers) {
+            sublayer.hidden = NO;
+        }
+        [CATransaction commit];
     }
     return image;
+}
+
++ (void)setLayers:(NSArray<CALayer *> *)layers hidden:(BOOL)hidden {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *layer in layers) {
+        layer.hidden = hidden;
+    }
+    [CATransaction commit];
+}
+
+/// 截图时仍可见的部分(自身及未隐藏的子层)是否含 renderInContext 画不出的内容
++ (BOOL)layer:(CALayer *)layer needsHierarchyExcluding:(NSArray<CALayer *> *)excluded {
+    if ([self layerNeedsHierarchy:layer]) {
+        return YES;
+    }
+    for (CALayer *sublayer in layer.sublayers) {
+        if (!sublayer.hidden && ![excluded containsObject:sublayer] && [self layer:sublayer needsHierarchyExcluding:@[]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+/// 滤镜(毛玻璃、混合模式)、视频、Metal/OpenGL、跨进程托管的图层(WebView、部分系统控件)
++ (BOOL)layerNeedsHierarchy:(CALayer *)layer {
+    if (layer.filters.count || layer.backgroundFilters.count || layer.compositingFilter) {
+        return YES;
+    }
+    static NSArray<NSString *> *keywords = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        keywords = @[@"Backdrop", @"Portal", @"LayerHost", @"AVPlayer", @"AVSampleBuffer", @"Metal", @"EAGL"];
+    });
+    NSString *name = NSStringFromClass(layer.class);
+    for (NSString *keyword in keywords) {
+        if ([name containsString:keyword]) {
+            return YES;
+        }
+    }
+    UIView *view = layer.layerlens_hostView;
+    return [view isKindOfClass:UIVisualEffectView.class] || [NSStringFromClass(view.class) hasPrefix:@"WK"];
 }
 
 + (CALayer *)layerWithOid:(unsigned long)oid {
