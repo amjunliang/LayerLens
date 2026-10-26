@@ -20,6 +20,8 @@ final class SimulatorStream {
     static let trailingDelay: TimeInterval = 0.1
     /// 强制关键帧的最小间隔, 关键帧较大, 频繁出现会拉低所有观看者的帧率
     static let keyFrameInterval: TimeInterval = 0.5
+    /// 按住不动时在原位补发移动的间隔, 模拟触摸屏持续上报
+    static let holdInterval: DispatchTimeInterval = .milliseconds(30)
 
     private let udid: String
     private let queue: DispatchQueue
@@ -32,6 +34,8 @@ final class SimulatorStream {
     // touchQueue 上访问: 正在按下的观看者和位置, 断开时据此补发抬起
     private var touchOwner: ObjectIdentifier?
     private var lastTouch = (x: 0.5, y: 0.5)
+    private var lastEdge: UInt8 = 0
+    private var holdTimer: DispatchSourceTimer?
 
     // queue 上访问
     private var viewers: [ObjectIdentifier: Viewer] = [:]
@@ -341,8 +345,34 @@ final class SimulatorStream {
     private func releaseTouch(of id: ObjectIdentifier) {
         guard touchOwner == id, let touch else { return }
         touchOwner = nil
+        stopHold()
         touch.send(phase: .up, x: lastTouch.x, y: lastTouch.y)
         LiveLog.write("release touch of closed viewer")
+    }
+
+    /// 真实触摸屏在手指按住不动时仍持续上报位置; 只发一次按下的话, 依赖持续触摸事件的长按菜单、长按倍速等手势不会触发,
+    /// 因此按下后在原位补发移动, 每次按下或移动都重新计时, 抬起时停止
+    private func startHold() {
+        let timer = holdTimer ?? {
+            let timer = DispatchSource.makeTimerSource(queue: touchQueue)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                guard self.touchOwner != nil, let touch = self.touch else {
+                    self.stopHold()
+                    return
+                }
+                touch.send(phase: .move, x: self.lastTouch.x, y: self.lastTouch.y, edge: self.lastEdge)
+            }
+            timer.resume()
+            holdTimer = timer
+            return timer
+        }()
+        timer.schedule(deadline: .now() + Self.holdInterval, repeating: Self.holdInterval)
+    }
+
+    private func stopHold() {
+        holdTimer?.cancel()
+        holdTimer = nil
     }
 
     private func handle(_ text: String, from id: ObjectIdentifier) {
@@ -376,6 +406,12 @@ final class SimulatorStream {
             touch.send(phase: phase, x: point.x, y: point.y, edge: edge)
             touchOwner = phase == .up ? nil : id
             lastTouch = point
+            lastEdge = edge
+            if phase == .up {
+                stopHold()
+            } else {
+                startHold()
+            }
         case "button" where message["button"] as? String == "swipe-to-home":
             touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
             for step in 1...10 {

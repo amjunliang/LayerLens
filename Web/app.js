@@ -47,6 +47,11 @@ const state = {
   hover: null,
   // 展开的节点(oid): 选中节点的祖先 + 手动展开的, 不做持久化
   expanded: new Set(),
+  // 控制器行: 收起的控制器(其根视图 key), 默认展开; vcFocus 为 true 时选中的是 selected 所属控制器的行
+  vcCollapsed: new Set(),
+  vcFocus: false,
+  // 选中控制器行时自动切到类信息, 记下原来的页签, 选中其他行时切回
+  tabBeforeVC: null,
   mode: '3d',
   showLayers: false,
   showHidden: true,
@@ -559,6 +564,7 @@ function restoreNodeState() {
 function expandToSelected() {
   const node = state.nodes.get(state.selected);
   for (let p = node?.parent; p; p = p.parent) state.expanded.add(p.key);
+  for (let p = state.vcFocus ? node?.parent : node; p; p = p.parent) state.vcCollapsed.delete(p.key);
 }
 
 // MARK: - Hierarchy
@@ -665,6 +671,7 @@ function matches(node, q) {
   if (node.address.toLowerCase().includes(q)) return true;
   if (node.title && node.title.toLowerCase().includes(q)) return true;
   if (node.specialTrace && node.specialTrace.toLowerCase().includes(q)) return true;
+  if (node.vcClass && node.vcClass.toLowerCase().includes(q)) return true;
   return node.ivarTraces.some((t) => t.toLowerCase().includes(q));
 }
 
@@ -687,8 +694,15 @@ function renderTree() {
       if (visible && !visible.has(node.key)) return;
       const children = shownChildren(node);
       const expanded = q ? true : state.expanded.has(node.key);
-      frag.appendChild(makeRow(node, level, children.length > 0, expanded, q));
-      if (expanded) addRows(children, level + 1);
+      // 控制器作为树中单独的一层, 它的根视图是唯一的子节点
+      const depth = node.vcClass ? level + 1 : level;
+      if (node.vcClass) {
+        const open = !!q || !state.vcCollapsed.has(node.key);
+        frag.appendChild(makeControllerRow(node, level, open, q));
+        if (!open) return;
+      }
+      frag.appendChild(makeRow(node, depth, children.length > 0, expanded, q));
+      if (expanded) addRows(children, depth + 1);
     });
   };
   addRows(state.roots.filter((r) => state.showHidden || !r.effHidden), 0);
@@ -696,7 +710,7 @@ function renderTree() {
   const inner = el('div', 'tree-inner');
   inner.appendChild(frag);
   tree.replaceChildren(inner);
-  if (state.hover) tree.querySelector(`.row[data-key="${CSS.escape(state.hover)}"]`)?.classList.add('hover');
+  if (state.hover) tree.querySelector(`.row:not(.vc-row)[data-key="${CSS.escape(state.hover)}"]`)?.classList.add('hover');
   scrollToSelected();
   renderCrumbs();
 }
@@ -706,7 +720,7 @@ function makeRow(node, level, hasChildren, expanded, q) {
   row.dataset.key = node.key;
   annotate(row, node);
   row.style.setProperty('--indent', level * TREE_INDENT + 'px');
-  if (node.key === state.selected) row.classList.add('selected');
+  if (node.key === state.selected && !state.vcFocus) row.classList.add('selected');
   if (node.effHidden) row.classList.add('dim');
   if (node.cls.startsWith('_')) row.classList.add('private');
   const arrow = el('span', 'arrow' + (hasChildren && expanded ? ' expanded' : ''));
@@ -721,15 +735,12 @@ function makeRow(node, level, hasChildren, expanded, q) {
     bar.title = t('事件') + ' (' + node.events.length + ')';
     row.appendChild(bar);
   }
-  if (node.vcClass) row.appendChild(el('span', 'vc-dot'));
   const cls = el('span', 'cls' + (node.isLayer ? ' layer' : ''));
   appendHighlighted(cls, node.cls, q);
   row.appendChild(cls);
   if (node.title) row.appendChild(el('span', 'meta', node.title));
-  // 与 Lookin 一致: 有特殊标记(控制器的 view / Cell 位置 / KeyWindow)时显示它, 否则显示引用它的所有成员变量名
-  if (node.vcClass) {
-    row.appendChild(el('span', 'vc', node.specialTrace || node.vcClass + '.view'));
-  } else if (node.specialTrace) {
+  // 与 Lookin 一致: 有特殊标记(Cell 位置 / KeyWindow)时显示它, 否则显示引用它的所有成员变量名; 控制器已单独成行
+  if (node.specialTrace && !node.vcClass) {
     row.appendChild(el('span', 'meta', node.specialTrace));
   } else {
     [...new Set(node.ivarTraces.map((trace) => trace.split('.').pop()))].forEach((name) => row.appendChild(el('span', 'meta', name)));
@@ -738,6 +749,29 @@ function makeRow(node, level, hasChildren, expanded, q) {
   copy.appendChild(icon('copy'));
   copy.title = t('复制路径');
   row.appendChild(copy);
+  return row;
+}
+
+// 控制器行的 key 为 VC_KEY + 根视图 key; 选中、悬停、右键时画布和详情对应它的根视图
+const VC_KEY = 'vc:';
+
+function viewKeyOf(key) {
+  return key?.startsWith(VC_KEY) ? key.slice(VC_KEY.length) : key;
+}
+
+function makeControllerRow(node, level, expanded, q) {
+  const row = el('div', 'row vc-row');
+  row.dataset.key = VC_KEY + node.key;
+  row.style.setProperty('--indent', level * TREE_INDENT + 'px');
+  if (node.key === state.selected && state.vcFocus) row.classList.add('selected');
+  row.title = node.vcClass;
+  const arrow = el('span', 'arrow' + (expanded ? ' expanded' : ''));
+  arrow.dataset.toggle = '1';
+  arrow.appendChild(icon('chevron'));
+  row.append(arrow, el('span', 'vc-icon'));
+  const name = el('span', 'vc');
+  appendHighlighted(name, node.vcClass, q);
+  row.appendChild(name);
   return row;
 }
 
@@ -767,11 +801,12 @@ function rememberTrail(node) {
   for (let n = node; n && n.parent; n = n.parent) childTrail.set(n.parent.key, n.key);
 }
 
-// 记住的子节点; 中间层在树中不可见(如被隐藏的 CALayer)时继续向下找
+// 记住的子节点; 中间层在树中不可见(如被隐藏的 CALayer)时继续向下找; 子节点是控制器的根视图时返回控制器行
 function rememberedChild(node, rows) {
   let key = childTrail.get(node.key);
-  while (key && !rows.includes(key)) key = childTrail.get(key);
-  return key || null;
+  while (key && !rows.includes(key) && !rows.includes(VC_KEY + key)) key = childTrail.get(key);
+  if (!key) return null;
+  return rows.includes(VC_KEY + key) ? VC_KEY + key : key;
 }
 
 // 当前树中可见行的顺序, 用于键盘导航
@@ -779,37 +814,53 @@ function visibleRowKeys() {
   return [...$('tree').querySelectorAll('.row')].map((row) => row.dataset.key);
 }
 
+// 树中可见的父行: 控制器根视图的父行是控制器行, 控制器行的父行是上一层可见的视图
+function treeParentKey(key, rows) {
+  const isVC = key.startsWith(VC_KEY);
+  const node = state.nodes.get(viewKeyOf(key));
+  if (!isVC && node.vcClass && rows.includes(VC_KEY + node.key)) return VC_KEY + node.key;
+  let p = node.parent;
+  while (p && !rows.includes(p.key)) p = p.parent;
+  return p ? p.key : null;
+}
+
 // ← 直接选中父节点, 不收起(在画布上按时收起树看不到变化, 像是按了没反应); ⌥ + ← 收起
 function handleTreeKey(key, alt = false) {
   const node = state.nodes.get(state.selected);
   if (!node) return false;
+  const current = state.vcFocus ? VC_KEY + node.key : node.key;
   const rows = visibleRowKeys();
-  const index = rows.indexOf(node.key);
-  const hasChildren = shownChildren(node).length > 0;
-  const expanded = state.expanded.has(node.key) || !!state.query.trim();
+  const index = rows.indexOf(current);
+  const searching = !!state.query.trim();
+  const hasChildren = state.vcFocus || shownChildren(node).length > 0;
+  const expanded = searching || (state.vcFocus ? !state.vcCollapsed.has(node.key) : state.expanded.has(node.key));
+  const setExpanded = (rowKey, open) => {
+    const target = viewKeyOf(rowKey);
+    if (rowKey.startsWith(VC_KEY)) open ? state.vcCollapsed.delete(target) : state.vcCollapsed.add(target);
+    else open ? state.expanded.add(target) : state.expanded.delete(target);
+  };
   if (key === 'ArrowDown' || key === 'ArrowUp') {
     const next = rows[index + (key === 'ArrowDown' ? 1 : -1)];
     if (next) select(next, true);
   } else if (key === 'ArrowRight') {
     if (hasChildren && !expanded) {
-      state.expanded.add(node.key);
+      setExpanded(current, true);
       renderTree();
     } else if (hasChildren) {
-      select(rememberedChild(node, rows) || rows[index + 1], true);
+      select(state.vcFocus ? node.key : rememberedChild(node, rows) || rows[index + 1], true);
     }
   } else if (key === 'ArrowLeft') {
-    // 选中树中可见的父节点(跳过被隐藏的 CALayer 等)
-    let p = node.parent;
-    while (p && !rows.includes(p.key)) p = p.parent;
-    if (alt && !state.query.trim()) {
-      // 收起当前节点; 没有可收起的则收起父节点并选中它
-      const target = hasChildren && expanded ? node : p;
+    // 选中树中可见的父行(跳过被隐藏的 CALayer 等)
+    const parent = treeParentKey(current, rows);
+    if (alt && !searching) {
+      // 收起当前行; 没有可收起的则收起父行并选中它
+      const target = hasChildren && expanded ? current : parent;
       if (!target) return true;
-      state.expanded.delete(target.key);
-      if (target === node) renderTree();
-      else select(target.key, true);
-    } else if (p) {
-      select(p.key, true);
+      setExpanded(target, false);
+      if (target === current) renderTree();
+      else select(target, true);
+    } else if (parent) {
+      select(parent, true);
     }
   } else {
     return false;
@@ -851,10 +902,24 @@ function crumbItem(node, current) {
 }
 
 function select(key, fromTree) {
+  const focusVC = !!key?.startsWith(VC_KEY);
+  key = viewKeyOf(key);
   if (!state.nodes.has(key)) return;
   const previousWindow = currentWindow();
   state.selected = key;
+  state.vcFocus = focusVC && !!state.nodes.get(key).vcClass;
   state.classTarget = null;
+  if (state.vcFocus) {
+    const node = state.nodes.get(key);
+    state.classTarget = { oid: node.vcOid, name: node.vcClass };
+    if (state.tab !== 'class') {
+      state.tabBeforeVC = state.tab;
+      setTabButtons('class');
+    }
+  } else if (state.tabBeforeVC) {
+    setTabButtons(state.tabBeforeVC);
+    state.tabBeforeVC = null;
+  }
   rememberTrail(state.nodes.get(key));
   if (!fromTree) {
     expandToSelected();
@@ -1187,7 +1252,7 @@ function updateHighlights() {
   }
   const tree = $('tree');
   tree.querySelectorAll('.row.hover').forEach((row) => row.classList.remove('hover'));
-  if (state.hover) tree.querySelector(`.row[data-key="${CSS.escape(state.hover)}"]`)?.classList.add('hover');
+  if (state.hover) tree.querySelector(`.row:not(.vc-row)[data-key="${CSS.escape(state.hover)}"]`)?.classList.add('hover');
 }
 
 // MARK: - Hover tip
@@ -3605,7 +3670,8 @@ function renderClassInfo(info, node) {
   const list = el('div');
   const header = el('div', 'kv');
   header.append(el('div', null, t('类')), el('div', null, info.className), el('div', null, t('地址')), el('div', null, info.address), el('div', null, t('描述')), el('div', null, info.description));
-  if (state.classTarget) {
+  // 选中的是控制器行时类信息就是控制器本身, 不提供返回视图
+  if (state.classTarget && !state.vcFocus) {
     const back = el('span', 'link', t('返回视图'));
     back.addEventListener('click', () => {
       state.classTarget = null;
@@ -3671,9 +3737,13 @@ function renderClassInfo(info, node) {
 }
 
 function switchTab(tab) {
+  setTabButtons(tab);
+  loadDetail();
+}
+
+function setTabButtons(tab) {
   state.tab = tab;
   $('detailTabs').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  loadDetail();
 }
 
 // MARK: - Utils
@@ -6720,6 +6790,12 @@ function setup() {
     const row = e.target.closest('.row');
     if (!row) return;
     const key = row.dataset.key;
+    if (key.startsWith(VC_KEY) && e.target.closest('.arrow')) {
+      const view = viewKeyOf(key);
+      state.vcCollapsed.has(view) ? state.vcCollapsed.delete(view) : state.vcCollapsed.add(view);
+      renderTree();
+      return;
+    }
     if (e.target.closest('.copy')) {
       copyText(nodePath(state.nodes.get(key)), '复制路径');
       return;
@@ -6759,7 +6835,7 @@ function setup() {
       start,
       timer: setTimeout(() => {
         select(row.dataset.key, true);
-        showMenu(start.x, start.y, state.nodes.get(row.dataset.key));
+        showMenu(start.x, start.y, state.nodes.get(viewKeyOf(row.dataset.key)));
       }, LONG_PRESS_MS),
     };
   });
@@ -6772,7 +6848,7 @@ function setup() {
     if (!row) return;
     e.preventDefault();
     select(row.dataset.key, true);
-    showMenu(e.clientX, e.clientY, state.nodes.get(row.dataset.key));
+    showMenu(e.clientX, e.clientY, state.nodes.get(viewKeyOf(row.dataset.key)));
   });
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest('.context-menu')) hideMenu();
@@ -6783,7 +6859,7 @@ function setup() {
   window.addEventListener('blur', hideMenu);
   $('tree').addEventListener('mouseover', (e) => {
     const row = e.target.closest('.row');
-    const key = row ? row.dataset.key : null;
+    const key = row ? viewKeyOf(row.dataset.key) : null;
     if (key !== state.hover) {
       state.hover = key;
       updateHighlights();
@@ -6848,6 +6924,7 @@ function setup() {
     const tab = e.target.dataset.tab;
     if (tab && tab !== state.tab) {
       state.classTarget = null;
+      state.tabBeforeVC = null;
       switchTab(tab);
     }
   });
