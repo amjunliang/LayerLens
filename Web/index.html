@@ -26,6 +26,7 @@
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></symbol>
     <symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></symbol>
     <symbol id="i-tree" viewBox="0 0 24 24"><path d="M5 4v14h5M5 9h5"/><rect x="12" y="6" width="8" height="5" rx="1"/><rect x="12" y="15" width="8" height="5" rx="1"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6L3.5 8.5"/><path d="M3.5 4v4.5H8"/><path d="M12 7.5V12l3 2"/></symbol>
     <symbol id="i-device" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
@@ -222,6 +223,7 @@
       <span class="git-repo git-only" id="gitRepo"></span>
       <span class="git-branch git-only" id="gitBranch"></span>
       <span class="log-count git-only" id="gitSync"></span>
+      <button class="icon-btn git-only" id="gitLogToggle" title="提交记录" aria-label="提交记录"><svg class="icon"><use href="#i-history"/></svg></button>
       <button class="icon-btn git-only" id="gitTreeMode" title="树形显示" aria-label="树形显示"><svg class="icon"><use href="#i-tree"/></svg></button>
       <button class="icon-btn git-only" id="gitPull" title="拉取 (仅快进)" aria-label="拉取"><svg class="icon"><use href="#i-download"/></svg></button>
       <button class="icon-btn git-only" id="gitPush" title="推送" aria-label="推送"><svg class="icon"><use href="#i-upload"/></svg></button>
@@ -274,7 +276,15 @@
     </div>
     <div class="git-body git-only" id="gitBody">
       <div class="git-side">
-        <div class="git-files" id="gitFiles"></div>
+        <div class="git-area" id="gitStagedArea">
+          <div class="git-group" id="gitStagedHead"></div>
+          <div class="git-files" id="gitStagedFiles"></div>
+        </div>
+        <div class="git-area-splitter" id="gitAreaSplitter"></div>
+        <div class="git-area" id="gitChangesArea">
+          <div class="git-group" id="gitChangesHead"></div>
+          <div class="git-files" id="gitChangesFiles"></div>
+        </div>
         <div class="git-commit" id="gitCommitBox">
           <div class="git-amend-warn" id="gitAmendWarn" hidden>上一次提交已推送, 修改后需要强制推送</div>
           <div class="git-commit-row">
@@ -285,6 +295,11 @@
         </div>
       </div>
       <div class="net-splitter git-splitter" id="gitSplitter"></div>
+      <div class="git-history" id="gitHistory" hidden>
+        <div class="git-group"><span class="git-group-title">提交记录</span></div>
+        <div class="git-log-list" id="gitLogList"></div>
+      </div>
+      <div class="net-splitter git-splitter" id="gitLogSplitter" hidden></div>
       <div class="git-diff" id="gitDiff"></div>
       <div class="log-empty" id="gitEmpty" hidden></div>
     </div>
