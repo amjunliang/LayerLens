@@ -1938,14 +1938,14 @@ const API_VERSION = 1;
 const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false, idle: false };
 
 // 连接过的设备和 App: 断开后仍显示在菜单中, 选中项不随设备断开跳动, 连回来后自动恢复.
-// 存在 sessionStorage 中, 切换设备重新加载页面后保留, 关闭窗口即清除
+// 存在 localStorage 中, 重启 LayerLens 后保留, 用户可从菜单中移除
 // { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version } } } }
 const HISTORY_KEY = 'layerlens_target_history';
 const targetHistory = loadTargetHistory();
 
 function loadTargetHistory() {
   try {
-    return JSON.parse(sessionStorage.getItem(HISTORY_KEY)) || {};
+    return JSON.parse(localStorage.getItem(HISTORY_KEY)) || {};
   } catch (e) {
     return {};
   }
@@ -1953,11 +1953,19 @@ function loadTargetHistory() {
 
 function saveTargetHistory() {
   try {
-    sessionStorage.setItem(HISTORY_KEY, JSON.stringify(targetHistory));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(targetHistory));
   } catch (e) {
     // 不可用时只保留在内存中
   }
 }
+
+// 其他窗口(如独立日志窗口或浏览器)移除或新增记录时同步
+window.addEventListener('storage', (e) => {
+  if (e.key !== HISTORY_KEY) return;
+  for (const key of Object.keys(targetHistory)) delete targetHistory[key];
+  Object.assign(targetHistory, loadTargetHistory());
+  renderTargetMenu();
+});
 
 // 记录当前连接的设备和 App; 设备不在列表中时(如带地址参数打开)补一条占位记录
 function recordTargetHistory() {
@@ -2191,11 +2199,27 @@ function switchTarget(deviceId, bundleId) {
 
 const targetMenuUi = { offlineOpen: false };
 
+// 顶栏按钮中应用名后显示所在设备, 同一 App 同时运行在模拟器和真机上时能区分; 只选了设备时名称已是设备名, 不重复
+function renderTargetLabel() {
+  const device = currentDevice();
+  const entry = targetHistory[targets.deviceId];
+  const name = device?.name || entry?.name || '';
+  const kind = device?.kind || entry?.kind || '';
+  $('targetLabel').hidden = !targets.bundleId || !name;
+  $('targetLabelName').textContent = name;
+  // 「模拟器」的英文译文是分组标题用的复数, 这里单独处理
+  $('targetLabelKind').textContent = kind === 'simulator' ? (LANG === 'en' ? 'Simulator' : '模拟器') : kind ? t('真机') : '';
+  $('targetLabelKind').hidden = !kind;
+  const model = device?.model || entry?.model || '';
+  $('targetLabel').title = [name, model !== name ? model : '', device?.os || entry?.os || ''].filter(Boolean).join(' · ');
+}
+
 function renderTargetMenu() {
   const menu = $('targetMenu');
   const children = [];
   const background = appState.value === 'background';
   recordTargetHistory();
+  renderTargetLabel();
   // 按类型分组: 模拟器(已启动在前, 未启动的灰色显示在后), 真机; 已断开的历史设备排在各组最后
   const simulators = targets.devices.filter((d) => d.kind === 'simulator');
   const offline = targets.simulators || [];
@@ -2296,7 +2320,8 @@ function targetAppRow(deviceId, app, background) {
   const row = el('button', 'target-app');
   const current = deviceId === targets.deviceId && app.bundleId === targets.bundleId;
   const away = !!app.away || (current && appState.value === 'offline');
-  const inBackground = !away && ((current && background) || appInBackground(app));
+  // 当前 App 的事件流连着时以它为准: 进入后台时 App 会主动推送; 列表中的挂起标记可能是前台主线程繁忙导致的超时
+  const inBackground = !away && (current && appState.connected ? background : (current && background) || appInBackground(app));
   const live = targets.devices.some((d) => d.id === deviceId);
   row.classList.toggle('current', current);
   row.classList.toggle('background', inBackground);
@@ -2379,6 +2404,7 @@ function rememberTarget(deviceId, bundleId) {
 function switchTargetInPlace(bundleId) {
   rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
+  renderTargetLabel();
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
   appState.dropped = false;
@@ -2461,14 +2487,19 @@ async function probeForeground() {
 }
 
 // 当前 App 是否确实在后台: 以 App 实时返回的状态为准; 挂起不响应时沿用列表中的挂起标记
+// 接口在 App 主线程执行, 前台时主线程繁忙(取层级、截图、加载视频)也会超时; 连续多次超时才视为挂起
+const PROBE_MISS_LIMIT = 3;
+
 async function probeCurrentBackground() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 800);
   try {
     const res = await fetch(targetBase() + '/api/app', { cache: 'no-store', signal: controller.signal });
+    appState.probeMisses = 0;
     return appInBackground(await res.json());
   } catch (e) {
-    return !!currentApp()?.suspended;
+    appState.probeMisses = (appState.probeMisses || 0) + 1;
+    return appState.probeMisses >= PROBE_MISS_LIMIT && !!currentApp()?.suspended;
   } finally {
     clearTimeout(timer);
   }
@@ -2537,8 +2568,10 @@ function pollTargets() {
       const next = nextTarget();
       if (next) await connectInPlace(...next);
       // 事件流里的后台通知可能丢失(如重连时被覆盖), 列表显示在后台时直接询问当前 App 确认
-      if (appState.value === 'online' && currentApp() && appInBackground(currentApp()) && await probeCurrentBackground()) {
-        setAppState('background');
+      if (appState.value === 'online' && currentApp() && appInBackground(currentApp())) {
+        if (await probeCurrentBackground()) setAppState('background');
+      } else {
+        appState.probeMisses = 0;
       }
       if (currentAppAway()) checkForeground();
     } catch (e) {

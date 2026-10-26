@@ -76,6 +76,12 @@ final class TargetRegistry {
     private var apps: [AppRecord] = []
     private var scanning = false
     private var scanWaiters: [() -> Void] = []
+    /// 已取到过 USB 设备列表, 之后的扫描才包含真机上的 App
+    private var usbListed = false
+    /// 第一次完整扫描(含真机)完成前网页取列表要等待, 否则刚启动时只有模拟器上的 App, 网页会先选模拟器再切到真机
+    private var ready = false
+    private var readyWaiters: [() -> Void] = []
+    private static let readyTimeout: TimeInterval = 3
     /// Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
     private var sourceFiles: [String: String]
     private static let sourceFilesKey = "LayerLensSourceFiles"
@@ -100,8 +106,8 @@ final class TargetRegistry {
         timer.schedule(deadline: .now(), repeating: Self.refreshInterval)
         timer.setEventHandler { [weak self] in
             self?.refreshSimulators()
-            self?.refreshUSBDevices()
-            self?.scanApps(completion: nil)
+            // 先取 USB 设备列表再扫描, 本轮即可扫到真机上的 App
+            self?.refreshUSBDevices { self?.scanApps(completion: nil) }
         }
         timer.resume()
         self.timer = timer
@@ -169,6 +175,12 @@ final class TargetRegistry {
     /// 设备列表, 供网页展示; 每台设备附带其上运行的 App. 另外返回未启动的模拟器
     func snapshot(completion: @escaping ([[String: Any]], [[String: Any]]) -> Void) {
         queue.async { [self] in
+            guard ready else {
+                readyWaiters.append { [weak self] in self?.snapshot(completion: completion) }
+                // USB 或扫描异常时不一直等待
+                queue.asyncAfter(deadline: .now() + Self.readyTimeout) { [weak self] in self?.markReady() }
+                return
+            }
             var devices = simulators + usbDevices.map { usbRecord($0) }
             // 未出现在 simctl / usbmuxd 结果中的设备(刷新时机不同)补上
             for app in apps where !devices.contains(where: { $0.id == app.deviceId }) {
@@ -243,10 +255,13 @@ final class TargetRegistry {
 
     // MARK: - USB devices
 
-    private func refreshUSBDevices() {
+    private func refreshUSBDevices(completion: @escaping () -> Void) {
         Usbmux.listDevices(queue: queue) { [weak self] devices in
+            defer { completion() }
             // 偶发请求失败时沿用上次结果, 避免设备上的 App 被清空
-            guard let self, let devices else { return }
+            guard let self else { return }
+            self.usbListed = true
+            guard let devices else { return }
             self.usbDevices = devices
             devices.filter { self.deviceDetails[$0.udid] == nil && !self.detailsLoading.contains($0.udid) }.forEach { self.loadDetails(udid: $0.udid) }
         }
@@ -318,6 +333,7 @@ final class TargetRegistry {
         // 连接成功但没有响应的端口, 即挂起的 App; 明确拒绝表示 App 已退出
         var transientPorts: Set<String> = []
         let devices = usbDevices
+        let complete = usbListed
         for device in devices {
             for port in Self.appPorts {
                 group.enter()
@@ -366,7 +382,16 @@ final class TargetRegistry {
             let waiters = scanWaiters
             scanWaiters = []
             waiters.forEach { $0() }
+            if complete { markReady() }
         }
+    }
+
+    private func markReady() {
+        guard !ready else { return }
+        ready = true
+        let waiters = readyWaiters
+        readyWaiters = []
+        waiters.forEach { $0() }
     }
 
     /// 同一进程监听了多个端口时(旧版 Pod 被热重载注入的动态库重复启动)只保留端口最小的一个

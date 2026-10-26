@@ -118,20 +118,27 @@ static const NSInteger kLayerLensPortAttempts = 10;
         }
     });
     dispatch_resume(self.heartbeatTimer);
+    // App 信息先缓存, /api/app 不必等主线程
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [LayerLensLookinBridge updateAppInfoCache];
+    });
     [self startServer];
 #endif
 }
 
 #if DEBUG
 - (void)willEnterForeground {
+    [LayerLensLookinBridge updateAppInfoCache];
     [self.server resumeIfNeeded];
 }
 
 - (void)didEnterBackground {
+    [LayerLensLookinBridge updateAppInfoCache];
     [self.server broadcastEvent:@"state" object:@{@"foreground": @NO}];
 }
 
 - (void)didBecomeActive {
+    [LayerLensLookinBridge updateAppInfoCache];
     [self.server broadcastEvent:@"state" object:@{@"foreground": @YES}];
 }
 

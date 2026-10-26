@@ -35,6 +35,9 @@ final class GitController {
         var stream: FSEventStreamRef?
         var refreshing = false
         var dirty = false
+        /// 已开始和已推送的读取序号, 先开始的读取晚完成时不覆盖新状态
+        var started = 0
+        var published = 0
         var pending: DispatchWorkItem?
         /// 上次推送的内容, 新观看者加入时先发这份
         var last: Data?
@@ -324,10 +327,13 @@ final class GitController {
         var commands: [(arguments: [String], timeout: TimeInterval)] = []
         var input: Data?
         switch action {
+        // 路径经标准输入传给 git, 文件很多时不受命令行长度限制; 文件多时较慢, 超时放宽
         case "stage" where !paths.isEmpty:
-            commands = [(["add", "-A", "--"] + paths, 30)]
+            input = Data(paths.joined(separator: "\0").utf8)
+            commands = [(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], 120)]
         case "unstage" where !paths.isEmpty:
-            commands = [(["restore", "--staged", "--"] + paths, 30)]
+            input = Data(paths.joined(separator: "\0").utf8)
+            commands = [(["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"], 120)]
         case "discard" where !paths.isEmpty || !untracked.isEmpty:
             if !paths.isEmpty { commands.append((["restore", "--worktree", "--"] + paths, 30)) }
             if !untracked.isEmpty { commands.append((["clean", "-f", "--"] + untracked, 30)) }
@@ -398,7 +404,7 @@ final class GitController {
             if action == "revert", let last, !last.ok {
                 _ = Self.run(repo, ["revert", "--abort"], timeout: 30)
             }
-            refresh(root: repo)
+            refreshNow(root: repo)
             if let last, !last.ok {
                 completion(["error": last.message], 500)
             } else {
@@ -435,11 +441,20 @@ final class GitController {
         }
     }
 
-    /// 写操作后立即刷新
-    func refresh(root: String) {
-        queue.async { [self] in
+    /// 写操作后在当前线程读取状态并推送, 推送后再响应网页, 网页的加载结束时列表已是新状态
+    func refreshNow(root: String) {
+        let seq: Int? = queue.sync {
+            guard let watch = watches[root], !watch.subscribers.isEmpty else { return nil }
+            watch.pending?.cancel()
+            watch.pending = nil
+            watch.started += 1
+            return watch.started
+        }
+        guard let seq else { return }
+        let data = statusEvent(repo: root)
+        queue.sync {
             guard let watch = watches[root] else { return }
-            schedule(watch, delay: 0)
+            publish(data, seq: seq, to: watch)
         }
     }
 
@@ -464,25 +479,38 @@ final class GitController {
             return
         }
         watch.refreshing = true
+        watch.started += 1
+        let seq = watch.started
         readQueue.async { [self] in
-            let status = status(repo: watch.root)
-            var data = Data("event: status\ndata: ".utf8)
-            data.append((try? JSONSerialization.data(withJSONObject: status)) ?? Data("{}".utf8))
-            data.append(Data("\n\n".utf8))
+            let data = statusEvent(repo: watch.root)
             queue.async { [self] in
                 watch.refreshing = false
-                watch.last = data
-                // 内容相同也推送: 文件内容变了而状态不变时, 网页据此刷新选中文件的 diff
-                for connection in watch.subscribers.values {
-                    connection.send(content: data, completion: .contentProcessed { error in
-                        if error != nil { connection.cancel() }
-                    })
-                }
+                publish(data, seq: seq, to: watch)
                 if watch.dirty {
                     watch.dirty = false
                     schedule(watch, delay: Self.debounce)
                 }
             }
+        }
+    }
+
+    private func statusEvent(repo: String) -> Data {
+        var data = Data("event: status\ndata: ".utf8)
+        data.append((try? JSONSerialization.data(withJSONObject: status(repo: repo))) ?? Data("{}".utf8))
+        data.append(Data("\n\n".utf8))
+        return data
+    }
+
+    /// 在 queue 上调用. 写操作后的读取可能先于更早开始的一次完成, 旧状态不再推送
+    private func publish(_ data: Data, seq: Int, to watch: Watch) {
+        guard seq > watch.published else { return }
+        watch.published = seq
+        watch.last = data
+        // 内容相同也推送: 文件内容变了而状态不变时, 网页据此刷新选中文件的 diff
+        for connection in watch.subscribers.values {
+            connection.send(content: data, completion: .contentProcessed { error in
+                if error != nil { connection.cancel() }
+            })
         }
     }
 

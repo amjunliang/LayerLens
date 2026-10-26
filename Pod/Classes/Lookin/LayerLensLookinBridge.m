@@ -33,6 +33,21 @@
     return identifier;
 }
 
+static NSDictionary *gCachedAppInfo = nil;
+
++ (void)updateAppInfoCache {
+    NSDictionary *info = [self appInfo];
+    @synchronized (self) {
+        gCachedAppInfo = info;
+    }
+}
+
++ (NSDictionary *)cachedAppInfo {
+    @synchronized (self) {
+        return gCachedAppInfo;
+    }
+}
+
 + (NSDictionary *)appInfo {
     NSDictionary *info = NSBundle.mainBundle.infoDictionary;
     struct utsname systemInfo;

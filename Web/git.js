@@ -12,9 +12,6 @@ const GIT_LOG_PAGE = 50;
 const GIT_DIFF_SIZE_KEY = 'layerlens_git_diff_size';
 const GIT_DIFF_SIZE = { min: 10, max: 20, value: 13 };
 const GIT_SIDE_WIDTH_KEY = 'layerlens_git_side_width';
-const GIT_STAGED_HEIGHT_KEY = 'layerlens_git_staged_height';
-const GIT_LOG_WIDTH_KEY = 'layerlens_git_log_width';
-const GIT_LOG_SHOW_KEY = 'layerlens_git_log_show';
 const GIT_TREE_KEY = 'layerlens_git_tree';
 const GIT_TREE_INDENT = 14;
 // 分组顺序与标题; 冲突最需要处理, 排在最前
@@ -24,10 +21,10 @@ const GIT_GROUPS = [
   ['unstaged', '更改'],
   ['untracked', '未跟踪'],
 ];
-// 列表分区, 按显示顺序: 已暂存区一个分区; 未暂存区先列冲突(只在有时显示), 再列未跟踪文件和未暂存的修改, 与 Sourcetree 一致
+// 列表分区: 未跟踪文件和未暂存的修改放在一起, 与 Sourcetree 一致
 const GIT_SECTIONS = [
-  ['staged', '已暂存文件', ['staged']],
   ['conflicted', '冲突', ['conflicted']],
+  ['staged', '已暂存文件', ['staged']],
   ['changes', '未暂存文件', ['unstaged', 'untracked']],
 ];
 const GIT_STATUS_ICONS = { M: 'pencil', T: 'pencil', A: 'plus', '?': 'plus', D: 'minus', R: 'arrow-right', C: 'plus' };
@@ -51,36 +48,19 @@ const git = {
   // 折叠的分组与 diff 区块
   collapsed: new Set(),
   commits: [],
-  logOid: null,
+  logKey: null,
   logMore: false,
   logLoading: false,
   logScrollX: 0,
   busy: new Set(),
+  // 进行中的暂存或取消暂存 { key, paths }: key 为点击的复选框, 菜单或空格触发时为空, 按路径标记
+  staging: null,
+  // 提交并推送进行中, 推送结束前提交按钮不可用
+  committing: false,
   diffSize: gitLoadDiffSize(),
   // 文件按目录树显示, 关闭时为平铺列表
   tree: gitLoadTreeMode(),
-  // 提交记录一栏是否显示
-  showLog: gitLoadLogShow(),
 };
-
-function gitLoadLogShow() {
-  try {
-    return localStorage.getItem(GIT_LOG_SHOW_KEY) === '1';
-  } catch (e) {
-    return false;
-  }
-}
-
-function gitSetLogShow(show) {
-  git.showLog = show;
-  try {
-    localStorage.setItem(GIT_LOG_SHOW_KEY, show ? '1' : '0');
-  } catch (e) {
-    // ignore
-  }
-  gitRenderHead();
-  gitRenderLog();
-}
 
 function gitLoadTreeMode() {
   try {
@@ -189,7 +169,7 @@ async function gitConnect() {
   git.selected = null;
   git.diffText = null;
   git.commits = [];
-  git.logOid = null;
+  git.logKey = null;
   git.logMore = false;
   git.error = key ? '' : t('未选择 App');
   gitRender();
@@ -272,17 +252,21 @@ function gitOnStatus(text) {
   if (changed) {
     // 选中的文件已不在原分组时(如已暂存), 到其他分组中找同一文件; 都找不到的去掉
     if (git.selected?.kind === 'files') {
+      // 选中整个目录时可能有上千个文件, 先按分组建索引, 避免逐个线性查找
+      const index = new Map(GIT_GROUPS.map(([key]) => [key, new Map((git.status[key] || []).map((file) => [file.path, file]))]));
       const items = git.selected.items.map((item) => {
-        if (gitFindFile(item.group, item.path)) return item;
-        const group = GIT_GROUPS.map(([key]) => gitFindFile(key, item.path) && key).find(Boolean);
-        return group ? { group, path: item.path, origin: gitFindFile(group, item.path).origin } : null;
+        if (index.get(item.group)?.has(item.path)) return item;
+        const group = GIT_GROUPS.map(([key]) => index.get(key).has(item.path) && key).find(Boolean);
+        return group ? { group, path: item.path, origin: index.get(group).get(item.path).origin } : null;
       }).filter(Boolean);
       git.selected = items.length ? { kind: 'files', items } : null;
       if (!git.selected) git.diffText = null;
     }
     gitRender();
-    const oid = git.status.branch?.oid || '';
-    if (oid !== git.logOid) gitLoadLog(oid, true);
+    // 推送、拉取只移动远端分支, HEAD 不变; 上游或领先落后数变化时也重新读取, 更新提交记录中的分支标签
+    const branch = git.status.branch || {};
+    const logKey = [branch.oid, branch.upstream, branch.ahead, branch.behind].join('|');
+    if (logKey !== git.logKey) gitLoadLog(logKey, true);
   }
   // 文件内容变化但状态不变时状态推送内容相同, 也要刷新选中文件的 diff
   if (git.selected?.kind === 'files') gitLoadDiff(false);
@@ -292,17 +276,55 @@ function gitFindFile(group, path) {
   return (git.status?.[group] || []).find((file) => file.path === path);
 }
 
-async function gitLoadLog(oid, reset) {
+// 暂存或取消暂存: 请求是异步的, 文件多或仓库大时 git 较慢; 执行期间点击的复选框显示加载, 其余复选框暂不可点
+async function gitStage(action, paths, key = '') {
+  if (!paths.length || git.staging) return false;
+  git.staging = { key, paths: new Set(paths) };
+  gitRenderHead();
+  gitMarkStaging();
+  const ok = await gitAction(action, { paths });
+  git.staging = null;
+  gitRenderHead();
+  gitMarkStaging();
+  return ok;
+}
+
+function gitStagingKey(key, path) {
+  const staging = git.staging;
+  return !!staging && (staging.key ? staging.key === key : !!path && staging.paths.has(path));
+}
+
+// 开始和结束时只更新复选框状态, 不重绘列表; 期间状态推送重绘时由 gitCheckbox 按 git.staging 标记
+function gitMarkStaging() {
+  document.querySelectorAll('#gitFiles .git-check[data-key]').forEach((check) => {
+    check.classList.toggle('pending', gitStagingKey(check.dataset.key, check.dataset.path));
+  });
+}
+
+// 顶栏刷新: 还没读到仓库时重新连接; 否则立即重新读取状态, 并重新读取提交记录和选中项的 diff
+async function gitRefresh() {
+  if (!git.repo || !git.status) {
+    git.key = '';
+    gitConnect();
+    return;
+  }
+  if (!(await gitAction('refresh'))) return;
+  gitLoadLog(git.logKey, true);
+  gitLoadDiff(false);
+}
+
+// key: 读取时的分支状态, 期间状态变化后旧结果作废
+async function gitLoadLog(key, reset) {
   if (!reset && (git.logLoading || !git.logMore)) return;
-  git.logOid = oid;
+  git.logKey = key;
   git.logLoading = true;
   const result = await gitRequest('log', { skip: reset ? 0 : git.commits.length });
-  if (git.logOid !== oid) return;
+  if (git.logKey !== key) return;
   git.logLoading = false;
   const commits = result.commits || [];
   git.commits = reset ? commits : git.commits.concat(commits);
   git.logMore = commits.length >= GIT_LOG_PAGE;
-  gitRenderLog();
+  gitRenderFiles();
 }
 
 async function gitLoadDiff(reset) {
@@ -377,7 +399,7 @@ function gitSectionFiles(groups) {
 }
 
 function gitAllFiles() {
-  return GIT_SECTIONS.flatMap(([key, , groups]) => key === 'conflicted' && git.collapsed.has('group:' + key) ? [] : gitSectionFiles(groups).map(({ group, file }) => ({ group, path: file.path, origin: file.origin })));
+  return GIT_SECTIONS.flatMap(([key, , groups]) => git.collapsed.has('group:' + key) ? [] : gitSectionFiles(groups).map(({ group, file }) => ({ group, path: file.path, origin: file.origin })));
 }
 
 // 行上的操作作用于该行; 该行在多选中时作用于同一分区的所有选中文件
@@ -419,74 +441,71 @@ function gitRenderHead() {
   $('gitSync').title = branch.upstream || '';
   $('gitTreeMode').classList.toggle('active', git.tree);
   $('gitTreeMode').title = git.tree ? t('平铺显示') : t('树形显示');
-  $('gitLogToggle').classList.toggle('active', git.showLog);
-  $('gitLogToggle').title = git.showLog ? t('隐藏提交记录') : t('显示提交记录');
   $('gitPull').disabled = !git.status || !branch.upstream || git.busy.has('pull');
   $('gitPush').disabled = !git.status || git.busy.has('push');
+  $('gitBody').classList.toggle('staging', !!git.staging);
+  $('gitRefresh').disabled = git.busy.has('refresh');
+  $('gitRefresh').classList.toggle('loading', git.busy.has('refresh'));
   $('gitPull').classList.toggle('loading', git.busy.has('pull'));
   $('gitPush').classList.toggle('loading', git.busy.has('push'));
   const staged = git.status?.staged?.length || 0;
   const amend = $('gitAmend').checked;
   // 有上游且没有领先提交时, 上一次提交已在远端, 修改它会改写已推送的历史
   $('gitAmendWarn').hidden = !(amend && branch.upstream && !branch.ahead);
-  $('gitCommit').disabled = git.busy.has('commit') || !git.status || (!staged && !amend);
-  $('gitCommit').textContent = git.busy.has('commit') ? t('正在提交…') : staged ? t('提交 ({0})', staged) : t('提交');
+  // 并推送: 没有远端时不显示, 也不推送
+  const pushAfter = !local && $('gitPushAfter').checked;
+  $('gitPushAfterLabel').style.display = local ? 'none' : '';
+  $('gitCommit').disabled = git.busy.has('commit') || git.committing || !git.status || (!staged && !amend);
+  $('gitCommit').textContent = git.busy.has('commit') ? t('正在提交…') : git.committing && git.busy.has('push') ? t('正在推送…')
+    : pushAfter ? (staged ? t('提交并推送 ({0})', staged) : t('提交并推送')) : staged ? t('提交 ({0})', staged) : t('提交');
 }
 
-// 左栏上下两个固定区域: 已暂存区和未暂存区, 各自滚动, 标题固定在区域顶部
 function gitRenderFiles() {
+  const box = $('gitFiles');
   const empty = $('gitEmpty');
   const ready = !!git.status && !git.status.error;
   $('gitBody').classList.toggle('ready', ready);
   if (!ready) {
-    $('gitStagedFiles').replaceChildren();
-    $('gitChangesFiles').replaceChildren();
+    box.replaceChildren();
     empty.hidden = false;
     empty.textContent = git.error || git.status?.error || (git.repo ? t('正在读取改动…') : t('正在查找仓库…'));
     return;
   }
   empty.hidden = true;
+  const fragment = document.createDocumentFragment();
   // 按显示顺序收集可见文件, 供 ⇧ 范围选择; 行渲染完后才填满, 点击时已完整
   const ordered = git.tree ? [] : gitAllFiles();
-  const files = Object.fromEntries(GIT_SECTIONS.map(([key, title, groups]) => [key, gitSectionFiles(groups)]));
-  const append = (fragment, key, list) => {
-    if (git.tree) gitAppendTree(fragment, key, gitFileTree(list), 0, ordered);
-    else list.forEach(({ group, file }) => fragment.append(gitFileRow(group, file, ordered)));
-  };
-  const staged = document.createDocumentFragment();
-  if (files.staged.length) append(staged, 'staged', files.staged);
-  else staged.append(el('div', 'git-clean', t('没有已暂存的文件')));
-  const changes = document.createDocumentFragment();
-  // 冲突最需要处理, 排在未暂存区最前, 可折叠
-  if (files.conflicted.length) {
-    const collapsed = git.collapsed.has('group:conflicted');
-    changes.append(gitSectionHead('conflicted', '冲突', files.conflicted, collapsed));
-    if (!collapsed) append(changes, 'conflicted', files.conflicted);
+  const sections = GIT_SECTIONS.map(([key, title, groups]) => [key, title, gitSectionFiles(groups)]);
+  if (!sections.some(([, , files]) => files.length)) {
+    fragment.append(el('div', 'git-clean', t('没有未提交的改动')));
+  } else {
+    sections.forEach(([key, title, files]) => {
+      // 已暂存和未暂存始终显示, 冲突只在有时显示
+      if (key === 'conflicted' && !files.length) return;
+      const collapsed = git.collapsed.has('group:' + key);
+      fragment.append(gitSectionHead(key, title, files, collapsed));
+      if (collapsed) return;
+      if (git.tree) gitAppendTree(fragment, key, gitFileTree(files), 0, ordered);
+      else files.forEach(({ group, file }) => fragment.append(gitFileRow(group, file, ordered)));
+    });
   }
-  if (files.changes.length) append(changes, 'changes', files.changes);
-  else if (!files.conflicted.length) changes.append(el('div', 'git-clean', t('没有未暂存的改动')));
-  if (git.status.truncated) changes.append(el('div', 'git-note', t('文件过多, 每组只显示前 2000 个')));
-  gitFillArea('gitStaged', gitSectionHead('staged', '已暂存文件', files.staged, false, true), staged);
-  gitFillArea('gitChanges', gitSectionHead('changes', '未暂存文件', files.changes.concat(files.conflicted), false, true), changes);
-  gitRenderLog();
-}
-
-function gitFillArea(prefix, head, fragment) {
-  head.id = prefix + 'Head';
-  $(prefix + 'Head').replaceWith(head);
-  const box = $(prefix + 'Files');
+  if (git.status.truncated) fragment.append(el('div', 'git-note', t('文件过多, 每组只显示前 2000 个')));
+  if (git.commits.length) gitAppendLog(fragment);
   const scroll = box.scrollTop;
   box.replaceChildren(fragment);
   box.scrollTop = scroll;
+  const main = box.querySelector('.git-log-main');
+  if (main) main.scrollLeft = git.logScrollX || 0;
 }
 
-// 提交记录单独一栏, 在改动和 diff 之间, 由顶栏按钮显示或隐藏
-function gitRenderLog() {
-  const box = $('gitLogList');
-  $('gitHistory').hidden = !git.showLog;
-  $('gitLogSplitter').hidden = !git.showLog;
-  const fragment = document.createDocumentFragment();
-  if (git.showLog) {
+// 提交记录接在改动后面, 同一个列表滚动
+function gitAppendLog(fragment) {
+  const collapsed = git.collapsed.has('group:log');
+  const head = el('div', 'git-group git-toggle' + (collapsed ? ' collapsed' : ''));
+  head.append(icon('chevron'), el('span', 'git-group-title', t('提交记录')));
+  head.addEventListener('click', () => gitToggle('group:log', gitRenderFiles));
+  fragment.append(head);
+  if (!collapsed) {
     // 时间一列不动, 哈希和标题一列可左右滚动; 两列行高相同, 随列表一起上下滚动.
     // 不用 sticky 固定时间列, WebKit 中行内 sticky 单元格左右滚动时绘制错乱
     const dates = el('div', 'git-log-dates');
@@ -521,11 +540,6 @@ function gitRenderLog() {
     if (git.logLoading) fragment.append(el('div', 'git-note', t('正在读取…')));
     else if (!git.logMore) fragment.append(el('div', 'git-note', t('共 {0} 个提交, 已全部显示', git.commits.length)));
   }
-  const scroll = box.scrollTop;
-  box.replaceChildren(fragment);
-  box.scrollTop = scroll;
-  const main = box.querySelector('.git-log-main');
-  if (main) main.scrollLeft = git.logScrollX || 0;
 }
 
 // 今天只显示时间, 今年显示月日, 更早显示年月日; 宽度固定便于对齐
@@ -547,30 +561,26 @@ function gitToggle(key, render) {
 }
 
 // 分区标题: 复选框暂存或取消暂存整个分区, 点击其余位置折叠
-// fixed 为区域顶部的固定标题, 不能折叠
-function gitSectionHead(key, title, files, collapsed, fixed) {
-  const head = el('div', 'git-group' + (fixed ? ' git-area-head' : ' git-toggle') + (collapsed ? ' collapsed' : ''));
+function gitSectionHead(key, title, files, collapsed) {
+  const head = el('div', 'git-group git-toggle' + (collapsed ? ' collapsed' : ''));
   const paths = files.map(({ file }) => file.path);
-  const check = gitCheckbox(key === 'staged' && files.length > 0, key === 'staged' ? t('全部取消暂存') : t('全部暂存'), () => {
-    if (!paths.length) return;
-    gitAction(key === 'staged' ? 'unstage' : 'stage', { paths });
-  });
+  const check = gitCheckbox(key === 'staged' && files.length > 0, key === 'staged' ? t('全部取消暂存') : t('全部暂存'), () => gitStage(key === 'staged' ? 'unstage' : 'stage', paths, 'group:' + key), 'group:' + key);
   check.disabled = !files.length;
-  if (fixed) {
-    head.append(check, el('span', 'git-group-title', t(title)), el('span', 'git-group-count', String(files.length)));
-    return head;
-  }
   head.append(icon('chevron'), check, el('span', 'git-group-title', t(title)), el('span', 'git-group-count', String(files.length)));
   head.addEventListener('click', () => gitToggle('group:' + key, gitRenderFiles));
   return head;
 }
 
 // 勾选状态由 git 状态推送决定, 点击时只发出操作, 不直接改变勾选
-function gitCheckbox(checked, title, onClick) {
+// key 标识这个复选框, 暂存进行中时据此显示加载; path 用于菜单或空格触发时按文件标记
+function gitCheckbox(checked, title, onClick, key, path) {
   const check = el('input', 'git-check');
   check.type = 'checkbox';
   check.checked = checked;
   check.title = title;
+  check.dataset.key = key;
+  if (path) check.dataset.path = path;
+  check.classList.toggle('pending', gitStagingKey(key, path));
   check.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -589,9 +599,10 @@ function gitFileRow(group, file, ordered, depth) {
   const letter = group === 'conflicted' ? 'U' : file.status;
   const badge = gitStatusBadge(letter);
   const staged = group === 'staged';
+  const key = 'file:' + group + ':' + file.path;
   const check = gitCheckbox(staged, staged ? t('取消暂存') : t('暂存'), () => {
-    gitAction(staged ? 'unstage' : 'stage', { paths: gitTargets(group, file).map((item) => item.path) });
-  });
+    gitStage(staged ? 'unstage' : 'stage', gitTargets(group, file).map((item) => item.path), key);
+  }, key, file.path);
   // 复选框固定在最左一列, 树形缩进放在复选框后面; 文件图标与同层目录的文件夹图标对齐
   row.append(check);
   if (depth != null) row.append(gitIndent(depth * GIT_TREE_INDENT + 18));
@@ -662,7 +673,7 @@ function gitDirRow(section, dir, depth, collapsed) {
   const staged = section === 'staged';
   const files = gitTreeFiles(dir);
   const paths = files.map(({ file }) => file.path);
-  const check = gitCheckbox(staged, staged ? t('取消暂存') : t('暂存'), () => gitAction(staged ? 'unstage' : 'stage', { paths }));
+  const check = gitCheckbox(staged, staged ? t('取消暂存') : t('暂存'), () => gitStage(staged ? 'unstage' : 'stage', paths, key), key);
   const chevron = icon('chevron');
   chevron.classList.add('git-chevron');
   chevron.addEventListener('click', (e) => {
@@ -972,6 +983,9 @@ function gitDiffView(text, multiple, hunkGroup) {
 
 // MARK: - Setup
 
+// 提交后是否推送, 记住上次的选择
+const GIT_PUSH_AFTER_KEY = 'layerlens_git_push_after';
+
 async function gitCommit() {
   const message = $('gitMessage').value.trim();
   const amend = $('gitAmend').checked;
@@ -980,11 +994,22 @@ async function gitCommit() {
     toast(t('请填写提交说明'), true, true);
     return;
   }
-  if (await gitAction('commit', { message, amend })) {
+  const pushAfter = !!git.status?.hasRemote && $('gitPushAfter').checked;
+  // 提交到推送结束前按钮保持不可用, 显示推送进度
+  git.committing = true;
+  try {
+    if (!(await gitAction('commit', { message, amend }))) return;
     $('gitMessage').value = '';
     gitFitMessage();
     $('gitAmend').checked = false;
-    toast(t('已提交'));
+    if (!pushAfter) {
+      toast(t('已提交'));
+      return;
+    }
+    // 推送失败时 gitAction 已提示原因, 提交已完成
+    if (await gitAction('push')) toast(t('已提交并推送'));
+  } finally {
+    git.committing = false;
     gitRenderHead();
   }
 }
@@ -998,13 +1023,13 @@ function gitFitMessage() {
   input.style.overflowY = height > 120 ? 'auto' : 'hidden';
 }
 
-// 分隔线拖动调整相邻区域的尺寸, 写入 CSS 变量并记住; 上下限由 CSS 的 min / max 约束, 松开后保存实际生效的尺寸
-function gitSetupDrag(splitter, target, name, storageKey, measure) {
-  const vertical = name.endsWith('-h');
-  const host = $('gitBody');
-  const apply = (size) => host.style.setProperty(name, Math.round(size) + 'px');
+// 文件列表与 diff 之间的分隔线, 拖动调整列表宽度; 上下限由 CSS 的 min-width / max-width 约束
+function gitSetupSplitter() {
+  const body = $('gitBody');
+  const splitter = $('gitSplitter');
+  const apply = (width) => body.style.setProperty('--git-side-w', Math.round(width) + 'px');
   try {
-    const saved = Number(localStorage.getItem(storageKey)) || 0;
+    const saved = Number(localStorage.getItem(GIT_SIDE_WIDTH_KEY)) || 0;
     if (saved) apply(saved);
   } catch (e) {
     // ignore
@@ -1013,17 +1038,18 @@ function gitSetupDrag(splitter, target, name, storageKey, measure) {
     e.preventDefault();
     splitter.setPointerCapture(e.pointerId);
     splitter.classList.add('dragging');
-    const move = (ev) => apply(measure(ev));
+    const left = body.getBoundingClientRect().left;
+    const move = (ev) => apply(ev.clientX - left);
     const up = () => {
       splitter.classList.remove('dragging');
       splitter.removeEventListener('pointermove', move);
       splitter.removeEventListener('pointerup', up);
       splitter.removeEventListener('pointercancel', up);
-      const rect = target.getBoundingClientRect();
-      const size = vertical ? rect.height : rect.width;
-      apply(size);
+      // 保存实际生效的宽度, 超出上下限的部分不记
+      const width = body.querySelector('.git-side').getBoundingClientRect().width;
+      apply(width);
       try {
-        localStorage.setItem(storageKey, String(Math.round(size)));
+        localStorage.setItem(GIT_SIDE_WIDTH_KEY, String(Math.round(width)));
       } catch (e) {
         // ignore
       }
@@ -1034,16 +1060,6 @@ function gitSetupDrag(splitter, target, name, storageKey, measure) {
   });
 }
 
-// 左栏宽度、已暂存区高度、提交记录宽度
-function gitSetupSplitters() {
-  const side = document.querySelector('.git-side');
-  const staged = $('gitStagedArea');
-  const history = $('gitHistory');
-  gitSetupDrag($('gitSplitter'), side, '--git-side-w', GIT_SIDE_WIDTH_KEY, (ev) => ev.clientX - side.getBoundingClientRect().left);
-  gitSetupDrag($('gitAreaSplitter'), staged, '--git-staged-h', GIT_STAGED_HEIGHT_KEY, (ev) => ev.clientY - staged.getBoundingClientRect().top);
-  gitSetupDrag($('gitLogSplitter'), history, '--git-log-w', GIT_LOG_WIDTH_KEY, (ev) => ev.clientX - history.getBoundingClientRect().left);
-}
-
 // 鼠标最后点在改动面板内且选中了文件时, 空格暂存或取消暂存选中的文件: 已暂存的取消暂存, 其余暂存
 function gitHandleKey(e) {
   if (e.code !== 'Space' || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return false;
@@ -1051,8 +1067,10 @@ function gitHandleKey(e) {
   const items = git.selected.items;
   const unstage = items.filter((item) => item.group === 'staged').map((item) => item.path);
   const stage = items.filter((item) => item.group !== 'staged').map((item) => item.path);
-  if (unstage.length) gitAction('unstage', { paths: unstage });
-  if (stage.length) gitAction('stage', { paths: stage });
+  (async () => {
+    if (unstage.length) await gitStage('unstage', unstage);
+    if (stage.length) await gitStage('stage', stage);
+  })();
   return true;
 }
 
@@ -1067,8 +1085,22 @@ function setupGit() {
     if (await gitAction('push')) toast(t('已推送'));
   });
   $('gitTreeMode').addEventListener('click', () => gitSetTreeMode(!git.tree));
+  $('gitRefresh').addEventListener('click', gitRefresh);
   $('gitCommit').addEventListener('click', gitCommit);
   $('gitAmend').addEventListener('change', gitRenderHead);
+  try {
+    $('gitPushAfter').checked = localStorage.getItem(GIT_PUSH_AFTER_KEY) === '1';
+  } catch (e) {
+    // 不可用时默认不推送
+  }
+  $('gitPushAfter').addEventListener('change', () => {
+    try {
+      localStorage.setItem(GIT_PUSH_AFTER_KEY, $('gitPushAfter').checked ? '1' : '0');
+    } catch (e) {
+      // 不可用时只在本次有效
+    }
+    gitRenderHead();
+  });
   $('gitMessage').addEventListener('input', gitFitMessage);
   $('gitMessage').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -1076,12 +1108,11 @@ function setupGit() {
       gitCommit();
     }
   });
-  gitSetupSplitters();
-  $('gitLogToggle').addEventListener('click', () => gitSetLogShow(!git.showLog));
+  gitSetupSplitter();
   // 滑到底部附近时加载更多提交
-  $('gitLogList').addEventListener('scroll', (e) => {
+  $('gitFiles').addEventListener('scroll', (e) => {
     const box = e.target;
-    if (box.scrollHeight - box.scrollTop - box.clientHeight < 200) gitLoadLog(git.logOid, false);
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < 200) gitLoadLog(git.logKey, false);
   });
   gitRender();
 }

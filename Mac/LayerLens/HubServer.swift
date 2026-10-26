@@ -401,6 +401,12 @@ final class HubServer {
                 git.patch(repo: root, commit: head.query["commit"] ?? "") { result in
                     connection.respond(.json(result, status: result["error"] == nil ? 200 : 500))
                 }
+            case ("POST", "refresh"):
+                // 顶栏刷新: 立即重新读取状态推送给观看者, 不等文件变化; 推送后再响应, 刷新按钮的加载与列表更新同步
+                DispatchQueue.global().async { [git] in
+                    git.refreshNow(root: root)
+                    connection.respond(.json(["ok": true]))
+                }
             case ("POST", "reveal"):
                 let ok = git.reveal(repo: root, path: json["path"] as? String ?? "")
                 connection.respond(.json(ok ? ["ok": true] : ["error": "File not found"], status: ok ? 200 : 404))

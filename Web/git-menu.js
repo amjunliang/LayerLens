@@ -130,8 +130,8 @@ function gitPathItems(paths) {
 function gitChangeItems(section, items) {
   const paths = items.map((item) => item.path);
   const count = (text, n) => (n > 1 ? `${text} (${n})` : text);
-  if (section === 'staged') return [[count(t('取消暂存'), paths.length), () => gitAction('unstage', { paths })]];
-  const entries = [[count(t('暂存'), paths.length), () => gitAction('stage', { paths })]];
+  if (section === 'staged') return [[count(t('取消暂存'), paths.length), () => gitStage('unstage', paths)]];
+  const entries = [[count(t('暂存'), paths.length), () => gitStage('stage', paths)]];
   const discard = items.filter((item) => item.group === 'unstaged' || item.group === 'untracked');
   if (discard.length) {
     const removing = discard.every((item) => item.group === 'untracked');

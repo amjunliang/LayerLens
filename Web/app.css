@@ -241,6 +241,13 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 /* 状态点、名称和箭头合成一个按钮, 点按区域覆盖整块 */
 .target-btn { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 28px; padding: 0 8px; border: none; background: none; border-radius: 999px; color: var(--text); }
 .target-btn:hover { background: var(--hover); }
+/* 应用名后的所在设备: 图标 + 设备名 + 模拟 / 真机标记, 弱化显示 */
+.target-label { display: inline-flex; align-items: center; gap: 4px; min-width: 0; color: var(--muted); font-size: 12px; }
+.target-label[hidden] { display: none; }
+.target-label .icon { width: 13px; height: 13px; flex: none; }
+.target-label-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+.target-label-kind { flex: none; padding: 0 5px; border-radius: 4px; background: var(--hover); font-size: 11px; line-height: 16px; }
+.target-label-kind[hidden] { display: none; }
 .target-caret { width: 14px; height: 14px; color: var(--muted); transform: rotate(90deg); }
 /* 宽度随内容(最宽一行), 不留大片空白; 不超过窗口 */
 .menu.target-menu { left: 0; right: auto; width: max-content; min-width: 240px; max-width: calc(100vw - 12px); max-height: 70vh; overflow: auto; transform-origin: top left; }
@@ -943,24 +950,7 @@ body.log-open .log-pane { display: flex; }
 .git-body { flex: 1; min-height: 0; display: flex; position: relative; }
 .git-side { flex: none; width: var(--git-side-w, 340px); max-width: calc(100% - 240px); min-width: 200px; display: flex; flex-direction: column; }
 /* 改动与提交记录在同一个列表, 提交框固定在底部 */
-/* 左栏上下两个固定区域: 已暂存区和未暂存区, 各自滚动, 中间分隔线拖动调整已暂存区高度; 提交框固定在底部 */
-.git-area { display: flex; flex-direction: column; min-height: 60px; }
-#gitStagedArea { flex: none; height: var(--git-staged-h, calc(50% - 30px)); max-height: calc(100% - 140px); }
-#gitChangesArea { flex: 1; }
 .git-files { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding-bottom: 4px; font-size: 13px; }
-/* 固定标题没有折叠箭头, 复选框与文件行的复选框对齐 */
-.git-group.git-area-head { flex: none; padding-left: 26px; }
-.git-area-splitter { flex: none; height: 1px; background: var(--border); position: relative; z-index: 2; cursor: row-resize; touch-action: none; -webkit-user-select: none; user-select: none; }
-/* 同竖向分隔线: 两侧留出拖动范围, 悬停和拖动时加粗为 3px 强调色 */
-.git-area-splitter::after { content: ""; position: absolute; inset: -6px 0; }
-.git-area-splitter::before { content: ""; position: absolute; inset: -1px 0; z-index: 1; background: transparent; transition: background 0.12s; pointer-events: none; }
-.git-area-splitter:hover, .git-area-splitter.dragging { background: var(--accent); }
-.git-area-splitter:hover::before, .git-area-splitter.dragging::before { background: var(--accent); }
-/* 提交记录单独一栏, 在改动和 diff 之间, 宽度可拖动 */
-.git-history { flex: none; width: var(--git-log-w, 360px); min-width: 200px; max-width: calc(100% - 480px); display: flex; flex-direction: column; }
-.git-history[hidden], .git-splitter[hidden] { display: none; }
-.git-history > .git-group { flex: none; }
-.git-log-list { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding-bottom: var(--edge-fade); font-size: 13px; }
 .git-body:not(.ready) .git-side, .git-body:not(.ready) .git-splitter, .git-body:not(.ready) .git-diff { display: none; }
 /* 分区标题栏(同 Sourcetree): 复选框暂存整个分区 */
 .git-group { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px 0 8px; background: color-mix(in srgb, var(--text) 9%, var(--panel)); border-bottom: 1px solid var(--border); color: var(--text); font-size: 12px; font-weight: 600; }
@@ -969,6 +959,9 @@ body.log-open .log-pane { display: flex; }
 .git-check:hover:not(:disabled) { background-color: color-mix(in srgb, var(--text) 22%, transparent); }
 .git-check:checked, .git-check:checked:hover { background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center / 11px no-repeat; }
 .git-check:disabled { opacity: 0.4; }
+/* 暂存进行中: 点击的复选框变为加载圈, 所有复选框暂不可点, 避免重复提交 */
+.git-body.staging .git-check { pointer-events: none; }
+.git-check.pending, .git-check.pending:hover { border-radius: 0; background: var(--accent); -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M7 1.9a5.1 5.1 0 1 1 -5.1 5.1'/%3E%3C/svg%3E") center / 14px 14px no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M7 1.9a5.1 5.1 0 1 1 -5.1 5.1'/%3E%3C/svg%3E") center / 14px 14px no-repeat; animation: icon-spin 0.8s linear infinite; }
 .git-group-title { flex: 1; }
 .git-toggle { cursor: default; }
 /* 箭头默认朝右, 展开时朝下 */
@@ -1023,7 +1016,10 @@ body.log-open .log-pane { display: flex; }
 .git-commit { flex: none; padding: 6px 8px calc(6px + var(--edge-fade)); border-top: 1px solid var(--border); background: var(--panel-head); }
 .git-commit textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: none; height: 28px; max-height: 120px; padding: 4px 8px; overflow: hidden; white-space: pre-wrap; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: 13px/18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; outline: none; }
 .git-commit textarea:focus { border-color: var(--accent); }
-.git-commit-row { display: flex; align-items: flex-end; gap: 6px; }
+/* 输入框独占一行, 下一行为选项和靠右的提交按钮, 窄面板中输入框不被挤压 */
+.git-commit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.git-commit-row textarea { flex-basis: 100%; }
+.git-commit-row button { margin-left: auto; }
 .git-amend { flex: none; display: flex; align-items: center; gap: 5px; height: 28px; color: var(--text-2); font-size: 12px; white-space: nowrap; }
 .git-amend-warn { margin-bottom: 6px; padding: 4px 8px; border-radius: 5px; background: color-mix(in srgb, var(--warning, #e6a23c) 16%, transparent); color: var(--warning, #e6a23c); font-size: 12px; }
 .git-commit-row button { flex: none; height: 28px; padding: 0 12px; }
@@ -1183,6 +1179,7 @@ body.log-open .log-pane { display: flex; }
 @media (max-width: 760px) {
   .toolbar { padding: 0 6px; gap: 8px; }
   .app-name { display: none; }
+  .target-label { display: none; }
 }
 
 /* 小屏: 触屏窄屏, 或桌面窗口窄到工具栏放不下 */
@@ -1197,8 +1194,6 @@ body.log-open .log-pane { display: flex; }
   /* 窄屏: 文件列表占满, 选中文件后 diff 覆盖列表, 左上角返回 */
   .git-side { width: auto; max-width: none; min-width: 0; flex: 1; }
   .git-diff { position: absolute; inset: 0; z-index: 3; }
-  /* 提交记录盖住改动列表, 再点按钮切回 */
-  .git-history { position: absolute; inset: 0; z-index: 2; width: auto; min-width: 0; max-width: none; background: var(--panel); }
   .git-body:not(.has-diff) .git-diff { display: none; }
   .git-diff-back { display: inline-flex; }
   .net-splitter { display: none; }

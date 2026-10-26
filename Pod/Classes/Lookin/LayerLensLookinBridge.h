@@ -15,6 +15,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSDictionary *)appInfo;
 
+/// 在主线程重新计算 App 信息并缓存; 启动、前后台变化时调用
++ (void)updateAppInfoCache;
+
+/// 缓存的 App 信息, 可在任意线程调用; 主线程繁忙时也能立即响应, 未缓存时返回 nil
++ (nullable NSDictionary *)cachedAppInfo;
+
 /// 本次启动的随机标识, 网页据此判断重连后是否为同一次启动
 + (NSString *)instanceId;
 

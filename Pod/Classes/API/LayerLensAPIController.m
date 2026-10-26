@@ -17,6 +17,13 @@
 #import "LayerLensNetworkRecorder.h"
 #import <UIKit/UIKit.h>
 
+@interface LayerLensAPIController ()
+
+/// 已排队到主线程的 App 信息刷新尚未执行
+@property (nonatomic, assign) BOOL appInfoRefreshPending;
+
+@end
+
 @implementation LayerLensAPIController
 
 - (void)registerRoutesToRouter:(LayerLensRouter *)router {
@@ -27,7 +34,12 @@
     }];
 
     [router addRoute:@"GET" path:@"/api/events" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
-        // 连上时带上当前前后台状态, 之后的变化由 LayerLens 推送
+        // 连上时带上当前前后台状态, 之后的变化由 LayerLens 推送; 有缓存时不等主线程
+        NSNumber *cached = [LayerLensLookinBridge cachedAppInfo][@"foreground"];
+        if (cached) {
+            responder([LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"state" object:@{@"foreground": cached}]);
+            return;
+        }
         [self onMain:^{
             BOOL foreground = UIApplication.sharedApplication.applicationState != UIApplicationStateBackground;
             responder([LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"state" object:@{@"foreground": @(foreground)}]);
@@ -71,9 +83,18 @@
     [self registerSandboxRoutesToRouter:router];
     [self registerNetworkRoutesToRouter:router];
 
+    // 主线程繁忙(取层级、截图、加载视频等)时 Mac App 会超时并误判为挂起, 先用缓存立即响应, 再到主线程刷新缓存(如旋转后的屏幕尺寸);
+    // 真正挂起时整个进程不运行, 照样不响应
     [router addRoute:@"GET" path:@"/api/app" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSDictionary *cached = [LayerLensLookinBridge cachedAppInfo];
+        if (cached) {
+            responder([LayerLensHTTPResponse JSONResponse:cached]);
+            [self refreshAppInfoCache];
+            return;
+        }
         [self onMain:^{
-            responder([LayerLensHTTPResponse JSONResponse:[LayerLensLookinBridge appInfo]]);
+            [LayerLensLookinBridge updateAppInfoCache];
+            responder([LayerLensHTTPResponse JSONResponse:[LayerLensLookinBridge cachedAppInfo] ?: @{}]);
         }];
     }];
 
@@ -366,6 +387,22 @@
 
 - (unsigned long)oidFromString:(NSString *)string {
     return strtoul(string.UTF8String ?: "0", NULL, 10);
+}
+
+/// Mac App 每 2s 请求一次, 主线程繁忙时只排队一次刷新
+- (void)refreshAppInfoCache {
+    @synchronized (self) {
+        if (self.appInfoRefreshPending) {
+            return;
+        }
+        self.appInfoRefreshPending = YES;
+    }
+    [self onMain:^{
+        @synchronized (self) {
+            self.appInfoRefreshPending = NO;
+        }
+        [LayerLensLookinBridge updateAppInfoCache];
+    }];
 }
 
 - (void)onMain:(dispatch_block_t)block {
