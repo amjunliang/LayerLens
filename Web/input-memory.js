@@ -3,7 +3,7 @@
 // 搜索和过滤框的内容保存在本机, 重启 LayerLens 或重新打开窗口后恢复. 恢复时触发输入事件, 由原有的处理逻辑应用;
 // 独立日志窗口与主窗口共用同一份, 以最后一次输入为准
 const INPUT_MEMORY_KEY = 'layerlens_inputs';
-const INPUT_MEMORY_IDS = ['search', 'logFilter', 'netFilter', 'netType'];
+const INPUT_MEMORY_IDS = ['search', 'logFilter', 'netFilter'];
 
 function loadInputMemory() {
   try {

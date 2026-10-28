@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A5BFB490BB7B7963D791D2B0 /* NetworkRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 172094806F4A41B513CB09F3 /* NetworkRecorder.swift */; };
 		3C0FE6739EC4B2BEA7A1F001 /* CacheStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB091DB094C08E7B741834C3 /* CacheStore.swift */; };
+		3C0FE6739EC4B2BEA7A1F002 /* LaunchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB091DB094C08E7B741834C4 /* LaunchStore.swift */; };
 		AE84A5CDEA943AEB43DF31DE /* AppEventStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4AE03E65977FE980A4EF /* AppEventStream.swift */; };
 		5253D097907328635F744583 /* TerminalController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EE90C3A2EDC26546E9AE324 /* TerminalController.swift */; };
 		0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */; };
@@ -57,6 +58,7 @@
 		A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageZoom.swift; sourceTree = "<group>"; };
 		172094806F4A41B513CB09F3 /* NetworkRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkRecorder.swift; sourceTree = "<group>"; };
 		BB091DB094C08E7B741834C3 /* CacheStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheStore.swift; sourceTree = "<group>"; };
+		BB091DB094C08E7B741834C4 /* LaunchStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchStore.swift; sourceTree = "<group>"; };
 		9CCC4AE03E65977FE980A4EF /* AppEventStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEventStream.swift; sourceTree = "<group>"; };
 		7EE90C3A2EDC26546E9AE324 /* TerminalController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalController.swift; sourceTree = "<group>"; };
 		A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketConnection.swift; sourceTree = "<group>"; };
@@ -115,6 +117,7 @@
 				018BD14CAF3AA5013A6E67EA /* Usbmux.swift */,
 				172094806F4A41B513CB09F3 /* NetworkRecorder.swift */,
 				BB091DB094C08E7B741834C3 /* CacheStore.swift */,
+				BB091DB094C08E7B741834C4 /* LaunchStore.swift */,
 				9CCC4AE03E65977FE980A4EF /* AppEventStream.swift */,
 				7EE90C3A2EDC26546E9AE324 /* TerminalController.swift */,
 				A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */,
@@ -223,6 +226,7 @@
 				5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */,
 				A5BFB490BB7B7963D791D2B0 /* NetworkRecorder.swift in Sources */,
 				3C0FE6739EC4B2BEA7A1F001 /* CacheStore.swift in Sources */,
+				3C0FE6739EC4B2BEA7A1F002 /* LaunchStore.swift in Sources */,
 				AE84A5CDEA943AEB43DF31DE /* AppEventStream.swift in Sources */,
 				5253D097907328635F744583 /* TerminalController.swift in Sources */,
 				0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */,

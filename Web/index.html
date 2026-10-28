@@ -196,6 +196,7 @@
         <input id="logFilter" type="search" placeholder="过滤, 多个关键词用 | 分隔, 以 \ 开头为正则" spellcheck="false" autocomplete="off">
       </label>
       <span class="log-count log-only" id="logCount"></span>
+      <select id="logLaunch" class="net-session log-only" aria-label="保存的启动" hidden></select>
       <div class="log-source log-only" id="logSource" hidden>
         <span class="log-source-name" id="logSourceName"></span>
         <button class="log-source-back" id="logBackLive">返回实时日志</button>
@@ -206,16 +207,9 @@
       <button class="icon-btn log-only" id="logClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
       <label class="search-box log-search net-only" id="netSearch">
         <svg class="icon"><use href="#i-search"/></svg>
-        <input id="netFilter" type="search" placeholder="过滤地址, 方法, 状态码或内容, 多个关键词用 | 分隔" spellcheck="false" autocomplete="off">
+        <input id="netFilter" type="search" placeholder="过滤, | 分隔, \ 开头为正则" spellcheck="false" autocomplete="off">
       </label>
-      <select id="netType" class="net-type net-only" aria-label="类型">
-        <option value="">全部</option>
-        <option value="json">JSON</option>
-        <option value="image">图片</option>
-        <option value="doc">文档</option>
-        <option value="other">其他</option>
-        <option value="failed">失败</option>
-      </select>
+      <button class="icon-btn toggle net-only" id="netFilterBar" title="隐藏过滤条" aria-label="过滤条" aria-pressed="true"><svg class="icon"><use href="#i-filter"/></svg></button>
       <span class="log-count net-only" id="netCount"></span>
       <select id="netSession" class="net-session net-only" aria-label="保存的启动" hidden></select>
       <button class="icon-btn toggle net-only" id="netCapture" title="开启抓包" aria-label="抓包" aria-pressed="false"><svg class="icon"><use href="#i-record"/></svg></button>
@@ -271,6 +265,13 @@
     <div class="log-detail log-only" id="logDetail" hidden></div>
     <div class="net-body net-only" id="netBody">
       <div class="net-main">
+        <div class="net-filter-row" id="netFilterRow">
+          <div class="net-chips" id="netChips">
+            <button class="net-chips-arrow left" id="netChipsLeft" aria-label="向左滚动" hidden>‹</button>
+            <div class="net-chips-track" id="netChipsTrack"></div>
+            <button class="net-chips-arrow right" id="netChipsRight" aria-label="向右滚动" hidden>›</button>
+          </div>
+        </div>
         <div class="net-list" id="netList" tabindex="0">
           <div class="net-cols">
             <span class="net-start">时间</span><span class="net-method">方法</span><span class="net-status">状态</span><span class="net-size">大小</span><span class="net-time">耗时</span><span class="net-host">域名</span><span class="net-path">路径</span><span class="net-kind">类型</span>
@@ -280,8 +281,8 @@
         </div>
         <div class="log-empty" id="netEmpty" hidden></div>
       </div>
-      <div class="net-splitter" id="netSplitter" hidden></div>
-      <div class="net-detail" id="netDetail" hidden></div>
+      <div class="net-splitter" id="netSplitter"></div>
+      <div class="net-detail" id="netDetail"><div class="net-detail-empty">选择一个请求查看详情</div></div>
     </div>
     <div class="git-body git-only" id="gitBody">
       <div class="git-side">
@@ -384,10 +385,12 @@
 <script src="/assets/xterm.js"></script>
 <script src="/assets/xterm-addon-fit.js"></script>
 <script src="/assets/terminal.js"></script>
+<script src="/assets/launches.js"></script>
 <script src="/assets/net-capture.js"></script>
 <script src="/assets/offline-view.js"></script>
 <script src="/assets/input-memory.js"></script>
 <script src="/assets/cache.js"></script>
+<script src="/assets/net-filters.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

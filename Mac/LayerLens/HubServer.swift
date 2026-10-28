@@ -133,14 +133,51 @@ final class HubServer {
             registry.snapshot { devices, simulators, history in
                 connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators, "history": history]))
             }
-        case "/api/hub/network/sessions":
-            // 该设备上这个 App 保存的每次启动, 抓包面板据此选择查看以前的启动
-            network.sessions(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "") { sessions in
-                connection.respond(.json(["sessions": sessions]))
+        case "/api/hub/launches":
+            // 该设备上这个 App 保存的每次启动(日志和抓包合并), 日志和网络面板据此联动选择以前的启动; 标出面板实时显示的那次
+            let device = head.query["device"] ?? ""
+            let app = head.query["app"] ?? ""
+            let name = head.query["name"] ?? ""
+            guard !device.isEmpty, !app.isEmpty else {
+                connection.respond(.json(["launches": []]))
+                return
+            }
+            appLogs.current(deviceId: device, bundleId: app) { [network, workQueue] logFile, logInstance in
+                network.current(deviceId: device, bundleId: app) { session, networkInstance in
+                    workQueue.async {
+                        // 以日志为准, App 重启后未开抓包时抓包的会话还是上一次的
+                        let instance = logInstance.isEmpty ? networkInstance : logInstance
+                        let launches = LaunchStore.launches(bundleId: app, deviceId: device, deviceName: name).map { launch -> [String: Any] in
+                            var launch = launch
+                            let log = (launch["log"] as? [String: Any])?["name"] as? String
+                            let net = (launch["network"] as? [String: Any])?["session"] as? String
+                            let id = launch["instanceId"] as? String ?? ""
+                            launch["current"] = id.isEmpty ? (log != nil && log == logFile) || (net != nil && net == session && logFile == nil) : id == instance
+                            return launch
+                        }
+                        connection.respond(.json(["launches": launches]))
+                    }
+                }
             }
         case "/api/hub/cache":
             workQueue.async {
                 connection.respond(.json(CacheStore.list()))
+            }
+        case "/api/hub/cache/preview":
+            workQueue.async {
+                let preview = LaunchStore.preview(bundleId: head.query["app"] ?? "", launchId: head.query["launch"] ?? "")
+                connection.respond(preview.map { .json($0) } ?? .error(404, "Launch not found"))
+            }
+        case "/api/hub/cache/log":
+            // 分段读取保存的日志文件, 日志面板查看以前的启动时使用
+            workQueue.async {
+                let offset = UInt64(head.query["offset"] ?? "") ?? 0
+                let length = min(Int(head.query["length"] ?? "") ?? 0, 4 << 20)
+                guard length > 0, let (data, total) = LaunchStore.readLog(id: head.query["id"] ?? "", offset: offset, length: length) else {
+                    connection.respond(.error(404, "Log not found"))
+                    return
+                }
+                connection.respond(HTTPResponse(status: 200, contentType: "application/octet-stream", body: data, headers: ["Cache-Control": "no-store", "X-Log-Total": String(total)]))
             }
         case "/api/hub/app-logs/stream":
             // 日志面板的事件流, 连接交给日志记录持有, 网页断开时释放

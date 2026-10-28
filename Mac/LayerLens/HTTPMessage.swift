@@ -42,7 +42,10 @@ struct HTTPRequestHead {
             headers.append((String(line[..<colon]), line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)))
         }
         let target = String(parts[1])
-        let components = URLComponents(string: "http://localhost" + target)
+        var components = URLComponents(string: "http://localhost" + target)
+        // 表单编码(URLSearchParams)把空格写成 +, 原本的 + 会写成 %2B
+        let encodedQuery = components?.percentEncodedQuery
+        components?.percentEncodedQuery = encodedQuery?.replacingOccurrences(of: "+", with: "%20")
         var query: [String: String] = [:]
         components?.queryItems?.forEach { query[$0.name] = $0.value ?? "" }
         let head = HTTPRequestHead(method: parts[0].uppercased(), target: target, path: components?.path ?? target, query: query, headers: headers)

@@ -360,7 +360,7 @@ final class AppLogRecorder {
         return result
     }
 
-    private static func attribute(_ name: String, of url: URL) -> String? {
+    static func attribute(_ name: String, of url: URL) -> String? {
         let length = getxattr(url.path, name, nil, 0, 0, 0)
         guard length > 0 else { return nil }
         var data = Data(count: length)
@@ -470,6 +470,14 @@ final class AppLogRecorder {
             }
             _ = TargetRegistry.run("/usr/bin/open", ["-R", url.path])
             completion(url)
+        }
+    }
+
+    /// 日志面板实时显示的文件名和 App 进程, 启动列表据此标出当前启动
+    func current(deviceId: String, bundleId: String, completion: @escaping (_ file: String?, _ instanceId: String) -> Void) {
+        queue.async { [self] in
+            let source = sources[deviceId + "|" + bundleId]
+            completion(source?.fileURL?.lastPathComponent, source?.instanceId ?? "")
         }
     }
 

@@ -59,6 +59,8 @@ final class NetworkRecorder {
             for key in NetworkRecorder.summaryKeys {
                 result[key] = record[key]
             }
+            // 请求的 Content-Type, 网页据此区分表单; 旧记录从请求头取
+            result["reqMime"] = record["reqMime"] ?? NetworkRecorder.header("Content-Type", in: record["requestHeaders"] as? [String: String] ?? [:])
             result["s"] = seqs[id] ?? 0
             return result
         }
@@ -346,8 +348,18 @@ final class NetworkRecorder {
                     record[key] = value
                 }
                 record["_f"] = true
+                let reqMime = Self.header("Content-Type", in: record["requestHeaders"] as? [String: String] ?? [:])
+                let mimeChanged = reqMime != nil && record["reqMime"] as? String != reqMime
+                if mimeChanged {
+                    record["reqMime"] = reqMime
+                    session.seq += 1
+                    session.seqs[id] = session.seq
+                }
                 session.records[id] = record
                 self.save(session, id: id)
+                if mimeChanged {
+                    self.broadcast(source, "network", ["instanceId": session.instanceId, "records": [session.summary(id)]])
+                }
             }
             source.pendingFetch.removeAll { $0 == id }
             if source.canRelease {
@@ -500,7 +512,7 @@ final class NetworkRecorder {
         let online = source?.online ?? false
         switch (head.method, path) {
         case ("GET", "/api/network/status"):
-            var result = source.map { status($0, enabled: enabled) } ?? ["ok": true, "search": true, "cached": true, "capture": enabled]
+            var result = source.map { status($0, enabled: enabled) } ?? ["ok": true, "search": true, "searchScope": true, "cached": true, "capture": enabled]
             result["archived"] = source == nil
             connection.respond(.json(result))
         case ("GET", "/api/network"):
@@ -539,7 +551,7 @@ final class NetworkRecorder {
     }
 
     private func status(_ source: Source, enabled: Bool) -> [String: Any] {
-        ["ok": true, "search": true, "cached": true, "capture": enabled, "online": source.online, "dropped": source.dropped, "session": source.session?.folder.lastPathComponent ?? ""]
+        ["ok": true, "search": true, "searchScope": true, "cached": true, "capture": enabled, "online": source.online, "dropped": source.dropped, "session": source.session?.folder.lastPathComponent ?? ""]
     }
 
     /// 以前的某次启动, 只接受该 App 文件夹下属于同一设备的
@@ -558,19 +570,11 @@ final class NetworkRecorder {
         return session
     }
 
-    /// 该设备上这个 App 保存的每次启动, 最近的在前
-    func sessions(deviceId: String, bundleId: String, completion: @escaping ([[String: Any]]) -> Void) {
+    /// 网络面板「当前启动」对应的会话文件夹名和 App 进程
+    func current(deviceId: String, bundleId: String, completion: @escaping (_ session: String?, _ instanceId: String) -> Void) {
         queue.async { [self] in
-            let current = sources[deviceId + "|" + bundleId]?.session?.folder.lastPathComponent
-            let folder = Self.folder.appendingPathComponent(Self.sanitize(bundleId))
-            let urls = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-            var result: [[String: Any]] = []
-            for url in urls {
-                guard let info = Self.readJSON(url.appendingPathComponent(Self.sessionFile)), info["deviceId"] as? String == deviceId else { continue }
-                let count = ((try? FileManager.default.contentsOfDirectory(atPath: url.appendingPathComponent("r").path)) ?? []).filter { $0.hasSuffix(".json") }.count
-                result.append(["id": url.lastPathComponent, "start": info["start"] as? Double ?? 0, "count": count, "current": url.lastPathComponent == current])
-            }
-            completion(result.sorted { ($0["start"] as? Double ?? 0) > ($1["start"] as? Double ?? 0) })
+            let session = sources[deviceId + "|" + bundleId]?.session
+            completion(session?.folder.lastPathComponent, session?.instanceId ?? "")
         }
     }
 
@@ -663,6 +667,16 @@ final class NetworkRecorder {
         searchGenerations[client] = generation
         guard let session else {
             connection.respond(.json(["ids": []]))
+            return
+        }
+        // scope=header 只查找请求头和响应头, 否则查找请求和响应内容
+        if head.query["scope"] == "header" {
+            let ids = session.order.filter { id in
+                guard candidates?.contains(id) ?? true, let record = session.records[id] else { return false }
+                let headers = [record["requestHeaders"], record["responseHeaders"]].compactMap { $0 as? [String: String] }.flatMap { $0.map { "\($0.key): \($0.value)" } }.joined(separator: "\n")
+                return regex.firstMatch(in: headers, range: NSRange(headers.startIndex..., in: headers)) != nil
+            }
+            connection.respond(.json(["ids": ids]))
             return
         }
         let items = session.order.filter { candidates?.contains($0) ?? true }.map { ($0, session.bodyURL($0, side: "res"), session.bodyURL($0, side: "req")) }

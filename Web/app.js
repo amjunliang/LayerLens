@@ -2858,6 +2858,7 @@ function setAppState(value, message, link) {
     $('statusDot').title = text;
   }
   syncOfflineView();
+  renderLaunchSelects();
   renderTargetMenu();
 }
 
@@ -4800,8 +4801,9 @@ function syncLogPanel() {
   $('logToggle').setAttribute('aria-pressed', String(visible));
   if (visible && !logs.active) {
     logs.active = true;
-    if (logs.source === 'live') logConnect();
+    if (logs.source === 'live') logResume();
     logs.timer = setInterval(() => {
+      if (logTargetKey() !== launchState.key) loadLaunches();
       if (logs.source === 'live' && logTargetKey() !== logs.key) logConnect();
     }, 1000);
     scheduleLogRender();
@@ -4856,6 +4858,8 @@ function logConnect() {
     logs.unsupported = !!parse(e).unsupported;
     logs.loading = false;
     resetLogLines();
+    // App 重新启动后以前的启动多了一次
+    loadLaunches();
   });
   es.addEventListener('status', (e) => {
     logs.unsupported = !!parse(e).unsupported;
@@ -5181,6 +5185,9 @@ function renderLogStatus() {
   }
   const file = logs.file;
   $('logSource').hidden = logs.source === 'live';
+  $('logBackLive').textContent = file?.launch ? t('返回当前') : t('返回实时日志');
+  // 以前的启动在启动下拉框中已显示时间, 不再重复
+  $('logSourceName').hidden = !!file?.launch;
   if (file) $('logSourceName').textContent = file.name + (file.done ? '' : ` · ${Math.round((file.offset / (file.total || 1)) * 100)}%`);
   $('logNew').hidden = logs.follow || !logs.unseen;
   let empty = '';
@@ -5645,6 +5652,10 @@ function setupLogs() {
     logAction('reveal').catch((e) => toast(e.message, true));
   });
   $('logBackLive').addEventListener('click', () => {
+    if (logs.file?.launch) {
+      selectLaunch('');
+      return;
+    }
     logs.source = 'live';
     logs.file = null;
     logConnect();
@@ -5739,30 +5750,25 @@ const net = {
   offline: false,
   // App 缓冲已满时丢弃的请求数
   dropped: 0,
-  // 查看的以前的启动(文件夹名), 空为当前; sessions 为该设备上保存的启动
+  // 查看的以前的启动(抓包文件夹名), 空为当前, 由 launches.js 的启动选择设置
   session: '',
-  sessions: [],
+  // 未开启抓包时只读查看的当前启动的抓包文件夹名
+  archive: '',
+  // 为 true 时下次连接从头取请求并合并到当前列表, 不先清空
+  resync: false,
   instanceId: '',
   seq: 0,
   records: new Map(),
   list: [],
   view: [],
-  filter: { raw: '', terms: [], regex: null },
-  type: '',
   paused: false,
   pending: [],
   selected: 0,
   detail: null,
   detailTab: 'response',
   detailToken: 0,
-  // 内容搜索: 设备返回内容匹配过滤词的请求 id
+  // 内容搜索由 Hub 完成, 见 net-filters.js
   searchSupported: false,
-  bodyHits: null,
-  searchTimer: 0,
-  searchToken: 0,
-  // 全量查找后新结束的请求, 下次只查找这些
-  searchPending: new Set(),
-  searchInflight: 0,
   // 设备据此取消本页面未完成的旧查找
   searchClient: Math.random().toString(36).slice(2),
   // 详情中的 ⌘F 查找
@@ -5829,21 +5835,25 @@ async function netConnect() {
   const key = logTargetKey();
   if (key !== net.key) {
     net.key = key;
-    net.session = '';
-    net.sessions = [];
+    // 面板首次连接时沿用日志面板选中的启动
+    syncLaunchTarget();
+    net.session = launchNetSession();
     resetNet();
+    // 限定 App 的自定义过滤项随 App 切换显示
+    renderNetFilterBar();
+    syncNetRemote();
   }
   if (!key) {
     net.cached = false;
     net.capture = null;
     syncNetCapture();
-    renderNetSessions();
     scheduleNetRender();
     return;
   }
   const token = ++net.token;
   net.connecting = true;
   net.unsupported = false;
+  net.archive = '';
   scheduleNetRender();
   if (await netOutdated()) {
     if (token !== net.token) return;
@@ -5853,14 +5863,24 @@ async function netConnect() {
     return;
   }
   if (token !== net.token) return;
-  loadNetSessions();
-  // 未开启抓包时没有记录可读, 只显示开启按钮
+  const launchesLoaded = loadLaunches();
+  // 未开启抓包时只读显示这次启动已保存的记录(如中途关闭了抓包); 没有记录时只显示开启按钮
   if (net.capture === false && !net.session) {
-    net.connecting = false;
-    scheduleNetRender();
-    return;
+    await launchesLoaded;
+    if (token !== net.token) return;
+    net.archive = currentLaunchNetSession();
+    if (!net.archive) {
+      if (net.resync) resetNet();
+      net.resync = false;
+      net.connecting = false;
+      syncNetCapture();
+      scheduleNetRender();
+      return;
+    }
   }
-  const es = new EventSource(`${targetBase()}/api/network?${new URLSearchParams(netSessionParams({ since: net.seq }))}`);
+  syncNetCapture();
+  const es = new EventSource(`${targetBase()}/api/network?${new URLSearchParams(netSessionParams({ since: net.resync ? 0 : net.seq }))}`);
+  net.resync = false;
   const parse = (e) => {
     try {
       return JSON.parse(e.data) || {};
@@ -5878,7 +5898,7 @@ async function netConnect() {
     // App 重启后序号从头开始, 上一次的请求内容已不在设备上
     if (data.instanceId && net.instanceId && data.instanceId !== net.instanceId) {
       resetNet();
-      loadNetSessions();
+      loadLaunches();
     }
     if (data.instanceId) net.instanceId = data.instanceId;
     receiveNetRecords(data.records || []);
@@ -5891,10 +5911,7 @@ async function netConnect() {
     scheduleNetRender();
   });
   // 其他窗口切换了抓包开关
-  es.addEventListener('capture', () => {
-    resetNet();
-    netConnect();
-  });
+  es.addEventListener('capture', () => resyncNet());
   // 断开后由浏览器自动重连; 期间 App 可能换成了旧版 Pod, 重新检查一次.
   // 收到错误状态码(如 App 未运行时旧版 Mac App 返回 503)时浏览器不再重连, 稍后自己重新连接
   es.onerror = async () => {
@@ -5922,6 +5939,7 @@ async function netOutdated() {
     const data = await res.json().catch(() => ({}));
     // 0.6.1 起支持搜索内容
     if (res.ok) net.searchSupported = !!data.search;
+    syncNetRemote();
     net.cached = res.ok && !!data.cached;
     net.capture = res.ok && 'capture' in data ? !!data.capture : null;
     net.offline = !!data.archived || (res.ok && data.online === false);
@@ -5949,9 +5967,7 @@ function resetNet() {
   net.seq = 0;
   net.instanceId = '';
   net.follow = true;
-  net.bodyHits = null;
-  net.searchPending.clear();
-  net.searchToken++;
+  resetNetRemote();
   closeNetDetail();
   scheduleNetRender();
 }
@@ -5969,15 +5985,14 @@ function receiveNetRecords(records) {
 function applyNetRecords(records) {
   let reorder = false;
   let detailChanged = false;
-  const searching = netBodySearchActive();
   for (const record of records) {
     net.seq = Math.max(net.seq, record.s || 0);
     const old = net.records.get(record.id);
-    if (searching && record.state && record.state !== 'pending' && (!old || old.state === 'pending')) net.searchPending.add(record.id);
+    noteNetRemoteRecord(record, old);
     if (old) {
       if (record.id === net.selected && old.state !== record.state) detailChanged = true;
       Object.assign(old, record);
-      old.filterText = old.filterLower = null;
+      old.filterText = old.filterLower = old.urlParts = null;
       continue;
     }
     if (net.list.length && net.list[net.list.length - 1].id > record.id) reorder = true;
@@ -5985,8 +6000,7 @@ function applyNetRecords(records) {
     net.list.push(record);
   }
   if (reorder) net.list.sort((a, b) => a.id - b.id);
-  // 有请求结束时查找它们的内容, 请求频繁时每秒最多一次
-  if (net.bodyHits && net.searchPending.size && !net.searchTimer && !net.searchInflight) scheduleNetBodySearch(1000);
+  flushNetRemote();
   if (net.list.length > NET_MAX_RECORDS) {
     net.list.splice(0, net.list.length - NET_MAX_RECORDS).forEach((record) => net.records.delete(record.id));
   }
@@ -6011,88 +6025,13 @@ function setNetPaused(paused) {
 
 // MARK: Filter
 
-function netKind(record) {
-  const mime = (record.mime || '').toLowerCase();
-  if (mime.includes('json')) return 'json';
-  if (mime.startsWith('image/')) return 'image';
-  if (/^text\/|xml|javascript|ecmascript/.test(mime)) return 'doc';
-  return 'other';
-}
-
+// 类型、状态、自定义过滤项和搜索框条件见 net-filters.js
 function netFailed(record) {
   return record.state === 'failed' || record.status >= 400;
 }
 
-function netMatches(record) {
-  if (net.type === 'failed') {
-    if (!netFailed(record)) return false;
-  } else if (net.type && (record.state === 'pending' || netKind(record) !== net.type)) {
-    return false;
-  }
-  const { terms, regex } = net.filter;
-  if (!regex && !terms.length) return true;
-  if (net.bodyHits?.has(record.id)) return true;
-  // 缓存过滤用的文本, 记录多时每次刷新不必重新拼接; 记录更新时清空
-  record.filterText ??= `${record.method} ${record.url} ${record.status || ''}`;
-  if (regex) {
-    regex.lastIndex = 0;
-    return regex.test(record.filterText);
-  }
-  record.filterLower ??= record.filterText.toLowerCase();
-  return terms.some((term) => record.filterLower.includes(term));
-}
-
-// 过滤词同时在请求和响应内容中查找, 由设备完成; 旧版 Pod 不支持时只过滤地址等字段
-// 过滤词变化时查找全部请求, 之后只查找新结束的请求
-function netBodySearchActive() {
-  return !!(net.searchSupported && net.key && !net.filter.invalid && (net.filter.regex || net.filter.terms.length));
-}
-
-function scheduleNetBodySearch(delay) {
-  clearTimeout(net.searchTimer);
-  net.searchTimer = 0;
-  if (!netBodySearchActive()) return;
-  net.searchTimer = setTimeout(() => {
-    net.searchTimer = 0;
-    searchNetBodies();
-  }, delay);
-}
-
-async function searchNetBodies() {
-  let ids = net.bodyHits ? [...net.searchPending] : null;
-  // 增量查找同时只发一个; 积压过多时改为全量查找
-  if (ids && (net.searchInflight || !ids.length)) return;
-  if (ids && ids.length > 500) {
-    ids = null;
-    net.bodyHits = null;
-  }
-  net.searchPending.clear();
-  const token = net.searchToken;
-  const params = { q: net.filter.raw, client: net.searchClient };
-  if (ids) params.ids = ids.join(',');
-  net.searchInflight++;
-  try {
-    const res = await fetch(netApi('search', params));
-    const data = await res.json().catch(() => ({}));
-    if (token === net.searchToken && res.ok) {
-      if (ids) (data.ids || []).forEach((id) => net.bodyHits.add(id));
-      else net.bodyHits = new Set(data.ids || []);
-      rebuildNetView();
-    }
-  } catch (e) {
-    // 设备断开时保留地址等字段的过滤结果
-  } finally {
-    net.searchInflight--;
-  }
-  if (token === net.searchToken && net.bodyHits && net.searchPending.size && !net.searchTimer) scheduleNetBodySearch(1000);
-}
-
-function netFilterActive() {
-  return !!(net.type || net.filter.regex || net.filter.terms.length);
-}
-
 function rebuildNetView() {
-  net.view = netFilterActive() ? net.list.filter(netMatches) : net.list;
+  net.view = netFiltersActive() ? net.list.filter((record) => netFiltersMatch(record)) : net.list;
   scheduleNetRender();
 }
 
@@ -6229,7 +6168,8 @@ function renderNetStatus() {
     parts.push(badge);
   }
   count.replaceChildren(...parts);
-  const captureOff = !!net.key && !net.unsupported && net.capture === false && !net.session;
+  // 切换开关后重新连接期间不显示, 以免在请求列表上闪一下
+  const captureOff = !!net.key && !net.unsupported && net.capture === false && !net.session && !net.archive && !net.connecting;
   let empty = '';
   if (!net.key) empty = t('未连接 App');
   else if (net.unsupported) {
@@ -6322,13 +6262,14 @@ async function copyNetResponse(id) {
 
 // MARK: Detail
 
+// 详情面板固定显示, 未选中请求时显示提示
 function closeNetDetail() {
   net.selected = 0;
   net.detail = null;
   net.detailToken++;
-  $('netDetail').hidden = true;
-  $('netSplitter').hidden = true;
-  $('netDetail').replaceChildren();
+  $('netDetail').hidden = false;
+  $('netSplitter').hidden = false;
+  $('netDetail').replaceChildren(el('div', 'net-detail-empty', t('选择一个请求查看详情')));
   scheduleNetRender();
 }
 
@@ -6361,12 +6302,35 @@ async function loadNetDetail(id) {
   }
 }
 
+// URL 在头部单行显示, 点击在下方展开完整内容, 展开状态在切换请求时保留
 function netDetailHead(record, tabs) {
+  const top = el('div', 'net-detail-top');
   const head = el('div', 'net-detail-head');
   const title = el('div', 'net-detail-title');
+  let full = null;
   if (record) {
-    title.append(netStatusCell(record), el('span', 'net-method', record.method), el('span', 'net-detail-url', record.url));
-    title.title = record.url;
+    // 箭头表示可展开, 不用链接样式, 避免像能跳转
+    const url = el('span', 'net-detail-url' + (net.urlExpanded ? ' expanded' : ''));
+    url.append(el('span', 'net-detail-url-text', record.url), el('span', 'net-detail-url-arrow', '›'));
+    url.title = net.urlExpanded ? t('点击收起, 双击选中') : t('点击展开完整 URL, 双击选中');
+    // 单击延迟执行, 双击时取消, 改为选中整条 URL; 拖动选中文字后不展开
+    let timer = 0;
+    url.addEventListener('click', (e) => {
+      if (e.detail > 1 || window.getSelection().toString()) return;
+      timer = setTimeout(() => {
+        net.urlExpanded = !net.urlExpanded;
+        url.classList.toggle('expanded', net.urlExpanded);
+        url.title = net.urlExpanded ? t('点击收起, 双击选中') : t('点击展开完整 URL, 双击选中');
+        full.hidden = !net.urlExpanded;
+      }, 250);
+    });
+    url.addEventListener('dblclick', () => {
+      clearTimeout(timer);
+      window.getSelection().selectAllChildren(url.firstChild);
+    });
+    title.append(netStatusCell(record), el('span', 'net-method', record.method), url);
+    full = el('div', 'net-detail-url-full', record.url);
+    full.hidden = !net.urlExpanded;
   }
   const tools = el('div', 'net-detail-tools');
   const copyUrl = el('button', 'icon-btn');
@@ -6376,13 +6340,11 @@ function netDetailHead(record, tabs) {
   const curl = el('button', 'sb-text-btn', 'cURL');
   curl.addEventListener('click', () => copyNetCurl(net.detail?.id));
   curl.disabled = !net.detail;
-  const close = el('button', 'icon-btn');
-  close.title = t('关闭');
-  close.appendChild(icon('close'));
-  close.addEventListener('click', () => closeNetDetail());
-  tools.append(copyUrl, curl, el('span', 'net-find-sep'), close);
+  tools.append(copyUrl, curl);
   head.append(...[title, tabs, tools].filter(Boolean));
-  return head;
+  top.appendChild(head);
+  if (full) top.appendChild(full);
+  return top;
 }
 
 function renderNetDetail() {
@@ -6503,9 +6465,22 @@ async function loadNetBody(id, side, box) {
     const duration = side === 'res' ? netDuration(net.records.get(id)?.duration) : '';
     tools.appendChild(el('span', 'sb-meta', [type.split(';')[0] || 'application/octet-stream', logSize(bytes.length), duration].filter(Boolean).join(' · ')));
     if (/^image\//i.test(type)) {
-      const img = el('img', 'sb-image');
+      // 默认按比例缩放填满内容区(同 scaleAspectFit), 点击切换原始大小; 加载后在信息中补上尺寸
+      const body = box.closest('.net-detail-body');
+      const img = el('img', 'sb-image net-image');
+      img.title = t('点击查看原始大小');
       img.src = URL.createObjectURL(new Blob([bytes], { type }));
-      img.onerror = () => box.replaceChildren(tools, el('p', 'net-note', t('无法预览此图片')));
+      img.onload = () => tools.firstChild.append(` · ${img.naturalWidth}×${img.naturalHeight}`);
+      img.onerror = () => {
+        body?.classList.remove('image-fit');
+        box.replaceChildren(tools, el('p', 'net-note', t('无法预览此图片')));
+      };
+      img.addEventListener('click', () => {
+        const zoomed = img.classList.toggle('zoomed');
+        body?.classList.toggle('image-fit', !zoomed);
+        img.title = zoomed ? t('点击缩小') : t('点击查看原始大小');
+      });
+      body?.classList.add('image-fit');
       box.replaceChildren(tools, img);
       return;
     }
@@ -6883,22 +6858,12 @@ function setupNetwork() {
   let filterTimer = null;
   $('netFilter').addEventListener('input', (e) => {
     clearTimeout(filterTimer);
-    filterTimer = setTimeout(() => {
-      net.filter = parseLogFilter(e.target.value);
-      $('netSearch').classList.toggle('invalid', !!net.filter.invalid);
-      net.bodyHits = null;
-      net.searchPending.clear();
-      net.searchToken++;
-      rebuildNetView();
-      scheduleNetBodySearch(0);
-    }, 150);
+    filterTimer = setTimeout(() => setNetSearchQuery(e.target.value), 150);
   });
-  $('netType').addEventListener('change', (e) => {
-    net.type = e.target.value;
-    rebuildNetView();
-  });
+  setupNetFilters();
   $('netPause').addEventListener('click', () => setNetPaused(!net.paused));
   setupNetCapture();
+  setupLaunches();
   // 清空会删除本机保存的文件, 有记录时先确认
   $('netClear').addEventListener('click', () => {
     if (!net.list.length) {
@@ -6920,7 +6885,7 @@ function setupNetwork() {
     const row = e.target.closest('.net-row');
     if (!row || window.getSelection().toString()) return;
     const id = Number(row.dataset.id);
-    selectNet(id === net.selected ? 0 : id);
+    if (id !== net.selected) selectNet(id);
   });
   list.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
