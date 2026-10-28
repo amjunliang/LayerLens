@@ -221,7 +221,7 @@
       <button class="icon-btn toggle net-only" id="netCapture" title="开启抓包" aria-label="抓包" aria-pressed="false"><svg class="icon"><use href="#i-record"/></svg></button>
       <button class="icon-btn toggle net-only" id="netPause" title="暂停" aria-label="暂停" aria-pressed="false"><svg class="icon"><use href="#i-pause"/></svg></button>
       <button class="icon-btn net-only" id="netHar" title="导出 HAR" aria-label="导出 HAR"><svg class="icon"><use href="#i-download"/></svg></button>
-      <button class="icon-btn net-only" id="netClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
+      <button class="icon-btn net-only" id="netClear" title="清空本次启动的抓包记录 (同时删除本机保存的文件)" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
       <span class="git-context git-only" id="gitContext">
         <svg class="icon"><use href="#i-folder"/></svg><span class="git-repo" id="gitRepo"></span>
         <span class="git-context-sep">›</span>
@@ -237,19 +237,21 @@
       <div class="term-tabs term-only" id="termTabs"></div>
       <span class="log-size term-size term-only" id="termSize"><button id="termSizeDown" title="减小字号" aria-label="减小字号">−</button><span id="termSizeLabel">12</span><button id="termSizeUp" title="增大字号" aria-label="增大字号">+</button></span>
       <button class="icon-btn term-only" id="termNew" title="新建终端" aria-label="新建终端"><svg class="icon"><use href="#i-plus"/></svg></button>
-      <div class="popover-anchor log-only">
+      <div class="popover-anchor pane-more">
         <button class="icon-btn" id="logMore" title="更多" aria-label="更多"><svg class="icon"><use href="#i-more"/></svg></button>
         <div class="popover menu log-menu" id="logMenu" hidden>
           <div class="menu-row"><span>字体</span><select id="logFont" class="log-font-select"></select></div>
           <div class="menu-row"><span>字号</span><span class="log-size"><button id="logSizeDown" aria-label="减小字号">−</button><span id="logSizeLabel">12</span><button id="logSizeUp" aria-label="增大字号">+</button></span></div>
+          <div class="menu-sep log-only"></div>
+          <button class="menu-row menu-action log-only" id="logCopy">复制选中行</button>
+          <button class="menu-row menu-action log-only" id="logExportAll">导出全部</button>
+          <button class="menu-row menu-action log-only" id="logExportView">导出过滤结果</button>
+          <div class="menu-sep log-only"></div>
+          <button class="menu-row menu-action log-only" id="logDeviceFiles">设备日志文件…</button>
+          <button class="menu-row menu-action log-only" id="logOpenFile">打开本地文件…</button>
+          <button class="menu-row menu-action log-only" id="logReveal">在访达中显示</button>
           <div class="menu-sep"></div>
-          <button class="menu-row menu-action" id="logCopy">复制选中行</button>
-          <button class="menu-row menu-action" id="logExportAll">导出全部</button>
-          <button class="menu-row menu-action" id="logExportView">导出过滤结果</button>
-          <div class="menu-sep"></div>
-          <button class="menu-row menu-action" id="logDeviceFiles">设备日志文件…</button>
-          <button class="menu-row menu-action" id="logOpenFile">打开本地文件…</button>
-          <button class="menu-row menu-action" id="logReveal">在访达中显示</button>
+          <button class="menu-row menu-action" data-panel="cache">管理缓存…</button>
         </div>
       </div>
       <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
@@ -384,6 +386,7 @@
 <script src="/assets/terminal.js"></script>
 <script src="/assets/net-capture.js"></script>
 <script src="/assets/offline-view.js"></script>
+<script src="/assets/input-memory.js"></script>
 <script src="/assets/cache.js"></script>
 <script src="/assets/app.js"></script>
 </body>

@@ -946,7 +946,7 @@ body.log-open .log-pane { display: flex; }
 .pane-tabs button { padding: 2px 12px; font-size: 13px; }
 .pane-tabs button.active { font-weight: 600; background: var(--accent); color: #fff; box-shadow: none; }
 .pane-tabs button.active .tab-badge { background: rgba(255, 255, 255, 0.25); color: #fff; }
-.log-pane[data-tab="net"] .log-only, .log-pane[data-tab="git"] .log-only, .log-pane[data-tab="term"] .log-only, .log-pane:not([data-tab="net"]) .net-only, .log-pane:not([data-tab="git"]) .git-only, .log-pane:not([data-tab="term"]) .term-only { display: none !important; }
+.log-pane[data-tab="git"] .pane-more, .log-pane[data-tab="term"] .pane-more, .log-pane[data-tab="net"] .log-only, .log-pane[data-tab="git"] .log-only, .log-pane[data-tab="term"] .log-only, .log-pane:not([data-tab="net"]) .net-only, .log-pane:not([data-tab="git"]) .git-only, .log-pane:not([data-tab="term"]) .term-only { display: none !important; }
 .net-type { flex: none; max-width: 90px; margin-right: 4px; font-size: 13px; }
 .net-session { flex: none; max-width: 170px; margin-right: 4px; font-size: 13px; }
 .net-session[hidden] { display: none; }

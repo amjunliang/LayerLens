@@ -2312,6 +2312,7 @@ function renderTargetMenu() {
   options.addEventListener('click', () => openPanel('options'));
   children.push(options);
   menu.replaceChildren(...children);
+  settleBootLaunch();
   syncOfflineView();
 }
 
@@ -5564,6 +5565,7 @@ function setupLogsWindow() {
   setupTerminal();
   setPaneTab(params.get('tab'));
   setupPanels();
+  setupInputMemory();
   document.addEventListener('pointerdown', (e) => {
     if (!e.target.closest('.popover-anchor')) hidePopovers();
   });
@@ -6897,7 +6899,14 @@ function setupNetwork() {
   });
   $('netPause').addEventListener('click', () => setNetPaused(!net.paused));
   setupNetCapture();
-  $('netClear').addEventListener('click', clearNet);
+  // 清空会删除本机保存的文件, 有记录时先确认
+  $('netClear').addEventListener('click', () => {
+    if (!net.list.length) {
+      clearNet();
+      return;
+    }
+    showConfirm($('netClear'), { title: t('清空本次启动的抓包记录?'), detail: t('将删除 {0} 个请求, 本机保存的文件一并删除, 无法恢复. 以前的启动不受影响', net.list.length), action: t('清空'), onConfirm: clearNet });
+  });
   $('netHar').addEventListener('click', exportNetHar);
   const list = $('netList');
   list.addEventListener('scroll', () => {
@@ -7231,6 +7240,7 @@ function setup() {
   applyTheme(loadTheme(), false);
   $('targetBtn').addEventListener('click', () => togglePopover('targetMenu'));
   setupPanels();
+  setupInputMemory();
   start();
 }
 
