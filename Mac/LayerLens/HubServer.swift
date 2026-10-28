@@ -25,6 +25,7 @@ final class HubServer {
     private let xcode = XcodeController()
     private let live = SimulatorLive()
     private let appLogs = AppLogRecorder()
+    private let network: NetworkRecorder
     private let git = GitController()
     let terminal = TerminalController()
     /// AppleScript 与 simctl 较慢, 不占用服务队列
@@ -35,9 +36,13 @@ final class HubServer {
 
     init(registry: TargetRegistry) {
         self.registry = registry
+        network = NetworkRecorder { [weak registry] deviceId, bundleId in
+            registry?.captureEnabled(deviceId: deviceId, bundleId: bundleId) ?? false
+        }
         webRoot = Self.locateWebRoot()
-        registry.onAppsChanged = { [appLogs] apps in
+        registry.onAppsChanged = { [appLogs, network] apps in
             appLogs.update(apps: apps)
+            network.update(apps: apps)
         }
     }
 
@@ -125,8 +130,17 @@ final class HubServer {
         case "/api/targets":
             var hubInfo: [String: Any] = ["version": Self.version, "apiVersion": Self.apiVersion, "live": SimulatorLive.isAvailable]
             hubInfo["liveError"] = SimBridge.loadError
-            registry.snapshot { devices, simulators in
-                connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators]))
+            registry.snapshot { devices, simulators, history in
+                connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators, "history": history]))
+            }
+        case "/api/hub/network/sessions":
+            // 该设备上这个 App 保存的每次启动, 抓包面板据此选择查看以前的启动
+            network.sessions(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "") { sessions in
+                connection.respond(.json(["sessions": sessions]))
+            }
+        case "/api/hub/cache":
+            workQueue.async {
+                connection.respond(.json(CacheStore.list()))
             }
         case "/api/hub/app-logs/stream":
             // 日志面板的事件流, 连接交给日志记录持有, 网页断开时释放
@@ -197,6 +211,10 @@ final class HubServer {
                     }
                 }
             }
+        }
+        // 开启了持久化抓包的 App, 抓包接口由 Mac 端保存的记录回答
+        if network.handle(head, path: String(upstreamTarget.split(separator: "?", maxSplits: 1).first ?? ""), deviceId: deviceId, bundleId: bundleId, connection: connection, fallback: { forward(rescan: false, previous: nil) }) {
+            return
         }
         forward(rescan: false, previous: nil)
     }
@@ -274,6 +292,42 @@ final class HubServer {
                 let ok = TargetRegistry.run("/usr/bin/open", [path]) != nil
                 connection.respond(ok ? .json(["ok": true, "path": path]) : .error(500, "Open failed"))
             }
+        case "/api/hub/network/capture":
+            // 抓包开关, 记在目标历史中; 返回更新后的历史, 网页立即更新
+            guard let device = json["device"] as? String, let app = json["app"] as? String, !device.isEmpty, !app.isEmpty else {
+                connection.respond(.error(400, "Invalid target"))
+                return
+            }
+            registry.setCapture(deviceId: device, bundleId: app, enabled: json["enabled"] as? Bool ?? false) { [network] history in
+                network.captureChanged(deviceId: device, bundleId: app)
+                connection.respond(.json(["ok": true, "history": history]))
+            }
+        case "/api/hub/cache/delete":
+            workQueue.async { [self] in
+                let removed = CacheStore.delete(ids: json["ids"] as? [String] ?? [], bundleId: json["app"] as? String, all: json["all"] as? Bool ?? false)
+                appLogs.didDelete(removed)
+                network.didDelete(removed)
+                connection.respond(.json(CacheStore.list()))
+            }
+        case "/api/hub/history":
+            // 设备列表的历史记录: add 补记目标, remove 从菜单移除; 返回移除后的记录, 网页立即更新
+            switch json["op"] as? String {
+            case "add":
+                registry.addHistory(json["entry"] as? [String: Any] ?? [:])
+                connection.respond(.json(["ok": true]))
+            case "remove":
+                let device = json["device"] as? String ?? ""
+                let app = json["app"] as? String ?? ""
+                registry.removeHistory(deviceId: device, bundleId: app) { [network] history in
+                    // 移除 App 时抓包开关一并清除
+                    if !app.isEmpty {
+                        network.captureChanged(deviceId: device, bundleId: app)
+                    }
+                    connection.respond(.json(["ok": true, "history": history]))
+                }
+            default:
+                connection.respond(.error(400, "Invalid request"))
+            }
         case "/api/hub/activate":
             // 把在后台的 App 切到前台; 已在运行时只激活, 不重启
             guard let device = json["device"] as? String, let app = json["app"] as? String, !device.isEmpty, !app.isEmpty else {
@@ -289,7 +343,8 @@ final class HubServer {
                     let arguments = kind == .simulator
                         ? ["simctl", "launch", device, app]
                         : ["devicectl", "device", "process", "launch", "--device", device, app]
-                    let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments)
+                    // 真机的开发者通道偶尔卡住(锁屏、休眠、连接不稳), 命令不返回时网页会一直停在切换中
+                    let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments, timeout: 20)
                     guard result.ok else {
                         let failure = Self.launchFailure(result.error)
                         connection.respond(.json(["ok": false, "reason": failure.reason, "error": failure.detail], status: 500))
@@ -427,6 +482,7 @@ final class HubServer {
     static func launchFailure(_ output: String) -> (reason: String, detail: String) {
         let text = output.lowercased()
         let rules: [(String, [String])] = [
+            ("timeout", [TargetRegistry.timedOutMessage.lowercased()]),
             ("locked", ["locked"]),
             ("developerMode", ["developer mode"]),
             // simctl 找不到 App 时只给出 FBSOpenApplicationServiceErrorDomain 的 code=4

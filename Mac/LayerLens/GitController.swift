@@ -244,14 +244,14 @@ final class GitController {
         }
     }
 
-    /// 一个或多个提交的全部改动; 每个提交前有一行 "\0短哈希 标题"
+    /// 一个或多个提交的全部改动; 每个提交前有一行 "\0短哈希 标题", 随后是原始提交信息, 以 \u{1d} 结束
     func show(repo: String, commits: [String], completion: @escaping ([String: Any]) -> Void) {
         guard !commits.isEmpty, commits.count <= 50, commits.allSatisfy({ $0.range(of: "^[0-9a-f]{4,40}$", options: .regularExpression) != nil }) else {
             completion(["error": "Invalid commit"])
             return
         }
         readQueue.async {
-            let output = Self.run(repo, ["-c", "core.quotePath=false", "show", "--format=%x00%h %s", "-M", "--no-color", "--no-ext-diff"] + commits, timeout: 30, readOnly: true)
+            let output = Self.run(repo, ["-c", "core.quotePath=false", "show", "--format=%x00%h %s%n%B%x1d", "-M", "--no-color", "--no-ext-diff"] + commits, timeout: 30, readOnly: true)
             guard output.ok else {
                 completion(["error": output.message])
                 return

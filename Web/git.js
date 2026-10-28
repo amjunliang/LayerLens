@@ -415,6 +415,18 @@ function gitDiscard(items) {
   gitAction('discard', { paths, untracked });
 }
 
+// 放弃改动不可撤销, 确认气泡的内容: 说明影响并列出文件
+function gitDiscardConfirm(items) {
+  const removing = items.every((item) => item.group === 'untracked');
+  const someUntracked = items.some((item) => item.group === 'untracked');
+  return {
+    title: removing ? t('删除 {0} 个未跟踪文件?', items.length) : t('放弃 {0} 个文件的改动?', items.length),
+    detail: someUntracked && !removing ? t('未跟踪的文件会被删除, 此操作不可撤销') : t('此操作不可撤销'),
+    items: items.map((item) => item.path),
+    action: removing ? t('删除') : t('放弃'),
+  };
+}
+
 // MARK: - Render
 
 function gitRender() {
@@ -428,17 +440,22 @@ function gitRenderHead() {
   $('gitRepo').textContent = git.repo?.name || '';
   $('gitRepo').title = git.repo?.root || '';
   const head = branch.head && branch.head !== '(detached)' ? branch.head : '';
-  $('gitBranch').textContent = git.status ? head || t('游离 HEAD') : '';
+  // 分支名过长时省略中间, 保留前缀和末尾的编号
+  $('gitBranch').textContent = git.status ? (head.length > 32 ? head.slice(0, 15) + '…' + head.slice(-15) : head) || t('游离 HEAD') : '';
   $('gitBranch').title = head;
+  $('gitContext').hidden = !git.repo;
   const sync = [];
   if (branch.ahead) sync.push('↑' + branch.ahead);
   if (branch.behind) sync.push('↓' + branch.behind);
   const local = !!git.status && !git.status.hasRemote;
   if (git.status && !local && !branch.upstream) sync.push(t('无上游'));
-  $('gitBranch').classList.toggle('git-local', local);
-  for (const id of ['gitSync', 'gitPull', 'gitPush']) $(id).style.display = local ? 'none' : '';
+  for (const id of ['gitSync', 'gitRemoteGap', 'gitPull', 'gitPush']) $(id).style.display = local ? 'none' : '';
   $('gitSync').textContent = sync.join(' ');
   $('gitSync').title = branch.upstream || '';
+  $('gitPullCount').textContent = branch.behind ? '↓' + branch.behind : '';
+  $('gitPullCount').hidden = !branch.behind;
+  $('gitPushCount').textContent = branch.ahead ? '↑' + branch.ahead : '';
+  $('gitPushCount').hidden = !branch.ahead;
   $('gitTreeMode').classList.toggle('active', git.tree);
   $('gitTreeMode').title = git.tree ? t('平铺显示') : t('树形显示');
   $('gitPull').disabled = !git.status || !branch.upstream || git.busy.has('pull');
@@ -477,11 +494,14 @@ function gitRenderFiles() {
   const ordered = git.tree ? [] : gitAllFiles();
   const sections = GIT_SECTIONS.map(([key, title, groups]) => [key, title, gitSectionFiles(groups)]);
   if (!sections.some(([, , files]) => files.length)) {
-    fragment.append(el('div', 'git-clean', t('没有未提交的改动')));
+    fragment.append(el('div', 'git-clean', t('没有改动, 工作区是干净的')));
   } else {
     sections.forEach(([key, title, files]) => {
-      // 已暂存和未暂存始终显示, 冲突只在有时显示
-      if (key === 'conflicted' && !files.length) return;
+      // 分区为空时不显示标题栏, 只显示一行提示; 冲突只在有时显示
+      if (!files.length) {
+        if (key !== 'conflicted') fragment.append(el('div', 'git-section-empty', key === 'staged' ? t('没有已暂存的文件, 勾选下方文件即可暂存') : t('没有未暂存的改动')));
+        return;
+      }
       const collapsed = git.collapsed.has('group:' + key);
       fragment.append(gitSectionHead(key, title, files, collapsed));
       if (collapsed) return;
@@ -731,30 +751,15 @@ function gitOpenFile(path) {
   gitAction('open', { path });
 }
 
-// 放弃改动不可撤销, 需要再点一次确认; Mac App 的 WebView 不支持 confirm()
 function gitDiscardButton(group, file) {
   const button = el('button', 'icon-btn git-btn git-discard');
-  const label = group === 'untracked' ? t('删除文件') : t('放弃改动');
-  const reset = () => {
-    button.classList.remove('confirm');
-    button.replaceChildren(icon('trash'));
-    button.title = label;
-  };
-  reset();
+  button.title = group === 'untracked' ? t('删除文件') : t('放弃改动');
+  button.append(icon('trash'));
   button.addEventListener('dblclick', (e) => e.stopPropagation());
   button.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!button.classList.contains('confirm')) {
-      const count = gitTargets(group, file).length;
-      button.classList.add('confirm');
-      const text = group === 'untracked' ? t('确认删除') : t('确认放弃');
-      button.replaceChildren(icon('trash'), count > 1 ? `${text} (${count})` : text);
-      clearTimeout(button.timer);
-      button.timer = setTimeout(reset, 3000);
-      return;
-    }
-    clearTimeout(button.timer);
-    gitDiscard(gitTargets(group, file));
+    const items = gitTargets(group, file);
+    showConfirm(button, { ...gitDiscardConfirm(items), onConfirm: () => gitDiscard(items) });
   });
   return button;
 }
@@ -781,6 +786,7 @@ function gitRenderDiff() {
   const commits = selected.kind === 'commits';
   let name;
   let label;
+  let message = '';
   let badge = null;
   if (selected.dir) {
     name = selected.dirPath;
@@ -791,6 +797,7 @@ function gitRenderDiff() {
     label = '';
   } else if (commits) {
     name = `${items[0].hash} ${items[0].subject}`;
+    message = gitCommitMessage(git.diffText);
     label = t('提交');
   } else {
     name = items[0].origin ? `${items[0].origin} → ${items[0].path}` : items[0].path;
@@ -803,7 +810,14 @@ function gitRenderDiff() {
   const hunkGroup = !commits && items.length === 1 && (items[0].group === 'staged' || items[0].group === 'unstaged') ? items[0].group : '';
   head.append(back);
   if (badge) head.append(badge);
-  head.append(el('span', 'git-diff-title', name), el('span', 'git-diff-group', label), gitDiffSizeControl());
+  let title = el('span', 'git-diff-title', name);
+  if (message) {
+    // 单个提交按原始提交信息多行显示
+    head.classList.add('message');
+    title = el('div', 'git-diff-title git-diff-message');
+    title.append(el('span', 'git-hash', items[0].hash), document.createTextNode(message));
+  }
+  head.append(title, el('span', 'git-diff-group', label), gitDiffSizeControl());
   box.style.setProperty('--git-diff-size', git.diffSize + 'px');
   const body = el('div', 'git-diff-body');
   if (git.diffError) {
@@ -866,27 +880,25 @@ function gitHunkButton(label, onClick) {
   return button;
 }
 
-// 放弃区块不可撤销, 再点一次确认
+// 放弃区块不可撤销, 先在气泡中确认
 function gitHunkDiscardButton(hunk) {
-  const button = gitHunkButton(t('放弃区块'), () => {
-    if (!button.classList.contains('confirm')) {
-      button.classList.add('confirm');
-      button.textContent = t('确认放弃');
-      clearTimeout(button.timer);
-      button.timer = setTimeout(() => {
-        button.classList.remove('confirm');
-        button.textContent = t('放弃区块');
-      }, 3000);
-      return;
-    }
-    clearTimeout(button.timer);
-    gitHunkAction('discard', hunk);
-  });
+  const button = gitHunkButton(t('放弃区块'), () => showConfirm(button, {
+    title: t('放弃这个区块的改动?'),
+    detail: t('此操作不可撤销'),
+    action: t('放弃'),
+    onConfirm: () => gitHunkAction('discard', hunk),
+  }));
   return button;
 }
 
 // 统一 diff: 按块分成卡片, 两栏行号(旧 / 新)与增删符号各占一列, 增删着色; 文件头只保留模式变化等有用信息.
 // 多文件或提交时按提交、文件分成可折叠的区块. 记下每块所属文件的头部, 按块操作时拼成补丁
+// git show 输出中第一个提交的原始提交信息
+function gitCommitMessage(text) {
+  const match = /^\0[^\n]*\n([\s\S]*?)\x1d/.exec(text || '');
+  return match ? match[1].trimEnd() : '';
+}
+
 function gitDiffView(text, multiple, hunkGroup) {
   if (!text.trim()) return el('div', 'git-diff-empty', t('没有内容差异(可能只改了文件权限或换行)'));
   if (!multiple && /^Binary files .* differ$/m.test(text) && !/^@@/m.test(text)) return el('div', 'git-diff-empty', t('二进制文件, 不显示差异'));
@@ -905,13 +917,20 @@ function gitDiffView(text, multiple, hunkGroup) {
   let fileBadge = null;
   let rows = 0;
   let truncated = false;
+  let inMessage = false;
   for (const line of lines) {
     if (rows >= GIT_DIFF_MAX_LINES) {
       truncated = true;
       break;
     }
+    if (inMessage) {
+      // 提交信息在顶栏显示, 这里跳过直到结束标记
+      if (line.endsWith('\x1d')) inMessage = false;
+      continue;
+    }
     if (line.startsWith('\0')) {
-      // git show 每个提交前的 "\0短哈希 标题"
+      // git show 每个提交前的 "\0短哈希 标题", 随后是以 \x1d 结束的原始提交信息
+      inMessage = true;
       hunk = null;
       commitKey = 'commit:' + line.slice(1);
       commitBody = fileBody = gitDiffSection(table, 'commit', line.slice(1), commitKey);

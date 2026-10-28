@@ -273,6 +273,9 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 .target-app.away .status-dot { background: var(--muted); }
 .target-app.away.current .status-dot { background: var(--danger); }
 .target-app.away .target-app-name { color: var(--text-2); }
+/* 正在切换到的 App */
+.target-app.switching .target-app-meta { color: var(--accent); }
+.target-app.switching .status-dot { background: var(--accent); }
 /* 已断开的历史记录: 悬停时显示移除按钮, 代替右侧的说明 */
 .target-remove { display: none; flex: none; align-items: center; justify-content: center; width: 18px; height: 18px; margin-left: auto; border-radius: var(--r-control); color: var(--muted); }
 .target-remove .icon { width: 12px; height: 12px; }
@@ -781,6 +784,12 @@ body:not(.has-app) #liveInspect, body.app-offline #liveInspect { display: none; 
 .guide-code code::-webkit-scrollbar-thumb { border-radius: 3px; background: color-mix(in srgb, var(--stage-text) 22%, transparent); }
 .empty-action { margin-top: 4px; background: var(--accent); color: #fff; font-weight: 600; border: none; }
 .empty-action:hover { filter: brightness(1.08); }
+.offline-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.offline-action { padding: 5px 14px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--stage-text); font-weight: 500; }
+.offline-action:hover { background: var(--hover); }
+.offline-action.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.offline-action.primary:hover { background: var(--accent); filter: brightness(1.08); }
+.offline-action:disabled { opacity: .5; }
 /* 有主要操作时集成说明降为次要按钮 */
 
 /* 关于 / App 集成面板 */
@@ -899,8 +908,6 @@ body.log-open .log-pane { display: flex; }
 .sb-row:hover .sb-meta, .sb-row:focus-within .sb-meta { display: none; }
 .sb-tools .icon-btn { width: 22px; height: 22px; }
 .sb-tools .icon-btn .icon { width: 14px; height: 14px; }
-.sb-delete.confirm { width: auto; padding: 0 6px; gap: 4px; color: #fff; background: var(--danger); font-size: 12px; }
-.sb-delete.confirm:hover { background: var(--danger); color: #fff; filter: brightness(1.08); }
 .sb-empty { margin: 0; padding: 16px; color: var(--muted); text-align: center; }
 .sb-preview { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .sb-preview > .sb-empty { margin: auto; }
@@ -937,16 +944,30 @@ body.log-open .log-pane { display: flex; }
 /* 底部面板的 日志 / 网络 两页 */
 .pane-tabs { flex: none; margin-right: 6px; }
 .pane-tabs button { padding: 2px 12px; font-size: 13px; }
-.pane-tabs button.active { font-weight: 600; }
+.pane-tabs button.active { font-weight: 600; background: var(--accent); color: #fff; box-shadow: none; }
+.pane-tabs button.active .tab-badge { background: rgba(255, 255, 255, 0.25); color: #fff; }
 .log-pane[data-tab="net"] .log-only, .log-pane[data-tab="git"] .log-only, .log-pane[data-tab="term"] .log-only, .log-pane:not([data-tab="net"]) .net-only, .log-pane:not([data-tab="git"]) .git-only, .log-pane:not([data-tab="term"]) .term-only { display: none !important; }
 .net-type { flex: none; max-width: 90px; margin-right: 4px; font-size: 13px; }
+.net-session { flex: none; max-width: 170px; margin-right: 4px; font-size: 13px; }
+.net-session[hidden] { display: none; }
 .log-head .icon-btn:disabled { opacity: 0.4; }
 .net-body { flex: 1; min-height: 0; display: flex; position: relative; }
 /* 改动面板: 左侧文件列表与提交框, 右侧 diff */
-.git-repo { flex: none; max-width: 160px; margin: 0 6px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12px; }
-.git-branch { flex: none; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-/* 右侧的最大化等按钮靠右 */
-#gitPush, #gitBranch.git-local { margin-right: auto; }
+/* 顶栏分区: 页签, 上下文, 操作, 窗口按钮 */
+.pane-spacer { flex: 1; min-width: 8px; }
+.pane-gap { flex: none; width: 8px; }
+.git-context { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.git-context[hidden] { display: none; }
+.git-context .icon { flex: none; width: 12px; height: 12px; }
+.git-context-sep { flex: none; margin: 0 2px; opacity: 0.6; }
+.git-repo { flex: 0 1 auto; min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.git-branch { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.git-sync { flex: none; margin-left: 4px; font: 11px var(--mono); }
+.git-sync:empty { display: none; }
+/* 拉取/推送上的提交数角标 */
+.log-head .icon-btn:has(.btn-count) { position: relative; overflow: visible; }
+.btn-count { position: absolute; top: -3px; right: -4px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: var(--accent); color: #fff; font: 600 10px/14px var(--mono); text-align: center; pointer-events: none; }
+.btn-count[hidden] { display: none; }
 .git-body { flex: 1; min-height: 0; display: flex; position: relative; }
 .git-side { flex: none; width: var(--git-side-w, 340px); max-width: calc(100% - 240px); min-width: 200px; display: flex; flex-direction: column; }
 /* 改动与提交记录在同一个列表, 提交框固定在底部 */
@@ -985,9 +1006,9 @@ body.log-open .log-pane { display: flex; }
 .git-actions { flex: none; display: none; align-items: center; gap: 2px; }
 .git-file:hover .git-actions, .git-file.sel .git-actions { display: flex; }
 .git-btn.icon-btn { width: 22px; height: 22px; font-size: 15px; line-height: 1; }
-.git-discard.confirm { width: auto; padding: 0 6px; gap: 4px; color: #fff; background: var(--danger); font-size: 12px; }
-.git-discard.confirm:hover { background: var(--danger); color: #fff; filter: brightness(1.08); }
 .git-clean, .git-note { padding: 14px 12px; color: var(--text-2); font-size: 12px; }
+.git-clean { padding: 28px 12px; text-align: center; }
+.git-section-empty { padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--text-2); font-size: 12px; }
 /* 提交记录: 左侧时间列固定, 右侧哈希与标题可左右滚动 */
 .git-log { display: flex; font-size: 12px; }
 .git-log-dates { flex: none; }
@@ -1029,6 +1050,10 @@ body.log-open .log-pane { display: flex; }
 .git-diff-back { display: none; transform: rotate(90deg); }
 .git-diff-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); color: var(--text); }
 .git-diff-group { flex: none; color: var(--text-2); font-size: 12px; }
+.git-diff-head.message { align-items: flex-start; height: auto; padding-top: 6px; padding-bottom: 6px; }
+.git-diff-head.message > :not(.git-diff-title) { margin-top: -2px; }
+.git-diff-message { max-height: 30vh; overflow: auto; white-space: pre-wrap; word-break: break-word; line-height: 18px; -webkit-user-select: text; user-select: text; }
+.git-diff-message .git-hash { margin-right: 8px; color: var(--text-2); }
 .git-diff-body { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--edge-fade); -webkit-user-select: text; user-select: text; }
 .git-diff-empty { display: flex; align-items: center; justify-content: center; height: 100%; padding: 16px; box-sizing: border-box; color: var(--text-2); font-size: 13px; text-align: center; }
 /* diff 配色参考 Sourcetree: 删除红底, 新增青底, 行号栏不着色 */
@@ -1041,7 +1066,6 @@ body.log-open .log-pane { display: flex; }
 .git-hunk-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-hunk-btn { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text); font-size: 12px; }
 .git-hunk-btn:hover { background: var(--row-hover); }
-.git-hunk-btn.confirm { border-color: var(--danger); background: var(--danger); color: #fff; }
 .git-hunk-body { overflow-x: auto; overflow-y: hidden; }
 .git-hunk-lines { min-width: 100%; width: max-content; }
 .git-line { display: flex; white-space: pre; }
@@ -1256,10 +1280,8 @@ body.log-open .log-pane { display: flex; }
 .modal-actions button { min-width: 72px; }
 /* 不可撤销的菜单项: 红字, 确认状态红底 */
 .menu-item.danger:not(:disabled) { color: var(--danger); }
-.menu-item.danger.confirm:not(:disabled), .menu-item.danger:not(:disabled):hover { background: var(--danger); color: #fff; }
+.menu-item.danger:not(:disabled):hover { background: var(--danger); color: #fff; }
 /* 可撤回但需确认的菜单项: 确认状态强调色底, 下方显示影响说明 */
-.menu-item.notice.confirm:not(:disabled) { background: var(--accent); color: #fff; }
-.menu-hint { display: block; max-width: 260px; margin-top: 2px; font-size: 12px; line-height: 16px; white-space: normal; opacity: 0.85; }
 /* 终端: 头部是会话标签, 下方是 xterm; 会话数显示在页签和顶栏按钮上, 有命令在运行时为强调色 */
 .tab-badge { display: inline-block; min-width: 15px; height: 15px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: color-mix(in srgb, var(--text) 16%, transparent); color: var(--text); font-size: 11px; font-weight: 600; line-height: 15px; text-align: center; vertical-align: 1px; }
 .tab-badge[hidden] { display: none; }
@@ -1298,3 +1320,44 @@ body.log-open .log-pane { display: flex; }
 .term-project-note { max-width: 420px; color: var(--text-2); }
 .term-empty-hint { font-size: 12px; }
 .term-size { flex: none; font-size: 12px; color: var(--text-2); }
+
+/* 抓包保存到本机 */
+.net-offline { margin-left: 6px; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--vc) 16%, transparent); color: var(--vc); font-size: 11px; }
+.net-dropped { margin-left: 6px; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); font-size: 11px; }
+/* 未开启抓包: 提示和开启按钮 */
+.log-empty.capture-off { flex-direction: column; gap: 6px; }
+.net-capture-title { color: var(--text); font-size: 14px; font-weight: 600; }
+.net-capture-hint { max-width: 360px; color: var(--text-2); font-size: 12px; text-align: center; }
+.net-capture-on { margin-top: 6px; height: 28px; padding: 0 14px; border-color: var(--accent); background: var(--accent); color: #fff; font-size: 13px; pointer-events: auto; }
+.net-capture-on:hover { filter: brightness(1.08); }
+
+/* 缓存管理 */
+.cache { display: flex; flex-direction: column; gap: 14px; }
+.cache-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cache-total { color: var(--muted); }
+.cache-btn { padding: 3px 10px; border: 1px solid var(--border); border-radius: var(--r-control); background: none; color: var(--text); }
+.cache-btn:hover { background: var(--hover); }
+.cache-group { display: flex; flex-direction: column; gap: 2px; }
+.cache-group-head { display: flex; align-items: center; gap: 10px; padding: 0 0 4px; border-bottom: 1px solid var(--border); }
+.cache-app { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cache-current { margin-left: 8px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 400; }
+.cache-row { display: flex; align-items: center; gap: 10px; padding: 4px 0 4px 2px; }
+.cache-row.openable { cursor: pointer; }
+.cache-row.openable:hover { background: var(--hover); }
+.cache-kind { flex: none; padding: 0 5px; border-radius: 4px; background: var(--hover); color: var(--muted); font-size: 11px; }
+.cache-kind.network { color: var(--accent); }
+.cache-name { flex: 1; min-width: 0; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cache-meta { flex: none; color: var(--muted); white-space: nowrap; }
+.cache-remove { flex: none; }
+/* 确认气泡: 锚定在触发位置旁, 说明影响并列出涉及的文件 */
+.confirm-bubble { position: fixed; z-index: 200; box-sizing: border-box; width: max-content; min-width: 220px; max-width: min(340px, calc(100vw - 16px)); padding: 12px; background: var(--elevated); border: 1px solid var(--border); border-radius: var(--r-float); box-shadow: var(--shadow); font-size: 12px; color: var(--text); }
+.confirm-title { font-size: 13px; font-weight: 600; }
+.confirm-detail { margin-top: 4px; color: var(--text-2); line-height: 17px; }
+.confirm-items { margin-top: 8px; padding: 4px 0; border-top: 1px solid var(--border); font-family: var(--mono); }
+.confirm-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; }
+.confirm-more { color: var(--text-2); line-height: 18px; }
+.confirm-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.confirm-buttons button { height: 26px; padding: 0 12px; font-size: 12px; }
+.confirm-ok { border-color: var(--accent); background: var(--accent); color: #fff; }
+.confirm-ok.danger { border-color: var(--danger); background: var(--danger); }
+.confirm-ok:hover { filter: brightness(1.08); }

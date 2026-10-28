@@ -8,6 +8,7 @@
 
 #import "LayerLensNetworkRecorder.h"
 #import "LayerLensNetworkRecord.h"
+#import "LayerLensNetworkHooks.h"
 #import "LayerLensStorage.h"
 #import "LayerLens.h"
 #import <objc/runtime.h>
@@ -26,6 +27,7 @@ static const int64_t kLayerLensNetworkSweepInterval = 2 * NSEC_PER_SEC;
 static const NSTimeInterval kLayerLensNetworkCompleteGrace = 2;
 
 static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
+static NSString * const kLayerLensNetworkCaptureKey = @"LayerLensNetworkCapture";
 
 // 任务上的关联对象用 selector 作 key, 热重载注入的镜像与原镜像共用
 #define kLayerLensTaskIdentifierKey @selector(layerlens_networkIdentifier)
@@ -46,6 +48,8 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
 @property (nonatomic, strong) dispatch_queue_t searchQueue;
 /// client -> 最新一次查找的序号, 用于取消旧查找
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *searchGenerations;
+@property (nonatomic, assign) BOOL capturing;
+@property (atomic, assign) NSUInteger droppedCount;
 
 @end
 
@@ -69,12 +73,51 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
         _changed = [NSMutableOrderedSet orderedSet];
         _searchQueue = dispatch_queue_create("com.layerlens.network.search", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
         _searchGenerations = [NSMutableDictionary dictionary];
+        _capturing = LayerLensNetworkRecorder.captureEnabledAtLaunch;
         // 列表只在内存中, 上次启动留下的内容已无法查看
         dispatch_async(_queue, ^{
             [NSFileManager.defaultManager removeItemAtPath:self.directory error:nil];
         });
     }
     return self;
+}
+
++ (BOOL)captureEnabledAtLaunch {
+    return [NSUserDefaults.standardUserDefaults boolForKey:kLayerLensNetworkCaptureKey];
+}
+
+- (void)setCapturing:(BOOL)capturing {
+    if (_capturing == capturing) {
+        return;
+    }
+    _capturing = capturing;
+    [NSUserDefaults.standardUserDefaults setBool:capturing forKey:kLayerLensNetworkCaptureKey];
+    if (capturing) {
+        [LayerLensNetworkHooks install];
+    } else {
+        [self clear];
+    }
+}
+
+- (void)releaseIdentifiers:(NSArray<NSNumber *> *)identifiers {
+    dispatch_async(self.queue, ^{
+        NSMutableSet<NSNumber *> *released = [NSMutableSet set];
+        for (NSNumber *identifier in identifiers) {
+            LayerLensNetworkRecord *record = self.records[identifier];
+            if (!record.finished) {
+                continue;
+            }
+            [self.records removeObjectForKey:identifier];
+            [self.changed removeObject:record];
+            [self removeFilesOfRecord:record];
+            [released addObject:identifier];
+        }
+        if (released.count > 0) {
+            [self.order filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSNumber *identifier, NSDictionary *bindings) {
+                return ![released containsObject:identifier];
+            }]];
+        }
+    });
 }
 
 #pragma mark - Record
@@ -92,6 +135,9 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
 }
 
 - (void)taskDidResume:(NSURLSessionTask *)task {
+    if (!self.capturing) {
+        return;
+    }
     // 上传任务是数据任务的子类, 先判断; WebSocket 等其他任务不记录
     NSString *type = [task isKindOfClass:NSURLSessionUploadTask.class] ? @"upload" : [task isKindOfClass:NSURLSessionDataTask.class] ? @"data" : [task isKindOfClass:NSURLSessionDownloadTask.class] ? @"download" : nil;
     if (!type) {
@@ -255,6 +301,8 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
         LayerLensNetworkRecord *oldest = self.records[self.order.firstObject];
         [self.order removeObjectAtIndex:0];
         if (oldest) {
+            // Mac 取走的已释放, 留到这里的都是未保存就被挤掉的
+            self.droppedCount += 1;
             [self.records removeObjectForKey:@(oldest.identifier)];
             [self.changed removeObject:oldest];
             [self removeFilesOfRecord:oldest];
@@ -503,6 +551,7 @@ static _Atomic uint64_t LayerLensNetworkNextIdentifier = 0;
         [self.records removeAllObjects];
         [self.order removeAllObjects];
         [self.changed removeAllObjects];
+        self.droppedCount = 0;
         [NSFileManager.defaultManager removeItemAtPath:self.directory error:nil];
         if (self.onClear) {
             self.onClear();

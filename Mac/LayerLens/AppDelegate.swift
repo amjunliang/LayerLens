@@ -102,6 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.openPanel("integration")
     }
 
+    @objc func showCache() {
+        openWindow()
+        windowController.openPanel("cache")
+    }
+
     // MARK: - Private
 
     private func setupStatusItem() {

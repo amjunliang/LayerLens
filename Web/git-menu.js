@@ -2,8 +2,8 @@
 
 // 改动面板的右键菜单: 提交(复制哈希、创建补丁、回滚)和文件 / 目录(打开、在 Finder 中显示、复制路径、暂存、放弃)
 
-// 菜单项 [标题, 执行, 禁用, 确认标题, 确认提示]; 文字已本地化. 有确认标题的项第一次点击只切换为确认状态,
-// 再点一次才执行; Mac App 的 WebView 不支持 confirm(). 带确认提示的是可撤回的操作, 不标红, 确认时在下方说明影响
+// 菜单项 [标题, 执行, 禁用, 确认]; 文字已本地化. 有确认的项点击后关闭菜单, 在原位置弹出确认气泡(参数见 showConfirm),
+// danger 为 false 的是可撤回的操作, 不标红
 function gitShowMenu(x, y, items) {
   hideMenu();
   const menu = el('div', 'context-menu');
@@ -13,19 +13,14 @@ function gitShowMenu(x, y, items) {
       menu.append(el('div', 'menu-separator'));
       return;
     }
-    const [title, run, disabled, confirm, hint] = entry;
-    const button = el('button', 'menu-item' + (confirm ? (hint ? ' notice' : ' danger') : ''), title);
+    const [title, run, disabled, confirm] = entry;
+    const button = el('button', 'menu-item' + (confirm ? (confirm.danger === false ? ' notice' : ' danger') : ''), title);
     button.disabled = !!disabled;
     button.addEventListener('click', () => {
-      if (confirm && !button.classList.contains('confirm')) {
-        button.classList.add('confirm');
-        button.textContent = confirm;
-        if (hint) button.append(el('span', 'menu-hint', hint));
-        placeMenu(menu, menu.getBoundingClientRect().left, menu.getBoundingClientRect().top);
-        return;
-      }
+      const rect = button.getBoundingClientRect();
       hideMenu();
-      run();
+      if (confirm) showConfirm(rect, { ...confirm, onConfirm: run });
+      else run();
     });
     menu.append(button);
   });
@@ -49,7 +44,7 @@ function gitShowCommitMenu(e, commit) {
     null,
     [t('创建补丁'), () => gitCopyPatch(oid)],
     null,
-    [t('回滚提交'), () => gitRevert(oid), git.busy.has('revert'), t('确认回滚 {0}', commit.hash)],
+    [t('回滚提交'), () => gitRevert(oid), git.busy.has('revert'), { title: t('回滚提交 {0}?', commit.hash), detail: t('会新建一个提交撤销它的改动'), action: t('回滚'), danger: false }],
     gitResetItem(commit, oid),
   ]);
 }
@@ -76,9 +71,13 @@ function gitResetItem(commit, oid) {
   const name = branch.head && branch.head !== '(detached)' ? branch.head : '';
   const current = branch.oid || '';
   const title = name ? t('将 {0} 重置到这次提交', name) : t('重置当前分支到这次提交');
-  const confirm = t('确认重置到 {0}', commit.hash);
-  const hint = t('工作区和暂存区不变, 跳过的提交的改动会出现在已暂存中; 可在原提交 {0} 上再次重置撤回', current.slice(0, 7));
-  return [title, () => gitReset(oid, name, current), !name || !current || current === oid || git.busy.has('reset'), confirm, hint];
+  const confirm = {
+    title: name ? t('将 {0} 重置到 {1}?', name, commit.hash) : t('重置到 {0}?', commit.hash),
+    detail: t('工作区和暂存区不变, 跳过的提交的改动会出现在已暂存中; 可在原提交 {0} 上再次重置撤回', current.slice(0, 7)),
+    action: t('重置'),
+    danger: false,
+  };
+  return [title, () => gitReset(oid, name, current), !name || !current || current === oid || git.busy.has('reset'), confirm];
 }
 
 async function gitReset(oid, name, previous) {
@@ -136,8 +135,7 @@ function gitChangeItems(section, items) {
   if (discard.length) {
     const removing = discard.every((item) => item.group === 'untracked');
     const title = removing ? t('删除文件') : t('放弃改动');
-    const confirm = removing ? t('确认删除') : t('确认放弃');
-    entries.push(null, [count(title, discard.length), () => gitDiscard(discard), false, count(confirm, discard.length)]);
+    entries.push(null, [count(title, discard.length), () => gitDiscard(discard), false, gitDiscardConfirm(discard)]);
   }
   return entries;
 }

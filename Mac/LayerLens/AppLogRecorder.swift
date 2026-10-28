@@ -14,7 +14,6 @@ import Network
 /// 没有网页订阅时只记录不转发. 所有状态只在 queue 上读写
 final class AppLogRecorder {
     static let memoryLimit = 50_000
-    static let fileKeep = 20
     /// 网页连上时分批补齐, 网页可以边收边显示
     static let backlogBatch = 5_000
     /// App 每 15 秒发一次心跳, 超过这个时间没有数据视为连接已失效(如锁屏期间被系统回收)
@@ -23,6 +22,8 @@ final class AppLogRecorder {
     /// 记在日志文件扩展属性上: 所属的 App 进程和已写入的最大序号, LayerLens 重启后据此找回文件续写
     static let instanceAttribute = "com.layerlens.instance"
     static let seqAttribute = "com.layerlens.seq"
+    /// 所属设备, LayerLens 重启后据此找回该设备最近的日志
+    static let deviceAttribute = "com.layerlens.device"
 
     struct Entry {
         let id: Int
@@ -79,13 +80,15 @@ final class AppLogRecorder {
         return formatter
     }
 
-    private func source(deviceId: String, bundleId: String) -> Source {
+    private func source(deviceId: String, bundleId: String, deviceName: String = "") -> Source {
         let key = deviceId + "|" + bundleId
         if let source = sources[key] {
             return source
         }
         let source = Source(deviceId: deviceId, bundleId: bundleId)
+        source.deviceName = deviceName
         sources[key] = source
+        restore(source)
         return source
     }
 
@@ -96,7 +99,7 @@ final class AppLogRecorder {
         queue.async { [self] in
             for app in apps where !app.suspended {
                 guard let instanceId = app.info["instanceId"] as? String, !instanceId.isEmpty else { continue }
-                let source = source(deviceId: app.deviceId, bundleId: app.bundleId)
+                let source = source(deviceId: app.deviceId, bundleId: app.bundleId, deviceName: app.info["deviceName"] as? String ?? "")
                 if let name = app.info["deviceName"] as? String, !name.isEmpty {
                     source.deviceName = name
                 }
@@ -284,10 +287,52 @@ final class AppLogRecorder {
             source.file = try? FileHandle(forWritingTo: url)
             source.fileURL = url
             Self.setAttribute(Self.instanceAttribute, source.instanceId, of: url)
-            Self.removeOldFiles(in: folder)
+            Self.setAttribute(Self.deviceAttribute, source.deviceId, of: url)
         }
         let text = entries.map { "[\(timeFormatter.string(from: Date(timeIntervalSince1970: $0.time / 1000)))] \($0.text)\n" }.joined()
         try? source.file?.write(contentsOf: Data(text.utf8))
+    }
+
+    /// LayerLens 重启后读回该设备最近的日志文件, App 未运行时日志面板也有内容; 同时接着写这个文件,
+    /// App 仍是同一次运行时只补齐之后的日志, 换了一次运行时按重启处理.
+    /// 旧版本写的文件没有设备标记, 按文件名中的设备名匹配
+    private func restore(_ source: Source) {
+        let manager = FileManager.default
+        let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
+        let files = ((try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "log" }.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return a > b
+        }
+        let suffix = "_" + Self.sanitize(source.deviceName)
+        guard let url = files.first(where: { Self.attribute(Self.deviceAttribute, of: $0) == source.deviceId })
+                ?? files.first(where: { !source.deviceName.isEmpty && Self.attribute(Self.deviceAttribute, of: $0) == nil && $0.deletingPathExtension().lastPathComponent.hasSuffix(suffix) }),
+              let data = try? Data(contentsOf: url) else { return }
+        var entries: [Entry] = []
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false) {
+            // 每条以 [时间] 开头, 其余为上一条的续行
+            if line.count > 26, line.hasPrefix("["), line.dropFirst(24).hasPrefix("] "), let date = timeFormatter.date(from: String(line.dropFirst().prefix(23))) {
+                entries.append(Entry(id: 0, time: date.timeIntervalSince1970 * 1000, text: String(line.dropFirst(26))))
+            } else if let last = entries.popLast() {
+                entries.append(Entry(id: 0, time: last.time, text: last.text + "\n" + line))
+            }
+        }
+        // 文件末尾的换行不算续行
+        if let last = entries.popLast() {
+            entries.append(Entry(id: 0, time: last.time, text: last.text.hasSuffix("\n") ? String(last.text.dropLast()) : last.text))
+        }
+        source.entries = entries.suffix(Self.memoryLimit).map {
+            defer { source.nextId += 1 }
+            return Entry(id: source.nextId, time: $0.time, text: $0.text)
+        }
+        if let instanceId = Self.attribute(Self.instanceAttribute, of: url), let file = try? FileHandle(forWritingTo: url) {
+            _ = try? file.seekToEnd()
+            source.instanceId = instanceId
+            source.file = file
+            source.fileURL = url
+            source.fileSeq = UInt64(Self.attribute(Self.seqAttribute, of: url) ?? "") ?? 0
+            source.lastSeq = source.fileSeq
+        }
     }
 
     /// LayerLens 重启后找回同一次 App 运行的文件接着写
@@ -300,6 +345,19 @@ final class AppLogRecorder {
         source.file = file
         source.fileURL = url
         source.fileSeq = UInt64(Self.attribute(Self.seqAttribute, of: url) ?? "") ?? 0
+    }
+
+    /// 本机保存的日志所属的设备 ID -> Bundle ID; 只含记了所属设备的文件
+    static func savedApps() -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        let manager = FileManager.default
+        for bundle in (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] where !bundle.lastPathComponent.hasPrefix(".") {
+            for url in (try? manager.contentsOfDirectory(at: bundle, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "log" {
+                guard let deviceId = attribute(deviceAttribute, of: url), !deviceId.isEmpty else { continue }
+                result[deviceId, default: []].insert(bundle.lastPathComponent)
+            }
+        }
+        return result
     }
 
     private static func attribute(_ name: String, of url: URL) -> String? {
@@ -319,15 +377,17 @@ final class AppLogRecorder {
         name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
     }
 
-    private static func removeOldFiles(in folder: URL) {
-        let manager = FileManager.default
-        let files = (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        let sorted = files.filter { $0.pathExtension == "log" }.sorted {
-            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return a > b
+    /// 缓存管理删除了文件: 正在写的文件关闭, 之后的日志写入新文件
+    func didDelete(_ urls: [URL]) {
+        let paths = urls.map { $0.standardizedFileURL.path }
+        queue.async { [self] in
+            for source in sources.values {
+                guard let path = source.fileURL?.standardizedFileURL.path, paths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) else { continue }
+                source.file?.closeFile()
+                source.file = nil
+                source.fileURL = nil
+            }
         }
-        sorted.dropFirst(fileKeep).forEach { try? manager.removeItem(at: $0) }
     }
 
     // MARK: - Subscribers

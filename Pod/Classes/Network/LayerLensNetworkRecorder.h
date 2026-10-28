@@ -10,9 +10,16 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 抓包记录: 内存中保留最近的请求, 较大的内容存到缓存目录; 只保留本次启动的数据.
+/// 抓包记录: 只作为发给 Mac 的缓冲, Mac 取走并保存后释放; 较大的内容存到缓存目录, 只保留本次启动的数据.
+/// 是否抓包由 Mac 端同步并保存在本机, 默认关闭, 开启时冷启动即开始记录.
 /// 所有状态只在内部串行队列上读写, 记录方法任意线程可调用
 @interface LayerLensNetworkRecorder : NSObject
+
+/// 上次保存的抓包开关, 启动时据此决定是否安装 hook
+@property (class, nonatomic, readonly) BOOL captureEnabledAtLaunch;
+@property (nonatomic, readonly) BOOL capturing;
+/// Mac 未连接期间超出上限而丢弃的请求数, 清空或关闭抓包时归零
+@property (atomic, readonly) NSUInteger droppedCount;
 
 /// 有变化的请求在内部队列回调, 每 200ms 最多一次, 同一请求只带最新的列表字段
 @property (nonatomic, copy, nullable) void (^onFlush)(NSArray<NSDictionary *> *records);
@@ -47,6 +54,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// 导出 HAR 1.2, identifiers 为空时导出全部; 文本内容原样写入, 其他以 base64 写入
 - (void)HARWithIdentifiers:(nullable NSArray<NSNumber *> *)identifiers completion:(void (^)(NSData *data))completion;
 - (void)clear;
+
+#pragma mark - 由 Mac 端调用
+
+/// 保存开关; 开启时安装 hook, 关闭时清空缓冲. 开启前已创建的带代理的会话收不到响应内容
+- (void)setCapturing:(BOOL)capturing;
+/// Mac 已保存的请求, 从缓冲中释放; 未结束的请求不释放
+- (void)releaseIdentifiers:(NSArray<NSNumber *> *)identifiers;
 
 @end
 

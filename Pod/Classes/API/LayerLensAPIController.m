@@ -274,16 +274,40 @@
 #pragma mark - Network
 
 - (void)registerNetworkRoutesToRouter:(LayerLensRouter *)router {
-    // 网页据此判断 Pod 是否支持抓包, search 表示支持搜索内容
+    // 网页据此判断 Pod 是否支持抓包, search 表示支持搜索内容, capture 表示支持由 Mac 端开关和释放
     [router addRoute:@"GET" path:@"/api/network/status" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
-        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES, @"search": @YES}]);
+        LayerLensNetworkRecorder *recorder = LayerLensNetworkRecorder.sharedRecorder;
+        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES, @"search": @YES, @"capture": @YES, @"capturing": @(recorder.capturing), @"dropped": @(recorder.droppedCount)}]);
+    }];
+
+    // Mac 端同步抓包开关, 保存在本机, 下次冷启动即按此记录
+    [router addRoute:@"POST" path:@"/api/network/capture" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSDictionary *body = [request.JSONBody isKindOfClass:NSDictionary.class] ? request.JSONBody : @{};
+        [LayerLensNetworkRecorder.sharedRecorder setCapturing:[body[@"enabled"] boolValue]];
+        // /api/app 中的开关状态随之更新, Mac 下次扫描不再重复同步
+        [self refreshAppInfoCache];
+        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES, @"capturing": @(LayerLensNetworkRecorder.sharedRecorder.capturing)}]);
+    }];
+
+    // Mac 已保存的请求, App 中释放内存和缓存文件
+    [router addRoute:@"POST" path:@"/api/network/release" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        NSDictionary *body = [request.JSONBody isKindOfClass:NSDictionary.class] ? request.JSONBody : @{};
+        NSArray *ids = [body[@"ids"] isKindOfClass:NSArray.class] ? body[@"ids"] : @[];
+        NSMutableArray<NSNumber *> *identifiers = [NSMutableArray array];
+        for (id item in ids) {
+            if ([item isKindOfClass:NSNumber.class]) {
+                [identifiers addObject:item];
+            }
+        }
+        [LayerLensNetworkRecorder.sharedRecorder releaseIdentifiers:identifiers];
+        responder([LayerLensHTTPResponse JSONResponse:@{@"ok": @YES}]);
     }];
 
     // 请求流: 先补齐序号大于 since 的请求, 之后每批变化推送一次, 同一请求以 id 合并; 清空时推送 clear
     [router addRoute:@"GET" path:@"/api/network" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         uint64_t since = strtoull(request.query[@"since"].UTF8String ?: "0", NULL, 10);
         [LayerLensNetworkRecorder.sharedRecorder recordsSince:since completion:^(NSArray<NSDictionary *> *records) {
-            LayerLensHTTPResponse *response = [LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"network" object:@{@"instanceId": [LayerLensLookinBridge instanceId], @"records": records}];
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse eventStreamResponseWithRetry:2000 event:@"network" object:@{@"instanceId": [LayerLensLookinBridge instanceId], @"records": records, @"dropped": @(LayerLensNetworkRecorder.sharedRecorder.droppedCount)}];
             response.channel = @"network";
             responder(response);
         }];

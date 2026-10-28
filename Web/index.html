@@ -63,6 +63,7 @@
     <symbol id="i-dock" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 14h16"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
   </defs>
 </svg>
@@ -216,22 +217,26 @@
         <option value="failed">失败</option>
       </select>
       <span class="log-count net-only" id="netCount"></span>
+      <select id="netSession" class="net-session net-only" aria-label="保存的启动" hidden></select>
+      <button class="icon-btn toggle net-only" id="netCapture" title="开启抓包" aria-label="抓包" aria-pressed="false"><svg class="icon"><use href="#i-record"/></svg></button>
       <button class="icon-btn toggle net-only" id="netPause" title="暂停" aria-label="暂停" aria-pressed="false"><svg class="icon"><use href="#i-pause"/></svg></button>
       <button class="icon-btn net-only" id="netHar" title="导出 HAR" aria-label="导出 HAR"><svg class="icon"><use href="#i-download"/></svg></button>
       <button class="icon-btn net-only" id="netClear" title="清空" aria-label="清空"><svg class="icon"><use href="#i-trash"/></svg></button>
-      <span class="git-repo git-only" id="gitRepo"></span>
-      <span class="git-branch git-only" id="gitBranch"></span>
-      <span class="log-count git-only" id="gitSync"></span>
+      <span class="git-context git-only" id="gitContext">
+        <svg class="icon"><use href="#i-folder"/></svg><span class="git-repo" id="gitRepo"></span>
+        <span class="git-context-sep">›</span>
+        <svg class="icon"><use href="#i-branch"/></svg><span class="git-branch" id="gitBranch"></span>
+        <span class="git-sync" id="gitSync"></span>
+      </span>
+      <span class="pane-spacer git-only"></span>
       <button class="icon-btn git-only" id="gitRefresh" title="刷新" aria-label="刷新"><svg class="icon"><use href="#i-refresh"/></svg></button>
       <button class="icon-btn git-only" id="gitTreeMode" title="树形显示" aria-label="树形显示"><svg class="icon"><use href="#i-tree"/></svg></button>
-      <button class="icon-btn git-only" id="gitPull" title="拉取 (仅快进)" aria-label="拉取"><svg class="icon"><use href="#i-download"/></svg></button>
-      <button class="icon-btn git-only" id="gitPush" title="推送" aria-label="推送"><svg class="icon"><use href="#i-upload"/></svg></button>
+      <span class="pane-gap git-only" id="gitRemoteGap"></span>
+      <button class="icon-btn git-only" id="gitPull" title="拉取 (仅快进)" aria-label="拉取"><svg class="icon"><use href="#i-download"/></svg><span class="btn-count" id="gitPullCount" hidden></span></button>
+      <button class="icon-btn git-only" id="gitPush" title="推送" aria-label="推送"><svg class="icon"><use href="#i-upload"/></svg><span class="btn-count" id="gitPushCount" hidden></span></button>
       <div class="term-tabs term-only" id="termTabs"></div>
       <span class="log-size term-size term-only" id="termSize"><button id="termSizeDown" title="减小字号" aria-label="减小字号">−</button><span id="termSizeLabel">12</span><button id="termSizeUp" title="增大字号" aria-label="增大字号">+</button></span>
       <button class="icon-btn term-only" id="termNew" title="新建终端" aria-label="新建终端"><svg class="icon"><use href="#i-plus"/></svg></button>
-      <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
-      <button class="icon-btn" id="logPopout" title="在独立窗口打开" aria-label="在独立窗口打开"><svg class="icon"><use href="#i-external"/></svg></button>
-      <button class="icon-btn" id="logDock" title="停靠回主窗口" aria-label="停靠回主窗口"><svg class="icon"><use href="#i-dock"/></svg></button>
       <div class="popover-anchor log-only">
         <button class="icon-btn" id="logMore" title="更多" aria-label="更多"><svg class="icon"><use href="#i-more"/></svg></button>
         <div class="popover menu log-menu" id="logMenu" hidden>
@@ -247,6 +252,9 @@
           <button class="menu-row menu-action" id="logReveal">在访达中显示</button>
         </div>
       </div>
+      <button class="icon-btn" id="logMax" title="最大化" aria-label="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
+      <button class="icon-btn" id="logPopout" title="在独立窗口打开" aria-label="在独立窗口打开"><svg class="icon"><use href="#i-external"/></svg></button>
+      <button class="icon-btn" id="logDock" title="停靠回主窗口" aria-label="停靠回主窗口"><svg class="icon"><use href="#i-dock"/></svg></button>
       <button class="icon-btn" id="logClose" title="关闭 (L)" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
       <input type="file" id="logFileInput" accept=".log,.txt,text/plain" hidden>
     </div>
@@ -345,6 +353,7 @@
     <button class="menu-row menu-action has-live-only" id="menuHeal">修复模拟器触摸…</button>
     <button class="menu-row menu-action has-live-only" id="menuLiveRestart">修复实时画面黑屏</button>
     <button class="menu-row menu-action" id="menuLogs">打开日志文件夹</button>
+    <button class="menu-row menu-action" data-panel="cache">缓存管理…</button>
     <button class="menu-row menu-action" data-panel="integration">App 集成…</button>
     <button class="menu-row menu-action" data-panel="about">关于 LayerLens…</button>
   </div>
@@ -367,11 +376,15 @@
 <script src="/assets/stage-gl.js"></script>
 <script src="/assets/live-size.js"></script>
 <script src="/assets/git-graph.js"></script>
+<script src="/assets/confirm.js"></script>
 <script src="/assets/git.js"></script>
 <script src="/assets/git-menu.js"></script>
 <script src="/assets/xterm.js"></script>
 <script src="/assets/xterm-addon-fit.js"></script>
 <script src="/assets/terminal.js"></script>
+<script src="/assets/net-capture.js"></script>
+<script src="/assets/offline-view.js"></script>
+<script src="/assets/cache.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

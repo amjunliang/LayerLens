@@ -38,8 +38,10 @@ static const NSInteger kLayerLensPortAttempts = 10;
 
 #if DEBUG
 + (void)load {
-    // 尽早替换 NSURLSession 的实现, 以记录启动阶段的请求
-    [LayerLensNetworkHooks install];
+    // 开启了抓包时尽早替换 NSURLSession 的实现, 以记录启动阶段的请求; 未开启时由 Mac 端开启后再安装
+    if (LayerLensNetworkRecorder.captureEnabledAtLaunch) {
+        [LayerLensNetworkHooks install];
+    }
     // 与 Lookin 一致, 集成即启动; 延后到主线程以免在 +load 阶段创建网络对象
     dispatch_async(dispatch_get_main_queue(), ^{
         // 热重载注入的动态库会再带一份本类并再次执行 +load, 各镜像的静态变量互不相通;
@@ -99,7 +101,7 @@ static const NSInteger kLayerLensPortAttempts = 10;
     };
     LayerLensNetworkRecorder.sharedRecorder.onFlush = ^(NSArray<NSDictionary *> *records) {
         [weakSelf.server broadcastEvent:@"network" channel:@"network" objectBlock:^id{
-            return @{@"records": records};
+            return @{@"records": records, @"dropped": @(LayerLensNetworkRecorder.sharedRecorder.droppedCount)};
         }];
     };
     LayerLensNetworkRecorder.sharedRecorder.onClear = ^{

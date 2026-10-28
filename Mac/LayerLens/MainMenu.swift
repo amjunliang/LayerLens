@@ -16,6 +16,7 @@ enum MainMenu {
         let app = NSMenu()
         app.addItem(withTitle: L("关于 LayerLens", "About LayerLens"), action: #selector(AppDelegate.showAbout), keyEquivalent: "").target = target
         app.addItem(withTitle: L("App 集成…", "App Integration…"), action: #selector(AppDelegate.showIntegration), keyEquivalent: "").target = target
+        app.addItem(withTitle: L("缓存管理…", "Manage Cache…"), action: #selector(AppDelegate.showCache), keyEquivalent: "").target = target
         app.addItem(.separator())
         let reload = app.addItem(withTitle: L("重新加载页面", "Reload Page"), action: #selector(AppDelegate.reloadPage), keyEquivalent: "r")
         reload.keyEquivalentModifierMask = [.command, .shift]

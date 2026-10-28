@@ -7,6 +7,7 @@
 //
 
 #import "LayerLensLookinBridge.h"
+#import "LayerLensNetworkRecorder.h"
 #import "LayerLens.h"
 #import "LayerLensLookinSerializer.h"
 #import "LayerLens_HierarchyDisplayItemsMaker.h"
@@ -77,6 +78,8 @@ static NSDictionary *gCachedAppInfo = nil;
         @"foreground": @(UIApplication.sharedApplication.applicationState != UIApplicationStateBackground),
         // 编译时(Mac 上)的源文件路径, Mac App 据此找到对应的 Xcode 工作区和 git 仓库; 真机上只是一个字符串, 同样可用
         @"sourceFile": @(__FILE__),
+        // 抓包开关, Mac 端与设置不一致时同步; 旧版 Pod 没有此字段
+        @"networkCapture": @(LayerLensNetworkRecorder.sharedRecorder.capturing),
     };
 }
 

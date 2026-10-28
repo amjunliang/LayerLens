@@ -85,6 +85,13 @@ final class TargetRegistry {
     /// Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
     private var sourceFiles: [String: String]
     private static let sourceFilesKey = "LayerLensSourceFiles"
+    /// 出现过的设备和 App, 断开后仍在菜单中显示; 网页和 App 窗口共用一份, 重启后保留
+    /// { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version, capture } } } }
+    private var history: [String: [String: Any]]
+    private static let historyKey = "LayerLensTargetHistory"
+    /// 开启了抓包的 "设备 ID|Bundle ID", 来自历史中 App 的 capture; 抓包队列上读取, 用锁保护
+    private var captures: Set<String> = []
+    private let captureLock = NSLock()
     /// 每次扫描完成后在 queue 上回调当前的 App 列表, 启动前设置
     var onAppsChanged: (([AppRecord]) -> Void)?
 
@@ -94,6 +101,32 @@ final class TargetRegistry {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: configuration)
         sourceFiles = UserDefaults.standard.dictionary(forKey: Self.sourceFilesKey) as? [String: String] ?? [:]
+        history = UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:]
+        backfillHistory()
+        updateCaptures()
+    }
+
+    private static let backfilledKey = "LayerLensHistoryBackfilled"
+
+    /// 历史中的设备补上本机保存过日志或抓包的 App, 未连接时也能选中查看; 只做一次, 之后移除的 App 不再出现
+    private func backfillHistory() {
+        guard !UserDefaults.standard.bool(forKey: Self.backfilledKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.backfilledKey)
+        let saved = AppLogRecorder.savedApps().merging(NetworkRecorder.savedApps()) { $0.union($1) }
+        var changed = false
+        for (deviceId, bundleIds) in saved {
+            guard var entry = history[deviceId] else { continue }
+            var apps = entry["apps"] as? [String: Any] ?? [:]
+            for bundleId in bundleIds where apps[bundleId] == nil {
+                apps[bundleId] = ["bundleId": bundleId, "appName": "", "version": ""]
+                changed = true
+            }
+            entry["apps"] = apps
+            history[deviceId] = entry
+        }
+        if changed {
+            UserDefaults.standard.set(history, forKey: Self.historyKey)
+        }
     }
 
     /// 本机的配对身份, 设备上按此记住允许的 Mac
@@ -173,7 +206,7 @@ final class TargetRegistry {
     }
 
     /// 设备列表, 供网页展示; 每台设备附带其上运行的 App. 另外返回未启动的模拟器
-    func snapshot(completion: @escaping ([[String: Any]], [[String: Any]]) -> Void) {
+    func snapshot(completion: @escaping ([[String: Any]], [[String: Any]], [String: Any]) -> Void) {
         queue.async { [self] in
             guard ready else {
                 readyWaiters.append { [weak self] in self?.snapshot(completion: completion) }
@@ -209,8 +242,113 @@ final class TargetRegistry {
                 return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "model": device.model, "apps": deviceApps]
             }
             let offline: [[String: Any]] = offlineSimulators.map { ["id": $0.record.id, "name": $0.record.name, "os": $0.record.os, "state": $0.state] }
-            completion(result, offline)
+            recordHistory(devices)
+            completion(result, offline, history)
         }
+    }
+
+    // MARK: - History
+
+    /// 记录当前的设备和其上的 App; 真机名称在 devicectl 查到前是通用名称, 已有记录时不覆盖
+    private func recordHistory(_ devices: [DeviceRecord]) {
+        var changed = false
+        for device in devices {
+            var entry = history[device.id] ?? ["id": device.id]
+            let before = NSDictionary(dictionary: entry)
+            let provisional = device.kind == .device && deviceDetails[device.id] == nil && entry["name"] != nil
+            if !provisional {
+                entry["name"] = device.name
+                entry["model"] = device.model
+                entry["os"] = device.os
+            }
+            entry["kind"] = device.kind.rawValue
+            var apps = entry["apps"] as? [String: Any] ?? [:]
+            for app in self.apps where app.deviceId == device.id {
+                // 保留抓包开关等设置, 只更新名称和版本
+                var item = apps[app.bundleId] as? [String: Any] ?? [:]
+                item["bundleId"] = app.bundleId
+                item["appName"] = app.info["appName"] as? String ?? ""
+                item["version"] = app.info["version"] as? String ?? ""
+                apps[app.bundleId] = item
+            }
+            entry["apps"] = apps
+            if !before.isEqual(to: entry) {
+                history[device.id] = entry
+                changed = true
+            }
+        }
+        if changed { saveHistory() }
+    }
+
+    /// 网页补记的目标(如带地址参数打开、尚未扫描到的设备), 只补充缺少的设备和 App, 不覆盖已有信息
+    func addHistory(_ entry: [String: Any]) {
+        queue.async { [self] in
+            guard let id = entry["id"] as? String, !id.isEmpty else { return }
+            var current = history[id] ?? entry.filter { $0.key != "apps" }
+            var apps = current["apps"] as? [String: Any] ?? [:]
+            for (bundleId, app) in entry["apps"] as? [String: Any] ?? [:] where apps[bundleId] == nil {
+                apps[bundleId] = app
+            }
+            current["apps"] = apps
+            guard !NSDictionary(dictionary: history[id] ?? [:]).isEqual(to: current) else { return }
+            history[id] = current
+            saveHistory()
+        }
+    }
+
+    /// 从菜单移除: bundleId 为空时移除整台设备; 移除设备的最后一个 App 且设备不在线时一并移除设备. 在线的设备和 App 下次扫描会重新记录
+    func removeHistory(deviceId: String, bundleId: String, completion: @escaping ([String: Any]) -> Void) {
+        queue.async { [self] in
+            if var entry = history[deviceId] {
+                var apps = entry["apps"] as? [String: Any] ?? [:]
+                if !bundleId.isEmpty { apps[bundleId] = nil }
+                entry["apps"] = apps
+                let online = simulators.contains { $0.id == deviceId } || usbDevices.contains { $0.udid == deviceId }
+                history[deviceId] = bundleId.isEmpty || (apps.isEmpty && !online) ? nil : entry
+                saveHistory()
+            }
+            completion(history)
+        }
+    }
+
+    private func saveHistory() {
+        UserDefaults.standard.set(history, forKey: Self.historyKey)
+        updateCaptures()
+    }
+
+    // MARK: - Capture
+
+    /// 抓包开关跟随菜单中的 App: 默认关闭, 从菜单移除 App 时一并清除
+    func captureEnabled(deviceId: String, bundleId: String) -> Bool {
+        captureLock.lock()
+        defer { captureLock.unlock() }
+        return captures.contains(deviceId + "|" + bundleId)
+    }
+
+    func setCapture(deviceId: String, bundleId: String, enabled: Bool, completion: @escaping ([String: Any]) -> Void) {
+        queue.async { [self] in
+            var entry = history[deviceId] ?? ["id": deviceId]
+            var apps = entry["apps"] as? [String: Any] ?? [:]
+            var item = apps[bundleId] as? [String: Any] ?? ["bundleId": bundleId]
+            item["capture"] = enabled ? true : nil
+            apps[bundleId] = item
+            entry["apps"] = apps
+            history[deviceId] = entry
+            saveHistory()
+            completion(history)
+        }
+    }
+
+    private func updateCaptures() {
+        var result: Set<String> = []
+        for (deviceId, entry) in history {
+            for (bundleId, app) in entry["apps"] as? [String: Any] ?? [:] where (app as? [String: Any])?["capture"] as? Bool == true {
+                result.insert(deviceId + "|" + bundleId)
+            }
+        }
+        captureLock.lock()
+        captures = result
+        captureLock.unlock()
     }
 
     // MARK: - Simulators
@@ -473,7 +611,10 @@ final class TargetRegistry {
     }
 
     /// 与 run 相同, 但失败时返回错误输出, 用于向网页说明原因
-    static func runReportingError(_ path: String, _ arguments: [String]) -> (ok: Bool, error: String) {
+    /// timeout: 超时后结束进程并返回 timedOutMessage, 避免设备通道卡住时调用方一直等待
+    static let timedOutMessage = "Timed out"
+
+    static func runReportingError(_ path: String, _ arguments: [String], timeout: TimeInterval? = nil) -> (ok: Bool, error: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
@@ -486,6 +627,16 @@ final class TargetRegistry {
         } catch {
             return (false, error.localizedDescription)
         }
+        var timedOut = false
+        let timer = DispatchWorkItem {
+            guard process.isRunning else { return }
+            timedOut = true
+            process.terminate()
+        }
+        if let timeout {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+        }
+        defer { timer.cancel() }
         // 错误输出在后台读取, 两个管道任一写满都不会互相阻塞
         var errorData = Data()
         let group = DispatchGroup()
@@ -497,6 +648,7 @@ final class TargetRegistry {
         let outputData = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         group.wait()
+        if timedOut { return (false, timedOutMessage) }
         guard process.terminationStatus != 0 else { return (true, "") }
         // devicectl 把错误写在标准输出, simctl 写在错误输出
         let text = [errorData, outputData].compactMap { String(data: $0, encoding: .utf8) }.joined(separator: "\n")
