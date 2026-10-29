@@ -2307,8 +2307,8 @@ function renderTargetMenu() {
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
   footer.dataset.panel = 'integration';
   children.push(el('div', 'menu-sep'), footer);
-  // 视图选项使用频率低, 工具栏不放按钮, 从这里打开
-  const options = el('button', 'menu-row menu-action target-footer', t('视图选项…'));
+  // 设置使用频率低, 工具栏不放按钮, 从这里打开
+  const options = el('button', 'menu-row menu-action target-footer', t('设置…'));
   options.addEventListener('click', () => openPanel('options'));
   children.push(options);
   menu.replaceChildren(...children);
@@ -4267,13 +4267,13 @@ function shortcutsPanel() {
 }
 
 function openPanel(name) {
-  const panels = { options: [t('视图选项'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel], cache: [t('缓存管理'), cachePanel] };
+  const panels = { options: [t('设置'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel], cache: [t('缓存管理'), cachePanel] };
   const panel = panels[name];
   if (!panel) return;
   state.panel = name;
   hidePopovers();
   hideMenu();
-  // 视图选项的控件一直留在文档中, 换成其他弹窗前先放回隐藏的容器
+  // 设置的控件一直留在文档中, 换成其他弹窗前先放回隐藏的容器
   $('optionsHolder').appendChild($('optionsMenu'));
   $('modal').classList.toggle('modal-wide', name === 'sandbox');
   $('modal').classList.toggle('modal-narrow', name === 'options');
@@ -4303,7 +4303,7 @@ function setupPanels() {
     if (value) copyText(value, '复制');
   });
   $('modalClose').addEventListener('click', closePanel);
-  // 视图选项中的操作执行后关闭弹窗; 打开其他弹窗的由 data-panel 处理
+  // 设置中的操作执行后关闭弹窗; 打开其他弹窗的由 data-panel 处理
   $('optionsMenu').addEventListener('click', (e) => {
     const action = e.target.closest('.menu-action');
     if (action && !action.dataset.panel && action.id !== 'menuHeal') closePanel();
@@ -5720,6 +5720,8 @@ const NET_MAX_RECORDS = 5000;
 const NET_PREVIEW_LIMIT = 512 * 1024;
 const NET_TAB_KEY = 'layerlens_pane_tab';
 const NET_DETAIL_W_KEY = 'layerlens_net_detail_w';
+// 详情查找框是否打开和查找内容, 重启后恢复
+const NET_FIND_KEY = 'layerlens_net_find';
 const NET_DETAIL_MIN_W = 280;
 const NET_SUPPORT_VERSION = '0.6.0';
 // Pod 返回的原因, 显示前翻译
@@ -5767,12 +5769,15 @@ const net = {
   detail: null,
   detailTab: 'response',
   detailToken: 0,
+  urlHeadCleanup: null,
+  urlPopoverClose: null,
   // 内容搜索由 Hub 完成, 见 net-filters.js
   searchSupported: false,
   // 设备据此取消本页面未完成的旧查找
   searchClient: Math.random().toString(36).slice(2),
   // 详情中的 ⌘F 查找
-  find: { open: false, query: '', marks: [], index: -1 },
+  // row: 查找栏, 只建一次, 切换请求和加载时保留
+  find: { open: false, query: '', marks: [], index: -1, row: null },
   follow: true,
   rendered: new Map(),
   renderKey: '',
@@ -6150,6 +6155,7 @@ function netRow(record) {
 
 function renderNetStatus() {
   const total = net.list.length;
+  $('netSource').hidden = !net.session;
   const count = $('netCount');
   const parts = [];
   if (net.view !== net.list) parts.push(el('span', 'hit', String(net.view.length)), document.createTextNode(' / ' + total));
@@ -6160,11 +6166,6 @@ function renderNetStatus() {
   if (net.dropped && !net.session) {
     const badge = el('span', 'net-dropped', t('丢弃 {0}', net.dropped));
     badge.title = t('Mac 未连接期间 App 的缓冲已满, 丢弃了 {0} 个最早的请求', net.dropped);
-    parts.push(badge);
-  }
-  if (net.cached && net.offline && !net.session) {
-    const badge = el('span', 'net-offline', t('离线'));
-    badge.title = t('App 当前无法访问 (如息屏或已退出), 显示的是保存在本机的记录');
     parts.push(badge);
   }
   count.replaceChildren(...parts);
@@ -6269,7 +6270,8 @@ function closeNetDetail() {
   net.detailToken++;
   $('netDetail').hidden = false;
   $('netSplitter').hidden = false;
-  $('netDetail').replaceChildren(el('div', 'net-detail-empty', t('选择一个请求查看详情')));
+  // 空状态也显示头部, 查找栏位置与选中请求时一致
+  setNetDetail(netDetailHead(null), el('div', 'net-detail-empty', t('选择一个请求查看详情')));
   scheduleNetRender();
 }
 
@@ -6289,7 +6291,8 @@ async function loadNetDetail(id) {
   const panel = $('netDetail');
   panel.hidden = false;
   $('netSplitter').hidden = false;
-  if (!net.detail || net.detail.id !== id) panel.replaceChildren(el('p', 'net-note', t('正在加载…')));
+  // 加载时保留头部和查找栏, 切换请求时不跳动
+  if (!net.detail || net.detail.id !== id) setNetDetail(netDetailHead(net.records.get(id)), el('p', 'net-note', t('正在加载…')));
   try {
     const data = await fetchNetDetail(id);
     if (token !== net.detailToken) return;
@@ -6298,45 +6301,110 @@ async function loadNetDetail(id) {
   } catch (e) {
     if (token !== net.detailToken) return;
     net.detail = null;
-    panel.replaceChildren(netDetailHead(net.records.get(id)), el('p', 'net-note', t('无法读取请求详情: {0}', e.message)));
+    setNetDetail(netDetailHead(net.records.get(id)), el('p', 'net-note', t('无法读取请求详情: {0}', e.message)));
   }
 }
 
-// URL 在头部单行显示, 点击在下方展开完整内容, 展开状态在切换请求时保留
+// URL 在头部单行显示, 点击后用浮层显示完整内容, 不改变详情布局
 function netDetailHead(record, tabs) {
+  // 切换请求或重新渲染头部时收起旧浮层并移除全局监听
+  net.urlHeadCleanup?.();
+  net.urlHeadCleanup = null;
   const top = el('div', 'net-detail-top');
   const head = el('div', 'net-detail-head');
   const title = el('div', 'net-detail-title');
   let full = null;
   if (record) {
-    // 箭头表示可展开, 不用链接样式, 避免像能跳转
-    const url = el('span', 'net-detail-url' + (net.urlExpanded ? ' expanded' : ''));
-    url.append(el('span', 'net-detail-url-text', record.url), el('span', 'net-detail-url-arrow', '›'));
-    url.title = net.urlExpanded ? t('点击收起, 双击选中') : t('点击展开完整 URL, 双击选中');
-    // 单击延迟执行, 双击时取消, 改为选中整条 URL; 拖动选中文字后不展开
-    let timer = 0;
-    url.addEventListener('click', (e) => {
-      if (e.detail > 1 || window.getSelection().toString()) return;
-      timer = setTimeout(() => {
-        net.urlExpanded = !net.urlExpanded;
-        url.classList.toggle('expanded', net.urlExpanded);
-        url.title = net.urlExpanded ? t('点击收起, 双击选中') : t('点击展开完整 URL, 双击选中');
-        full.hidden = !net.urlExpanded;
-      }, 250);
-    });
-    url.addEventListener('dblclick', () => {
-      clearTimeout(timer);
-      window.getSelection().selectAllChildren(url.firstChild);
-    });
+    // 完整显示时是可选择的普通文本; 只有出现省略号时才显示箭头并启用浮层
+    const url = el('span', 'net-detail-url');
+    const urlText = el('span', 'net-detail-url-text', record.url);
+    const urlArrow = el('span', 'net-detail-url-arrow', '›');
+    urlArrow.hidden = true;
+    url.append(urlText, urlArrow);
+    url.setAttribute('aria-expanded', 'false');
     title.append(netStatusCell(record), el('span', 'net-method', record.method), url);
-    full = el('div', 'net-detail-url-full', record.url);
-    full.hidden = !net.urlExpanded;
+    full = el('div', 'net-detail-url-full');
+    full.setAttribute('role', 'dialog');
+    full.setAttribute('aria-label', t('完整 URL'));
+    const fullHead = el('div', 'net-detail-url-full-head');
+    const fullActions = el('div', 'net-detail-url-full-actions');
+    const fullCopy = el('button', 'icon-btn');
+    fullCopy.title = t('复制 URL');
+    fullCopy.appendChild(icon('copy'));
+    const fullClose = el('button', 'icon-btn');
+    fullClose.title = t('关闭');
+    fullClose.appendChild(icon('close'));
+    fullActions.append(fullCopy, fullClose);
+    fullHead.append(el('span', 'net-detail-url-full-label', t('完整 URL')), fullActions);
+    full.append(fullHead, el('div', 'net-detail-url-full-text', record.url));
+    full.hidden = true;
+    const setExpanded = (expanded) => {
+      net.urlExpanded = expanded;
+      url.classList.toggle('expanded', expanded);
+      url.setAttribute('aria-expanded', String(expanded));
+      url.title = expanded ? t('点击收起完整 URL') : t('点击查看完整 URL');
+      full.hidden = !expanded;
+    };
+    const close = () => {
+      setExpanded(false);
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape);
+      if (net.urlPopoverClose === close) net.urlPopoverClose = null;
+    };
+    const outside = (e) => {
+      if (!url.contains(e.target) && !full.contains(e.target)) close();
+    };
+    const escape = (e) => {
+      if (e.key === 'Escape') close();
+    };
+    fullCopy.addEventListener('click', () => copyText(record.url, '复制 URL'));
+    fullClose.addEventListener('click', close);
+    url.addEventListener('click', () => {
+      if (!url.classList.contains('truncated')) return;
+      if (net.urlExpanded) {
+        close();
+        return;
+      }
+      setExpanded(true);
+      net.urlPopoverClose = close;
+      document.addEventListener('pointerdown', outside);
+      document.addEventListener('keydown', escape);
+    });
+    url.addEventListener('keydown', (e) => {
+      if (!url.classList.contains('truncated') || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      url.click();
+    });
+    const syncTruncated = () => {
+      const truncated = urlText.scrollWidth > urlText.clientWidth + 1;
+      url.classList.toggle('truncated', truncated);
+      urlArrow.hidden = !truncated;
+      if (truncated) {
+        url.setAttribute('role', 'button');
+        url.tabIndex = 0;
+        url.title = net.urlExpanded ? t('点击收起完整 URL') : t('点击查看完整 URL');
+      } else {
+        url.removeAttribute('role');
+        url.removeAttribute('tabindex');
+        url.removeAttribute('title');
+        if (net.urlExpanded) close();
+      }
+    };
+    const resize = new ResizeObserver(syncTruncated);
+    resize.observe(urlText);
+    const measure = requestAnimationFrame(syncTruncated);
+    net.urlHeadCleanup = () => {
+      cancelAnimationFrame(measure);
+      resize.disconnect();
+      close();
+    };
   }
   const tools = el('div', 'net-detail-tools');
   const copyUrl = el('button', 'icon-btn');
   copyUrl.title = t('复制 URL');
   copyUrl.appendChild(icon('copy'));
   copyUrl.addEventListener('click', () => copyText(record?.url || '', '复制 URL'));
+  copyUrl.disabled = !record;
   const curl = el('button', 'sb-text-btn', 'cURL');
   curl.addEventListener('click', () => copyNetCurl(net.detail?.id));
   curl.disabled = !net.detail;
@@ -6373,12 +6441,34 @@ function renderNetDetail() {
   } else {
     body.appendChild(netBodySection(detail, 'res'));
   }
-  // 查找栏浮在内容区上, 不随内容滚动
   const content = el('div', 'net-detail-content');
   content.appendChild(body);
-  if (net.find.open) content.appendChild(netFindBar());
-  panel.replaceChildren(netDetailHead(net.records.get(detail.id) || detail, tabs), content);
+  setNetDetail(netDetailHead(net.records.get(detail.id) || detail, tabs), content);
   runNetFind();
+}
+
+// 详情内容, 查找栏打开时放在头部下方; 同一个查找栏移动后恢复输入焦点
+function setNetDetail(head, ...rest) {
+  const input = net.find.row?.querySelector('input');
+  const focused = !!input && document.activeElement === input;
+  const start = input?.selectionStart;
+  const end = input?.selectionEnd;
+  // 没有头部(空状态)时查找栏放在最上方
+  const nodes = head?.classList.contains('net-detail-top') ? [head, netFindRow(), ...rest] : [netFindRow(), head, ...rest];
+  $('netDetail').replaceChildren(...nodes.filter(Boolean));
+  if (focused && input.isConnected) {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(start, end);
+  }
+}
+
+function netFindRow() {
+  if (!net.find.open) return null;
+  if (!net.find.row) {
+    net.find.row = el('div', 'net-find-row');
+    net.find.row.appendChild(netFindBar());
+  }
+  return net.find.row;
 }
 
 function netSection(title, content) {
@@ -6652,6 +6742,7 @@ function netFindBar() {
   input.addEventListener('input', () => {
     net.find.query = input.value;
     net.find.index = -1;
+    saveNetFind();
     runNetFind();
   });
   input.addEventListener('keydown', (e) => {
@@ -6679,31 +6770,42 @@ function netFindBar() {
 function openNetFind() {
   const panel = $('netDetail');
   net.find.open = true;
-  let bar = panel.querySelector('.net-find');
-  if (!bar) {
-    bar = netFindBar();
-    panel.querySelector('.net-detail-content').appendChild(bar);
+  const row = netFindRow();
+  if (!row.isConnected) {
+    const head = panel.querySelector(':scope > .net-detail-top');
+    if (head) head.after(row);
+    else panel.prepend(row);
   }
-  const input = bar.querySelector('input');
+  const input = row.querySelector('input');
   // 选中文本时以选中内容查找
   const selection = window.getSelection().toString().trim();
   if (selection && !selection.includes('\n') && panel.contains(window.getSelection().anchorNode)) {
     input.value = net.find.query = selection;
     net.find.index = -1;
   }
+  saveNetFind();
   input.focus();
   input.select();
   runNetFind();
 }
 
+// 关闭时保留查找内容, 再次打开时沿用
 function closeNetFind() {
   net.find.open = false;
-  net.find.query = '';
-  $('netDetail').querySelector('.net-find')?.remove();
+  saveNetFind();
+  net.find.row?.remove();
   runNetFind();
   $('netList').focus();
   // 关闭后焦点回到列表, 再按 ⌘F 仍在详情中查找
   findArea = 'netDetail';
+}
+
+function saveNetFind() {
+  try {
+    localStorage.setItem(NET_FIND_KEY, JSON.stringify({ open: net.find.open, query: net.find.query }));
+  } catch (e) {
+    // 不可用时只在本次有效
+  }
 }
 
 // 在详情内容的文本中标记所有匹配, 不区分大小写; 折叠的 JSON 中的匹配在跳转到时展开
@@ -6847,6 +6949,11 @@ function setupNetwork() {
     net.tab = tab === 'net' || tab === 'git' || tab === 'term' ? tab : 'log';
     const width = Number(localStorage.getItem(NET_DETAIL_W_KEY));
     if (width) $('netBody').style.setProperty('--net-detail-w', width + 'px');
+    const find = JSON.parse(localStorage.getItem(NET_FIND_KEY));
+    if (find) {
+      net.find.open = !!find.open;
+      net.find.query = typeof find.query === 'string' ? find.query : '';
+    }
   } catch (e) {
     // ignore
   }
@@ -6956,7 +7063,8 @@ function paneFilterInput() {
 
 function runFind() {
   const shown = (node) => !!node && node.offsetParent !== null;
-  const detailOpen = netVisible() && net.detail && shown($('netDetail'));
+  // 没有选中请求时也可打开查找栏, 选中后在内容中查找
+  const detailOpen = netVisible() && shown($('netDetail'));
   const targets = {
     netDetail: detailOpen ? () => openNetFind() : null,
     pane: shown(paneFilterInput()) ? paneFilterInput() : null,

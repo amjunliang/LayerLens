@@ -18,16 +18,17 @@ const NET_QUERY_HELP = {
   body: ['请求和响应内容', 'body:userId'],
 };
 
+// 第三项为 true 的不常用, 收在「更多」下拉中
 const NET_TYPE_CHIPS = [
   ['json', 'JSON'],
-  ['form', '表单'],
-  ['xml', 'XML'],
-  ['js', 'JS'],
-  ['css', 'CSS'],
-  ['graphql', 'GraphQL'],
   ['image', '图片'],
-  ['doc', '文档'],
-  ['other', '其他'],
+  ['html', 'HTML'],
+  ['form', '表单', true],
+  ['xml', 'XML', true],
+  ['js', 'JS', true],
+  ['css', 'CSS', true],
+  ['graphql', 'GraphQL', true],
+  ['other', '其他', true],
 ];
 const NET_STATUS_CHIPS = [
   ['2xx', '2xx'],
@@ -45,6 +46,8 @@ const netFilters = {
   custom: [],
   compiled: new Map(),
   editor: null,
+  // 打开的下拉
+  chipMenu: null,
 };
 
 // MARK: Query
@@ -170,7 +173,7 @@ function netTypeMatches(record, type) {
   if (type === 'js') return /javascript|ecmascript/.test(mime);
   if (type === 'css') return mime.includes('text/css');
   if (type === 'image') return mime.startsWith('image/');
-  if (type === 'doc') return (mime.startsWith('text/') && !/css|xml|javascript/.test(mime)) || mime.includes('pdf');
+  if (type === 'html') return mime.includes('text/html');
   return !NET_TYPE_CHIPS.some(([key]) => key !== 'other' && netTypeMatches(record, key));
 }
 
@@ -229,7 +232,8 @@ function loadNetFilterState() {
   if (saved) {
     netFilters.bar = saved.bar !== false;
     const known = (list, chips) => (Array.isArray(list) ? list.filter((key) => chips.some(([chip]) => chip === key)) : []);
-    netFilters.selected.type = new Set(known(saved.type, NET_TYPE_CHIPS));
+    // 以前的「文档」改为 HTML
+    netFilters.selected.type = new Set(known((saved.type || []).map((key) => (key === 'doc' ? 'html' : key)), NET_TYPE_CHIPS));
     netFilters.selected.status = new Set(known(saved.status, NET_STATUS_CHIPS));
     netFilters.selected.custom = new Set((saved.custom || []).filter((id) => netFilters.custom.some((item) => item.id === id)));
     return;
@@ -237,6 +241,7 @@ function loadNetFilterState() {
   // 以前的类型下拉框换成过滤条上对应的项
   const old = loadInputMemory().netType;
   if (old === 'failed') netFilters.selected.status = new Set(['4xx', '5xx', 'failed']);
+  else if (old === 'doc') netFilters.selected.type = new Set(['html']);
   else if (NET_TYPE_CHIPS.some(([key]) => key === old)) netFilters.selected.type = new Set([old]);
   if (old) {
     saveInputMemory('netType', '');
@@ -425,7 +430,8 @@ function toggleNetChip(group, key, multi) {
   rebuildNetView();
 }
 
-function renderNetFilterBar() {
+// folded: 状态组收成下拉, 先完整显示, 放不下再收起
+function renderNetFilterBar(folded = false) {
   const bar = $('netChips');
   if (!bar) return;
   bar.hidden = !netFilters.bar;
@@ -439,9 +445,14 @@ function renderNetFilterBar() {
   const track = $('netChipsTrack');
   const scroll = track.scrollLeft;
   const chips = [netChip(t('全部'), '', '', null), el('span', 'net-chip-sep')];
-  for (const [key, label] of NET_TYPE_CHIPS) chips.push(netChip(t(label), 'type', key, (record) => netTypeMatches(record, key)));
+  for (const [key, label, more] of NET_TYPE_CHIPS) {
+    if (!more) chips.push(netChip(t(label), 'type', key, (record) => netTypeMatches(record, key)));
+  }
+  chips.push(netDropChip(t('更多'), 'type', NET_TYPE_CHIPS.filter((chip) => chip[2])));
   chips.push(el('span', 'net-chip-sep'));
-  for (const [key, label] of NET_STATUS_CHIPS) chips.push(netChip(t(label), 'status', key, (record) => netStatusMatches(record, key)));
+  // 放不下时状态也收成下拉
+  if (folded) chips.push(netDropChip(t('状态'), 'status', NET_STATUS_CHIPS));
+  else for (const [key, label] of NET_STATUS_CHIPS) chips.push(netChip(t(label), 'status', key, (record) => netStatusMatches(record, key)));
   chips.push(el('span', 'net-chip-sep'));
   for (const item of netCustomVisible()) chips.push(netCustomChip(item));
   const add = el('button', 'net-chip net-chip-add');
@@ -451,8 +462,92 @@ function renderNetFilterBar() {
   add.addEventListener('click', () => showNetFilterEditor(add, null));
   chips.push(add);
   track.replaceChildren(...chips);
+  // 面板未显示时宽度为 0, 等显示后再判断
+  if (!folded && track.clientWidth && track.scrollWidth > track.clientWidth) {
+    renderNetFilterBar(true);
+    return;
+  }
   track.scrollLeft = scroll;
   syncNetChipsOverflow();
+  if (netFilters.chipMenu) renderNetChipMenu();
+}
+
+// 收起的一组: 选中一项时显示该项名称, 多项时显示数量
+function netDropChip(text, group, items) {
+  const picked = items.filter(([key]) => netFilters.selected[group].has(key));
+  const label = picked.length === 1 ? t(picked[0][1]) : picked.length ? `${text} (${picked.length})` : text;
+  const chip = el('button', 'net-chip net-chip-drop' + (picked.length ? ' on' : ''));
+  chip.append(document.createTextNode(label), el('span', 'net-chip-caret', '▾'));
+  chip.dataset.group = group;
+  chip.dataset.drop = items.map(([key]) => key).join(',');
+  chip.setAttribute('aria-haspopup', 'menu');
+  chip.addEventListener('click', () => {
+    if (netFilters.chipMenu?.group === group) hideNetChipMenu();
+    else showNetChipMenu(group, items);
+  });
+  return chip;
+}
+
+// MARK: Chip menu
+
+// 下拉中单击单选并关闭, ⌘ 单击多选并保持打开, 与过滤条上的项一致
+function showNetChipMenu(group, items) {
+  hideNetChipMenu();
+  const menu = el('div', 'context-menu net-chip-menu');
+  menu.setAttribute('role', 'menu');
+  const onDown = (e) => {
+    if (!menu.contains(e.target) && !e.target.closest?.('.net-chip-drop')) hideNetChipMenu();
+  };
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    hideNetChipMenu();
+  };
+  window.addEventListener('mousedown', onDown, true);
+  window.addEventListener('keydown', onKey, true);
+  netFilters.chipMenu = { menu, group, items, dispose: () => {
+    window.removeEventListener('mousedown', onDown, true);
+    window.removeEventListener('keydown', onKey, true);
+  } };
+  document.body.append(menu);
+  renderNetChipMenu();
+}
+
+function renderNetChipMenu() {
+  const { menu, group, items } = netFilters.chipMenu;
+  const test = group === 'type' ? netTypeMatches : netStatusMatches;
+  menu.replaceChildren(...items.map(([key, label]) => {
+    const selected = netFilters.selected[group].has(key);
+    const button = el('button', 'menu-item net-chip-menu-item' + (selected ? ' on' : ''));
+    button.append(el('span', 'net-chip-check', selected ? '✓' : ''), el('span', 'net-chip-menu-label', t(label)), el('span', 'net-chip-menu-count', String(netChipCount((record) => test(record, key)))));
+    button.setAttribute('role', 'menuitemcheckbox');
+    button.setAttribute('aria-checked', String(selected));
+    button.addEventListener('click', (e) => {
+      const multi = e.metaKey || e.ctrlKey;
+      if (!multi) hideNetChipMenu();
+      toggleNetChip(group, key, multi);
+    });
+    return button;
+  }));
+  menu.append(el('div', 'net-chip-menu-hint', t('⌘ 单击可多选')));
+  const anchor = [...document.querySelectorAll('#netChipsTrack .net-chip-drop')].find((chip) => chip.dataset.group === group);
+  if (!anchor) {
+    hideNetChipMenu();
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  const size = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - size.width - 8)) + 'px';
+  menu.style.top = (rect.bottom + 4 + size.height <= window.innerHeight - 8 ? rect.bottom + 4 : Math.max(8, rect.top - 4 - size.height)) + 'px';
+}
+
+function hideNetChipMenu() {
+  const menu = netFilters.chipMenu;
+  if (!menu) return;
+  menu.dispose();
+  menu.menu.remove();
+  netFilters.chipMenu = null;
 }
 
 function netCustomChip(item) {
@@ -804,6 +899,14 @@ function setupNetFilters() {
   }, { passive: false });
   $('netChipsLeft').addEventListener('click', () => track.scrollBy({ left: -track.clientWidth * 0.7, behavior: 'smooth' }));
   $('netChipsRight').addEventListener('click', () => track.scrollBy({ left: track.clientWidth * 0.7, behavior: 'smooth' }));
-  new ResizeObserver(syncNetChipsOverflow).observe(track);
+  let width = 0;
+  new ResizeObserver(() => {
+    syncNetChipsOverflow();
+    // 宽度变化时重新判断状态是否收起
+    if (track.clientWidth !== width) {
+      width = track.clientWidth;
+      renderNetFilterBar();
+    }
+  }).observe(track);
   renderNetFilterBar();
 }

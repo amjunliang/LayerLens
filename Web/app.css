@@ -325,7 +325,7 @@ body:not(.has-app) #xcodeRun { display: none; }
 label.menu-row { cursor: pointer; }
 label.menu-row:hover { background: var(--hover); }
 .menu-sep { height: 1px; background: var(--border); margin: 4px 0; }
-/* 画布操作: 宽屏在底部工具条, 窄屏放在视图选项菜单中 */
+/* 画布操作: 宽屏在底部工具条, 窄屏放在设置菜单中 */
 .menu-action { width: 100%; border: none; background: none; text-align: left; }
 .menu-action:hover { background: var(--hover); border-color: transparent; }
 .menu-row input[type=range] { width: 110px; }
@@ -876,7 +876,7 @@ body.log-open .log-pane { display: flex; }
 .log-file-meta { color: var(--muted); white-space: nowrap; }
 .log-files-empty { margin: 0; color: var(--muted); }
 /* 沙盒文件: 左侧目录列表, 右侧预览 */
-/* 视图选项: 窄的居中弹窗 */
+/* 设置: 窄的居中弹窗 */
 .modal.modal-narrow .modal-card { width: 380px; }
 .modal.modal-narrow .modal-body { padding: 8px 10px 10px; line-height: 1.4; }
 .modal.modal-wide .modal-card { width: 1100px; height: min(760px, 100%); }
@@ -952,7 +952,7 @@ body.log-open .log-pane { display: flex; }
 .net-filter-row[hidden] { display: none; }
 .net-chips { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; }
 .net-chips[hidden] { display: none; }
-.net-chips-track { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; overflow-x: auto; scrollbar-width: none; }
+.net-chips-track { flex: 1; min-width: 0; display: flex; align-items: center; gap: 1px; padding: 0 8px; overflow-x: auto; scrollbar-width: none; }
 .net-chips-track::-webkit-scrollbar { display: none; }
 .net-chips.fade-left .net-chips-track { -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--edge-fade)); mask-image: linear-gradient(to right, transparent, #000 var(--edge-fade)); }
 .net-chips.fade-right .net-chips-track { -webkit-mask-image: linear-gradient(to left, transparent, #000 var(--edge-fade)); mask-image: linear-gradient(to left, transparent, #000 var(--edge-fade)); }
@@ -961,10 +961,10 @@ body.log-open .log-pane { display: flex; }
 .net-chips-arrow.left { left: 4px; }
 .net-chips-arrow.right { right: 4px; }
 .net-chips-arrow[hidden] { display: none; }
-/* 形状和字号同工具栏的页签, 选中用浅色底和强调色文字, 与实心的页签区分 */
-.net-chip { flex: none; height: 22px; padding: 0 10px; border: none; border-radius: 3px; background: transparent; color: var(--text-2); font-size: 13px; white-space: nowrap; }
+/* 形状和字号同工具栏的页签, 选中用半透明强调色底和白色文字, 与实心的页签区分 */
+.net-chip { flex: none; height: 22px; padding: 0 6px; border: none; border-radius: 3px; background: transparent; color: var(--text); font-size: 12px; white-space: nowrap; }
 .net-chip:hover { background: var(--hover); color: var(--text); }
-.net-chip.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.net-chip.on { background: color-mix(in srgb, var(--accent) 65%, transparent); color: #fff; font-weight: 600; }
 .net-chip.custom { box-shadow: inset 0 0 0 1px var(--border); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .net-chip.custom.on { box-shadow: inset 0 0 0 1px var(--accent); }
 .net-chip.invalid { color: var(--danger); text-decoration: line-through; }
@@ -973,7 +973,15 @@ body.log-open .log-pane { display: flex; }
 .net-chip.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 .net-chip-add { display: inline-flex; align-items: center; justify-content: center; width: 22px; padding: 0; }
 .net-chip-add .icon { width: 14px; height: 14px; }
-.net-chip-sep { flex: none; width: 1px; height: 14px; margin: 0 4px; background: var(--border-strong); }
+.net-chip-sep { flex: none; width: 1px; height: 14px; margin: 0 3px; background: var(--border-strong); }
+.net-chip-drop { display: inline-flex; align-items: center; gap: 3px; }
+.net-chip-caret { font-size: 9px; opacity: 0.7; }
+.net-chip-menu { min-width: 150px; }
+.net-chip-menu-item { display: flex; align-items: center; gap: 6px; }
+.net-chip-check { flex: none; width: 12px; color: var(--accent); }
+.net-chip-menu-label { flex: 1; }
+.net-chip-menu-count { color: var(--muted); font: 11px var(--mono); }
+.net-chip-menu-hint { padding: 4px 8px 2px; margin-top: 2px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .log-head .icon-btn.toggle.active:not(.on) { color: var(--accent); background: var(--accent-soft); }
 .net-query-hint { position: fixed; z-index: 150; box-sizing: border-box; min-width: 300px; max-width: calc(100vw - 16px); padding: 4px; background: var(--elevated); border: 1px solid var(--border); border-radius: var(--r-float); box-shadow: var(--shadow); font-size: 12px; color: var(--text); }
 .net-query-hint-row { display: grid; grid-template-columns: 64px auto 1fr; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
@@ -1184,17 +1192,30 @@ body.log-open .log-pane { display: flex; }
 .net-splitter { flex: none; width: 1px; background: var(--border); position: relative; z-index: 2; cursor: col-resize; touch-action: none; }
 .net-detail { flex: none; width: var(--net-detail-w, 45%); min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
 .net-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px; color: var(--muted); font-size: 13px; text-align: center; }
-.net-detail-top { flex: none; border-bottom: 1px solid var(--border); }
+.net-detail-top { flex: none; position: relative; z-index: 4; border-bottom: 1px solid var(--border); }
 .net-detail-head { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 6px 0 12px; box-sizing: border-box; }
-.net-detail-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font: 13px var(--mono); }
+.net-detail-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font: var(--log-size, 13px) var(--log-font, var(--mono)); }
 .net-detail-title .net-status, .net-detail-title .net-method { width: auto; }
-.net-detail-url { min-width: 0; display: flex; align-items: center; gap: 4px; margin-left: -4px; padding: 1px 4px; border-radius: 4px; color: var(--text); cursor: default; }
-.net-detail-url:hover { background: var(--hover); }
-.net-detail-url-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; -webkit-user-select: text; user-select: text; }
+.net-detail-url { min-width: 0; display: flex; align-items: center; gap: 4px; color: var(--text); font: inherit; cursor: text; }
+.net-detail-url.truncated { margin-left: -4px; padding: 1px 4px; border-radius: 4px; cursor: pointer; -webkit-user-select: none; user-select: none; }
+.net-detail-url.truncated:hover { background: var(--hover); }
+.net-detail-url.truncated:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.net-detail-url.truncated.expanded { background: var(--accent-soft); }
+.net-detail-url-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; -webkit-user-select: text; user-select: text; }
+.net-detail-url.truncated .net-detail-url-text { -webkit-user-select: none; user-select: none; }
 .net-detail-url-arrow { flex: none; color: var(--muted); transition: transform 0.15s; }
-.net-detail-url.expanded .net-detail-url-arrow { transform: rotate(90deg); }
-.net-detail-url-full { max-height: 40vh; overflow: auto; padding: 0 12px 8px; font: 12px/1.5 var(--mono); color: var(--text); word-break: break-all; user-select: text; }
+.net-detail-url.expanded .net-detail-url-arrow { color: var(--accent); transform: rotate(90deg); }
+.net-detail-url-full { position: absolute; top: calc(100% + 7px); left: 16px; right: 24px; z-index: 5; overflow: visible; box-sizing: border-box; border: 1px solid var(--float-line); border-radius: 10px; background: var(--float-bg); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22), var(--float-shadow); color: var(--text); animation: net-url-pop 0.12s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.net-detail-url-full::before { content: ''; position: absolute; top: -5px; left: 20px; width: 8px; height: 8px; transform: rotate(45deg); border-top: 1px solid var(--float-line); border-left: 1px solid var(--float-line); background: var(--float-bg); }
 .net-detail-url-full[hidden] { display: none; }
+.net-detail-url-full-head { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 6px 0 11px; border-bottom: 1px solid var(--border); }
+.net-detail-url-full-label { color: var(--text-2); font: 600 11px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; letter-spacing: 0.02em; }
+.net-detail-url-full-actions { display: flex; align-items: center; gap: 1px; }
+.net-detail-url-full-actions .icon-btn { width: 24px; height: 24px; color: var(--muted); }
+.net-detail-url-full-actions .icon-btn:hover { color: var(--text); }
+.net-detail-url-full-actions .icon { width: 13px; height: 13px; }
+.net-detail-url-full-text { position: relative; z-index: 1; max-height: min(34vh, 230px); overflow: auto; padding: 10px 12px 12px; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--input) 55%, transparent); font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); color: var(--text); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+@keyframes net-url-pop { from { opacity: 0; transform: translateY(-3px) scale(0.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .net-detail-tools { flex: none; display: flex; align-items: center; gap: 4px; }
 .net-detail-tools .icon-btn { width: 26px; height: 24px; }
 .net-detail-tools .net-find-sep { margin: 0 2px; }
@@ -1202,14 +1223,14 @@ body.log-open .log-pane { display: flex; }
 .net-detail-tabs button { padding: 1px 12px; }
 .net-detail-content { flex: 1; min-height: 0; display: flex; position: relative; }
 .net-detail-body { flex: 1; min-width: 0; overflow: auto; padding: 0 12px calc(24px + var(--edge-fade)); -webkit-user-select: text; user-select: text; }
-/* ⌘F 查找: 浮在内容区顶部, 有内容工具栏时放在工具栏下方 */
-.net-find { position: absolute; top: 6px; right: 12px; z-index: 5; display: flex; align-items: center; gap: 2px; width: 320px; max-width: calc(100% - 24px); height: 34px; padding: 0 6px 0 12px; box-sizing: border-box; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 10px; box-shadow: var(--float-shadow); }
+/* ⌘F 查找: 固定在详情头部下方靠右, 不遮挡内容, 切换请求时位置不变 */
+.net-find-row { flex: none; display: flex; justify-content: flex-end; padding: 6px 12px 2px; }
+.net-find { display: flex; align-items: center; gap: 2px; width: 320px; max-width: calc(100% - 24px); height: 34px; padding: 0 6px 0 12px; box-sizing: border-box; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 10px; box-shadow: var(--float-shadow); }
 .net-find input { flex: 1; min-width: 0; padding: 0; border: none; background: none; outline: none; color: var(--text); font-size: 13px; }
 .net-find-count { flex: none; padding: 0 6px; color: var(--text-2); font: 12px var(--mono); }
 .net-find-sep { flex: none; width: 1px; height: 18px; margin: 0 4px; background: var(--border-strong); }
 .net-find .icon-btn { width: 24px; height: 24px; }
 .net-find .icon-btn .icon { width: 14px; height: 14px; }
-.net-detail-content:has(.net-body-tools) .net-find { top: 38px; }
 .net-detail mark.find { background: rgba(239, 159, 39, 0.35); color: inherit; border-radius: 2px; }
 .net-detail mark.find.current { background: rgba(239, 159, 39, 0.85); color: #000; }
 /* JSON: 可折叠, 语法着色 */
@@ -1230,7 +1251,8 @@ body.log-open .log-pane { display: flex; }
 .json-lit { color: var(--json-lit); }
 .json-punct { color: var(--muted); }
 .net-section h5 { margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--text); }
-.net-kv { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 3px 16px; font: 13px/1.55 var(--mono); }
+/* 详情的字体和字号跟随面板设置 */
+.net-kv { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 3px 16px; font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); }
 .net-k { color: var(--text-2); word-break: break-all; }
 .net-v { color: var(--text); word-break: break-all; white-space: pre-wrap; }
 .net-note { margin: 6px 0; color: var(--text-2); font-size: 13px; }
@@ -1238,7 +1260,7 @@ body.log-open .log-pane { display: flex; }
 /* 内容工具栏: 滚动时固定在顶部 */
 .net-body-tools { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 4px; height: 32px; margin: 0 -12px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .net-body-tools .sb-meta { flex: 1; font-size: 12px; color: var(--text-2); }
-.net-body-box .sb-code { margin: 0; padding: 10px 12px; background: none; font-size: 13px; line-height: 1.55; color: var(--text); }
+.net-body-box .sb-code { margin: 0; padding: 10px 12px; background: none; font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); color: var(--text); }
 .net-body-box .sb-image { max-width: 100%; }
 .net-detail-body.image-fit { display: flex; flex-direction: column; padding-bottom: 12px; }
 .net-detail-body.image-fit .net-body-section, .net-detail-body.image-fit .net-body-box { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -1380,7 +1402,6 @@ body.log-open .log-pane { display: flex; }
 .term-size { flex: none; font-size: 12px; color: var(--text-2); }
 
 /* 抓包保存到本机 */
-.net-offline { margin-left: 6px; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--vc) 16%, transparent); color: var(--vc); font-size: 11px; }
 .net-dropped { margin-left: 6px; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); font-size: 11px; }
 /* 未开启抓包: 提示和开启按钮 */
 .log-empty.capture-off { flex-direction: column; gap: 6px; }

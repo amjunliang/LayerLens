@@ -191,4 +191,5 @@ function setupLaunches() {
   for (const select of [$('netSession'), $('logLaunch')]) {
     select?.addEventListener('change', () => selectLaunch(select.value));
   }
+  $('netBackCurrent')?.addEventListener('click', () => selectLaunch(''));
 }

@@ -212,6 +212,9 @@
       <button class="icon-btn toggle net-only" id="netFilterBar" title="隐藏过滤条" aria-label="过滤条" aria-pressed="true"><svg class="icon"><use href="#i-filter"/></svg></button>
       <span class="log-count net-only" id="netCount"></span>
       <select id="netSession" class="net-session net-only" aria-label="保存的启动" hidden></select>
+      <div class="log-source net-only" id="netSource" hidden>
+        <button class="log-source-back" id="netBackCurrent">返回当前</button>
+      </div>
       <button class="icon-btn toggle net-only" id="netCapture" title="开启抓包" aria-label="抓包" aria-pressed="false"><svg class="icon"><use href="#i-record"/></svg></button>
       <button class="icon-btn toggle net-only" id="netPause" title="暂停" aria-label="暂停" aria-pressed="false"><svg class="icon"><use href="#i-pause"/></svg></button>
       <button class="icon-btn net-only" id="netHar" title="导出 HAR" aria-label="导出 HAR"><svg class="icon"><use href="#i-download"/></svg></button>
@@ -333,7 +336,7 @@
 <footer class="statusbar"></footer>
 
 
-<!-- 视图选项: 平时放在隐藏的容器中, 打开时移入居中的弹窗 -->
+<!-- 设置: 平时放在隐藏的容器中, 打开时移入居中的弹窗 -->
 <div hidden id="optionsHolder">
   <div class="options-panel" id="optionsMenu">
     <div class="menu-row">
