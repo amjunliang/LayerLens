@@ -2178,6 +2178,8 @@ const LAUNCH_FAILURES = {
 
 // Mac 端启动命令最多等 20s, 再等 App 响应最多 5s; 超过时多半是连接已断开
 const ACTIVATE_TIMEOUT_MS = 30000;
+// 快速来回切换时不启动经过的 App, 停下来后只激活最后选择的一个
+const ACTIVATE_DEBOUNCE_MS = 150;
 
 // failure: 启动失败的原因, 不再切换; hint: 已启动但没有在前台响应, 照常切换并提示可能的原因
 // signal: 用户切到别处时取消, 返回 { cancelled: true }
@@ -2195,8 +2197,8 @@ async function activateApp(deviceId, bundleId, signal) {
     });
     const result = await response.json().catch(() => ({}));
     if (response.ok) {
-      if (result.ready !== false) return {};
-      return { hint: t(result.kind === 'device' ? 'App 没有响应, 设备可能已锁屏, 解锁后自动连接' : 'App 没有响应, 可能还在启动') };
+      if (result.ready !== false) return { ready: true };
+      return { ready: false, hint: t(result.kind === 'device' ? 'App 没有响应, 设备可能已锁屏, 解锁后自动连接' : 'App 没有响应, 可能还在启动') };
     }
     const known = LAUNCH_FAILURES[result.reason];
     return { failure: known ? t(known) : t('启动失败: {0}', result.error || response.status) };
@@ -2211,17 +2213,62 @@ async function activateApp(deviceId, bundleId, signal) {
   }
 }
 
-// 进行中的切换 { deviceId, bundleId, controller }: 以最后一次点击为准, 切换期间页面照常可用, 切到别处或切回当前 App 即取消
+// 进行中的切换 { deviceId, bundleId, controller, timer, action }: 以最后一次点击为准
 let pendingSwitch = null;
 
 function cancelSwitch() {
   const job = pendingSwitch;
   if (!job) return null;
   pendingSwitch = null;
+  clearTimeout(job.timer);
   job.controller.abort();
   hideToast();
   renderTargetMenu();
   return job;
+}
+
+// 页面已先切到目标 App, 激活在短暂去抖后异步完成. 旧任务的结果不会再修改当前页面.
+function activateSelectedAppLater(deviceId, bundleId, appName) {
+  const job = { deviceId, bundleId, controller: new AbortController(), timer: 0, action: 'switch' };
+  pendingSwitch = job;
+  renderTargetMenu();
+  job.timer = setTimeout(async () => {
+    job.timer = 0;
+    const result = await activateApp(deviceId, bundleId, job.controller.signal);
+    if (pendingSwitch !== job) return;
+    const selected = () => targets.deviceId === deviceId && targets.bundleId === bundleId;
+    if (result.failure) {
+      if (selected()) {
+        try {
+          sessionStorage.setItem(STAY_OFFLINE_KEY, deviceId + '|' + bundleId);
+        } catch (e) {
+          // 不可用时照常跟随前台 App
+        }
+        setAppState('offline');
+      }
+      toast(t('{0}. 显示的是保存在本机的日志和抓包', result.failure.replace(/[.。]$/, '')), true, true);
+    } else if (result.hint) {
+      if (selected()) setAppState('background');
+      toast(result.hint, true, true);
+    } else if (selected()) {
+      // waitForApp 已确认新端口可用; 更新一次列表后再取层级, 避免连到挂起前的旧端口
+      try {
+        await loadTargets();
+      } catch (e) {
+        // 事件流仍会自动重连
+      }
+      if (pendingSwitch !== job || !selected()) return;
+      appState.instanceId = currentApp()?.instanceId || '';
+      appState.warning = compatibilityWarning(currentApp());
+      setAppState('online');
+      loadAppInfo();
+      if (state.mode !== 'live') refresh();
+    }
+    if (pendingSwitch !== job) return;
+    pendingSwitch = null;
+    renderTargetMenu();
+    syncOfflineView();
+  }, ACTIVATE_DEBOUNCE_MS);
 }
 
 // 切换设备会重新加载页面, 提示存到加载后再显示
@@ -2251,6 +2298,19 @@ function switchTarget(deviceId, bundleId) {
 
 const targetMenuUi = { offlineOpen: false };
 
+// 设备扫描和历史字典都不保证顺序; 使用稳定字段排序, 避免每次刷新菜单来回跳
+function compareTargetText(a, b) {
+  return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function compareTargetDevices(a, b) {
+  return compareTargetText(a.name, b.name) || compareTargetText(a.model, b.model) || compareTargetText(a.id, b.id);
+}
+
+function compareTargetApps(a, b) {
+  return compareTargetText(a.appName || a.bundleId, b.appName || b.bundleId) || compareTargetText(a.bundleId, b.bundleId);
+}
+
 // 顶栏按钮中应用名后显示所在设备, 同一 App 同时运行在模拟器和真机上时能区分; 只选了设备时名称已是设备名, 不重复
 function renderTargetLabel() {
   // 未启动的模拟器在模拟器列表中, 历史里可能只有占位记录
@@ -2274,12 +2334,12 @@ function renderTargetMenu() {
   recordTargetHistory();
   renderTargetLabel();
   // 按类型分组: 模拟器(已启动在前, 未启动的灰色显示在后), 真机; 已断开的历史设备排在各组最后
-  const simulators = targets.devices.filter((d) => d.kind === 'simulator');
+  const simulators = targets.devices.filter((d) => d.kind === 'simulator').sort(compareTargetDevices);
   const offline = targets.simulators || [];
   const devices = targets.devices.filter((d) => d.kind !== 'simulator');
   // 关闭的模拟器在「未启动」中显示, 其历史 App 合并到那里
   const goneDevices = Object.values(targetHistory).filter((entry) => !targets.devices.some((d) => d.id === entry.id) && !offline.some((sim) => sim.id === entry.id));
-  const goneSimulators = goneDevices.filter((entry) => entry.kind === 'simulator');
+  const goneSimulators = goneDevices.filter((entry) => entry.kind === 'simulator').sort(compareTargetDevices);
   const goneOthers = goneDevices.filter((entry) => entry.kind !== 'simulator');
   if (simulators.length || offline.length || goneSimulators.length) {
     children.push(el('div', 'target-section', t('模拟器')));
@@ -2300,8 +2360,12 @@ function renderTargetMenu() {
   }
   if (devices.length || goneOthers.length) {
     children.push(el('div', 'target-section', t('真机 (USB)')));
-    devices.forEach((device) => children.push(...targetDeviceRows(device, background)));
-    goneOthers.forEach((entry) => children.push(...goneDeviceRows(entry)));
+    // 在线和历史真机一起排序, 设备短暂断开或恢复时也保持原位置
+    const rows = [
+      ...devices.map((device) => ({ device, live: true })),
+      ...goneOthers.map((device) => ({ device, live: false })),
+    ].sort((a, b) => compareTargetDevices(a.device, b.device));
+    rows.forEach((item) => children.push(...(item.live ? targetDeviceRows(item.device, background) : goneDeviceRows(item.device))));
   }
   if (children.length === 0) children.push(el('div', 'target-empty', t('没有发现设备')));
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
@@ -2339,7 +2403,7 @@ function targetDeviceRows(device, background) {
   } else {
     rows.push(head);
   }
-  const apps = [...device.apps, ...historyApps(device.id, device.apps)];
+  const apps = [...device.apps, ...historyApps(device.id, device.apps)].sort(compareTargetApps);
   // App 缩进在设备下方, 左侧竖线表示归属
   const group = el('div', 'target-apps');
   rows.push(group);
@@ -2355,8 +2419,12 @@ function goneDeviceRows(entry) {
   head.append(el('span', 'status-dot'), el('span', 'target-device-name', entry.name), el('span', 'target-device-os', [model, entry.os].filter(Boolean).join(' · ') || t('已断开')));
   if (entry.id !== targets.deviceId) head.appendChild(historyRemoveButton(entry.id, ''));
   const group = el('div', 'target-apps');
-  historyApps(entry.id).forEach((app) => group.append(targetAppRow(entry.id, app, false)));
-  if (!group.childElementCount) group.append(el('div', 'target-empty', t('还没有记录过的 App, 连接后运行已集成的 App, 之后断开也能在这里查看')));
+  historyApps(entry.id).sort(compareTargetApps).forEach((app) => group.append(targetAppRow(entry.id, app, false)));
+  if (!group.childElementCount) {
+    const empty = el('div', 'target-empty', t('暂无 App 记录'));
+    empty.title = t('连接后运行已集成的 App, 之后断开也能在这里查看');
+    group.append(empty);
+  }
   return [head, group];
 }
 
@@ -2387,7 +2455,7 @@ function targetAppRow(deviceId, app, background) {
   row.classList.toggle('switching', switching);
   row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
   if (!away && !appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
-  row.append(el('span', 'target-app-meta', switching ? (current ? t('启动中…') : t('切换中…')) : inBackground ? t('在后台') : away ? t('未连接') : app.version || ''));
+  row.append(el('span', 'target-app-meta', switching ? t(pendingSwitch.action === 'launch' ? '启动中…' : '切换中…') : inBackground ? t('在后台') : away ? t('未连接') : app.version || ''));
   if (away && !current) row.appendChild(historyRemoveButton(deviceId, app.bundleId));
   row.title = !away ? `${app.bundleId} · ${t('端口 {0}', app.port)}` : live ? `${app.bundleId} · ${t('已挂起或退出, 点击启动或切到前台')}` : `${app.bundleId} · ${t('设备未连接, 连上后自动恢复')}`;
   row.addEventListener('click', async () => {
@@ -2417,10 +2485,17 @@ function targetAppRow(deviceId, app, background) {
       switchTarget(deviceId, app.bundleId);
       return;
     }
-    // 切换到其他 App 时总是先激活: 旧版 Pod 不上报 foreground, 在后台也看不出来; 已在前台时无影响. 设备未连接时无法激活
+    // 同一设备切 App 时先更新页面, 再在后台激活; 快速切换只会激活最后停留的 App
     if (live && (inBackground || away || !current)) {
+      if (deviceId === targets.deviceId && targets.bundleId) {
+        if (!current) switchTargetInPlace(app.bundleId, true, app.appName || app.bundleId);
+        else setAppState('background', t('正在切换到 {0}…', app.appName || app.bundleId));
+        activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
+        return;
+      }
+      // 跨设备需要重新加载页面, 仍先确认 App 可用, 避免新页面连到旧端口
       // 激活要等 App 响应, 挂起的真机 App 要十几秒; 提示一直显示到结束, 期间可以切到别处
-      const job = { deviceId, bundleId: app.bundleId, controller: new AbortController() };
+      const job = { deviceId, bundleId: app.bundleId, controller: new AbortController(), action: 'switch' };
       pendingSwitch = job;
       toast(t('正在切换到 {0}…', app.appName || app.bundleId), false, false, true);
       renderTargetMenu();
@@ -2475,7 +2550,7 @@ function offlineSimulatorRow(sim) {
   });
   const row = el('div', 'target-device-row');
   row.append(head, simPowerButton(sim.id, false));
-  const apps = historyApps(sim.id);
+  const apps = historyApps(sim.id).sort(compareTargetApps);
   if (!apps.length) return row;
   const group = el('div', 'target-apps');
   apps.forEach((app) => group.append(targetAppRow(sim.id, app, false)));
@@ -2504,20 +2579,21 @@ function stayingOffline() {
 // 已切到未连接的 App 后在后台启动它, 期间页面显示保存的记录, 启动后由事件流自动连接
 const PENDING_LAUNCH_KEY = 'layerlens_pending_launch';
 
-async function launchAwayApp(deviceId, bundleId, appName) {
-  const job = { deviceId, bundleId, controller: new AbortController() };
+function launchAwayApp(deviceId, bundleId, appName) {
+  const job = { deviceId, bundleId, controller: new AbortController(), timer: 0, action: 'launch' };
   pendingSwitch = job;
-  toast(t('正在启动 {0}…', appName || bundleId), false, false, true);
   renderTargetMenu();
   syncOfflineView();
-  const { failure, hint } = await activateApp(deviceId, bundleId, job.controller.signal);
-  if (pendingSwitch !== job) return;
-  pendingSwitch = null;
-  renderTargetMenu();
-  syncOfflineView();
-  if (failure) toast(t('{0}. 显示的是保存在本机的日志和抓包', failure.replace(/[.。]$/, '')), true, true);
-  else if (hint) toast(hint, true, true);
-  else hideToast();
+  job.timer = setTimeout(async () => {
+    job.timer = 0;
+    const { failure, hint } = await activateApp(deviceId, bundleId, job.controller.signal);
+    if (pendingSwitch !== job) return;
+    pendingSwitch = null;
+    renderTargetMenu();
+    syncOfflineView();
+    if (failure) toast(t('{0}. 显示的是保存在本机的日志和抓包', failure.replace(/[.。]$/, '')), true, true);
+    else if (hint) toast(hint, true, true);
+  }, ACTIVATE_DEBOUNCE_MS);
 }
 
 function resumePendingLaunch() {
@@ -2537,6 +2613,8 @@ function resumePendingLaunch() {
 
 function currentAppAway() {
   if (!currentDevice() || !targets.bundleId || stayingOffline()) return false;
+  // 正在把当前选择拉到前台时不要自动跟随仍在前台的旧 App
+  if (pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId) return false;
   if (appState.value === 'background') return true;
   const app = currentApp();
   if (appState.value === 'offline') return !app;
@@ -2559,23 +2637,32 @@ function rememberTarget(deviceId, bundleId) {
   history.replaceState(null, '', '?' + new URLSearchParams({ device: deviceId, app: bundleId }).toString());
 }
 
-function switchTargetInPlace(bundleId) {
+function switchTargetInPlace(bundleId, activating = false, appName = '') {
   rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
+  ++appInfoSeq;
   renderTargetLabel();
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
   appState.dropped = false;
   appState.connected = false;
-  appState.instanceId = currentApp()?.instanceId || '';
-  appState.warning = compatibilityWarning(currentApp());
+  const app = currentApp();
+  appState.instanceId = app?.instanceId || '';
+  appState.warning = compatibilityWarning(app);
   // 切到未运行的 App(如启动失败后查看保存的记录)时直接显示离线, 不提示加载失败
-  appState.blank = !currentApp();
-  setAppState(currentApp() ? 'online' : 'offline');
+  appState.blank = !app;
+  setAppState(app ? (activating ? 'background' : 'online') : 'offline', activating ? t('正在切换到 {0}…', appName || app?.appName || bundleId) : '');
   watchApp();
-  loadAppInfo();
+  if (activating) {
+    $('appName').textContent = appName || app?.appName || bundleId;
+    appInfo.name = appName || app?.appName || bundleId;
+    appInfo.base = '';
+    updateAppMeta();
+  } else {
+    loadAppInfo();
+  }
   clearHierarchy();
-  if (state.mode !== 'live') refresh();
+  if (!activating && state.mode !== 'live') refresh();
 }
 
 function connectAppInPlace(bundleId) {
@@ -2750,9 +2837,12 @@ const OFFLINE_GRACE_MS = 4000;
 
 function watchApp() {
   appState.source?.close();
+  const key = logTargetKey();
   const source = new EventSource(targetBase() + '/api/events');
   appState.source = source;
+  const active = () => appState.source === source && logTargetKey() === key;
   source.onopen = () => {
+    if (!active()) return;
     appState.connected = true;
     clearTimeout(appState.offlineTimer);
     appState.offlineTimer = 0;
@@ -2764,6 +2854,7 @@ function watchApp() {
   };
   // App 进入后台后被挂起, 事件流不断开, 由 App 推送前后台状态; 旧版 Pod 不推送, 视为前台
   source.addEventListener('state', (e) => {
+    if (!active()) return;
     const { foreground } = JSON.parse(e.data || '{}');
     const away = foreground === false || foreground === 0;
     if (away && appState.value === 'online') {
@@ -2776,6 +2867,7 @@ function watchApp() {
     }
   });
   source.onerror = () => {
+    if (!active()) return;
     appState.connected = false;
     appState.dropped = true;
     if (appState.value === 'restarting' || appState.offlineTimer) return;
@@ -4206,6 +4298,7 @@ const SHORTCUT_GROUPS = [
     [['N'], '显示 / 隐藏网络面板'],
     [['G'], '显示 / 隐藏改动面板'],
     [['`'], '显示 / 隐藏终端'],
+    [['⌘', '1–4'], '切换到日志 / 网络 / 改动 / 终端'],
     [['⌘', 'F'], '在当前区域查找: 层级树, 日志, 网络列表或请求详情'],
     [['?'], '显示此面板'],
   ]],
@@ -5577,6 +5670,10 @@ function setupLogsWindow() {
     if (!e.target.closest('.popover-anchor')) hidePopovers();
   });
   document.addEventListener('keydown', (e) => {
+    if (handlePaneNumberShortcut(e)) {
+      e.preventDefault();
+      return;
+    }
     if (e.key !== 'Escape' || (e.target instanceof Element && e.target.closest('.xterm'))) return;
     hidePopovers();
     closePanel();
@@ -5831,6 +5928,16 @@ function showPaneTab(tab) {
   }
   setPaneTab(tab);
   if (!open) toggleLogPanel();
+}
+
+// ⌘1–⌘4 与面板页签一一对应; 重复按只保持当前页, 不像 L / N / G / ` 那样关闭面板
+function handlePaneNumberShortcut(e) {
+  if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return false;
+  const tab = { 1: 'log', 2: 'net', 3: 'git', 4: 'term' }[e.key];
+  if (!tab) return false;
+  setPaneTab(tab);
+  if (!logs.window && !logVisible()) toggleLogPanel();
+  return true;
 }
 
 const NET_RETRY_MS = 2000;
@@ -7256,6 +7363,11 @@ function setup() {
     }
   });
   document.addEventListener('keydown', (e) => {
+    // 面板快捷键要先于终端处理, 保证焦点在 shell 中时仍可切换页签
+    if (handlePaneNumberShortcut(e)) {
+      e.preventDefault();
+      return;
+    }
     // 终端中的按键全部交给 shell, 如 vim 的 Esc
     if (e.target instanceof Element && e.target.closest('.xterm')) return;
     if (e.key === 'Escape') {
@@ -7363,8 +7475,13 @@ async function start() {
   refresh();
 }
 
+let appInfoSeq = 0;
+
 function loadAppInfo() {
+  const seq = ++appInfoSeq;
+  const key = logTargetKey();
   return api('/api/app').then((info) => {
+    if (seq !== appInfoSeq || key !== logTargetKey()) return;
     $('appName').textContent = info.appName;
     appInfo.name = info.appName;
     appInfo.base = `${info.version} · ${info.os}`;
@@ -7372,6 +7489,7 @@ function loadAppInfo() {
     updateAppMeta();
     document.title = `${info.appName} - LayerLens`;
   }).catch((e) => {
+    if (seq !== appInfoSeq || key !== logTargetKey()) return;
     // App 刚换端口等情况下取不到, 仍显示名称, 事件流重连后会重新加载
     $('appName').textContent = currentApp()?.appName || targets.bundleId;
     toast(e.message, true);

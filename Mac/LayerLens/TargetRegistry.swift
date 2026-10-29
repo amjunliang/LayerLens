@@ -400,8 +400,13 @@ final class TargetRegistry {
             guard let self else { return }
             self.usbListed = true
             guard let devices else { return }
+            let previouslyConnected = Set(self.usbDevices.map(\.udid))
             self.usbDevices = devices
-            devices.filter { self.deviceDetails[$0.udid] == nil && !self.detailsLoading.contains($0.udid) }.forEach { self.loadDetails(udid: $0.udid) }
+            // 初次连接和断开后的重新连接都重新读取, 以发现设备改名或系统升级.
+            devices.filter {
+                (!previouslyConnected.contains($0.udid) || self.deviceDetails[$0.udid] == nil)
+                    && !self.detailsLoading.contains($0.udid)
+            }.forEach { self.loadDetails(udid: $0.udid) }
         }
     }
 

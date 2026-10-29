@@ -30,6 +30,16 @@ final class HubServer {
     let terminal = TerminalController()
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
+    /// 同一设备的 App 激活必须串行; 运行中的命令结束后只执行排队目标中的最后一个
+    private let activationQueue = DispatchQueue(label: "com.layerlens.hub.activate")
+    private struct ActivationRequest {
+        let deviceId: String
+        let bundleId: String
+        let kind: DeviceKind
+        let connection: HubConnection
+    }
+    private var pendingActivations: [String: ActivationRequest] = [:]
+    private var activatingDevices: Set<String> = []
     private let webRoot: URL
     private var listener: NWListener?
     private let allowedHosts: Set<String> = ["127.0.0.1:\(HubServer.port)", "localhost:\(HubServer.port)"]
@@ -376,26 +386,52 @@ final class HubServer {
                     connection.respond(.error(404, "Device not found"))
                     return
                 }
-                workQueue.async { [self] in
-                    let arguments = kind == .simulator
-                        ? ["simctl", "launch", device, app]
-                        : ["devicectl", "device", "process", "launch", "--device", device, app]
-                    // 真机的开发者通道偶尔卡住(锁屏、休眠、连接不稳), 命令不返回时网页会一直停在切换中
-                    let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments, timeout: 20)
-                    guard result.ok else {
-                        let failure = Self.launchFailure(result.error)
-                        connection.respond(.json(["ok": false, "reason": failure.reason, "error": failure.detail], status: 500))
-                        return
-                    }
-                    // 等 App 在(可能换了的)端口上响应后再返回, 网页随后加载时不会连到旧端口
-                    registry.waitForApp(deviceId: device, bundleId: app, timeout: 5) { ready in
-                        // 真机锁屏时启动请求会被接受, 但 App 到不了前台, 由 kind 让网页提示可能的原因
-                        connection.respond(.json(["ok": true, "ready": ready, "kind": kind == .simulator ? "simulator" : "device"]))
-                    }
-                }
+                enqueueActivation(deviceId: device, bundleId: app, kind: kind, connection: connection)
             }
         default:
             connection.respond(.error(404, "Not Found"))
+        }
+    }
+
+    /// 快速切换时合并尚未开始的激活请求. 已经发给 devicectl 的命令不能可靠撤销,
+    /// 所以让它结束后再执行最新目标, 保证最后一次点击最终处于前台.
+    private func enqueueActivation(deviceId: String, bundleId: String, kind: DeviceKind, connection: HubConnection) {
+        let request = ActivationRequest(deviceId: deviceId, bundleId: bundleId, kind: kind, connection: connection)
+        activationQueue.async { [self] in
+            if let superseded = pendingActivations.updateValue(request, forKey: deviceId) {
+                superseded.connection.respond(.json(["ok": false, "superseded": true], status: 409))
+            }
+            startNextActivation(deviceId: deviceId)
+        }
+    }
+
+    private func startNextActivation(deviceId: String) {
+        dispatchPrecondition(condition: .onQueue(activationQueue))
+        guard !activatingDevices.contains(deviceId), let request = pendingActivations.removeValue(forKey: deviceId) else { return }
+        activatingDevices.insert(deviceId)
+        workQueue.async { [self] in
+            let arguments = request.kind == .simulator
+                ? ["simctl", "launch", request.deviceId, request.bundleId]
+                : ["devicectl", "device", "process", "launch", "--device", request.deviceId, request.bundleId]
+            // 真机的开发者通道偶尔卡住(锁屏、休眠、连接不稳), 最多等待 20 秒
+            let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments, timeout: 20)
+            guard result.ok else {
+                let failure = Self.launchFailure(result.error)
+                finishActivation(request, response: .json(["ok": false, "reason": failure.reason, "error": failure.detail], status: 500))
+                return
+            }
+            // 等 App 在(可能换了的)端口上响应, 之后前端再读取层级
+            registry.waitForApp(deviceId: request.deviceId, bundleId: request.bundleId, timeout: 5) { [self] ready in
+                finishActivation(request, response: .json(["ok": true, "ready": ready, "kind": request.kind == .simulator ? "simulator" : "device"]))
+            }
+        }
+    }
+
+    private func finishActivation(_ request: ActivationRequest, response: HTTPResponse) {
+        activationQueue.async { [self] in
+            request.connection.respond(response)
+            activatingDevices.remove(request.deviceId)
+            startNextActivation(deviceId: request.deviceId)
         }
     }
 
