@@ -1099,6 +1099,8 @@ body.log-open .log-pane { display: flex; }
 .git-amend-warn { margin-bottom: 6px; padding: 4px 8px; border-radius: 5px; background: color-mix(in srgb, var(--warning, #e6a23c) 16%, transparent); color: var(--warning, #e6a23c); font-size: 12px; }
 .git-commit-row button { flex: none; height: 28px; padding: 0 12px; }
 .git-commit-row button:disabled { opacity: 0.5; }
+#gitCommit { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+#gitCommit.loading::before { content: ''; flex: none; width: 12px; height: 12px; box-sizing: border-box; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: icon-spin 0.8s linear infinite; }
 .git-diff { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
 .git-diff-head { flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px 0 6px; border-bottom: 1px solid var(--border); }
 .git-diff-back { display: none; transform: rotate(90deg); }
@@ -1190,32 +1192,17 @@ body.log-open .log-pane { display: flex; }
 .net-status.client { color: var(--warning, #e6a23c); }
 .net-status.bad, .net-row.failed .net-path { color: var(--danger); }
 .net-splitter { flex: none; width: 1px; background: var(--border); position: relative; z-index: 2; cursor: col-resize; touch-action: none; }
-.net-detail { flex: none; width: var(--net-detail-w, 45%); min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
+.net-detail { position: relative; flex: none; width: var(--net-detail-w, 45%); min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
 .net-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px; color: var(--muted); font-size: 13px; text-align: center; }
 .net-detail-top { flex: none; position: relative; z-index: 4; border-bottom: 1px solid var(--border); }
 .net-detail-head { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 6px 0 12px; box-sizing: border-box; }
 .net-detail-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font: var(--log-size, 13px) var(--log-font, var(--mono)); }
-.net-detail-title .net-status, .net-detail-title .net-method { width: auto; }
-.net-detail-url { min-width: 0; display: flex; align-items: center; gap: 4px; color: var(--text); font: inherit; cursor: text; }
-.net-detail-url.truncated { margin-left: -4px; padding: 1px 4px; border-radius: 4px; cursor: pointer; -webkit-user-select: none; user-select: none; }
-.net-detail-url.truncated:hover { background: var(--hover); }
-.net-detail-url.truncated:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.net-detail-url.truncated.expanded { background: var(--accent-soft); }
-.net-detail-url-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; -webkit-user-select: text; user-select: text; }
-.net-detail-url.truncated .net-detail-url-text { -webkit-user-select: none; user-select: none; }
-.net-detail-url-arrow { flex: none; color: var(--muted); transition: transform 0.15s; }
-.net-detail-url.expanded .net-detail-url-arrow { color: var(--accent); transform: rotate(90deg); }
-.net-detail-url-full { position: absolute; top: calc(100% + 7px); left: 16px; right: 24px; z-index: 5; overflow: visible; box-sizing: border-box; border: 1px solid var(--float-line); border-radius: 10px; background: var(--float-bg); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22), var(--float-shadow); color: var(--text); animation: net-url-pop 0.12s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.net-detail-url-full::before { content: ''; position: absolute; top: -5px; left: 20px; width: 8px; height: 8px; transform: rotate(45deg); border-top: 1px solid var(--float-line); border-left: 1px solid var(--float-line); background: var(--float-bg); }
-.net-detail-url-full[hidden] { display: none; }
-.net-detail-url-full-head { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 6px 0 11px; border-bottom: 1px solid var(--border); }
-.net-detail-url-full-label { color: var(--text-2); font: 600 11px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; letter-spacing: 0.02em; }
-.net-detail-url-full-actions { display: flex; align-items: center; gap: 1px; }
-.net-detail-url-full-actions .icon-btn { width: 24px; height: 24px; color: var(--muted); }
-.net-detail-url-full-actions .icon-btn:hover { color: var(--text); }
-.net-detail-url-full-actions .icon { width: 13px; height: 13px; }
-.net-detail-url-full-text { position: relative; z-index: 1; max-height: min(34vh, 230px); overflow: auto; padding: 10px 12px 12px; border-radius: 0 0 10px 10px; background: color-mix(in srgb, var(--input) 55%, transparent); font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); color: var(--text); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
-@keyframes net-url-pop { from { opacity: 0; transform: translateY(-3px) scale(0.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.net-detail-title .net-status, .net-detail-title .net-method { flex: none; width: auto; }
+.net-detail-url { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; }
+.net-detail-url-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; }
+.net-detail-url-button { flex: none; width: 22px; height: 22px; }
+.net-detail-url-button[hidden] { display: none; }
+.net-detail-full-url { overflow-wrap: anywhere; white-space: pre-wrap; font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); }
 .net-detail-tools { flex: none; display: flex; align-items: center; gap: 4px; }
 .net-detail-tools .icon-btn { width: 26px; height: 24px; }
 .net-detail-tools .net-find-sep { margin: 0 2px; }
@@ -1223,9 +1210,11 @@ body.log-open .log-pane { display: flex; }
 .net-detail-tabs button { padding: 1px 12px; }
 .net-detail-content { flex: 1; min-height: 0; display: flex; position: relative; }
 .net-detail-body { flex: 1; min-width: 0; overflow: auto; padding: 0 12px calc(24px + var(--edge-fade)); -webkit-user-select: text; user-select: text; }
-/* ⌘F 查找: 固定在详情头部下方靠右, 不遮挡内容, 切换请求时位置不变 */
-.net-find-row { flex: none; display: flex; justify-content: flex-end; padding: 6px 12px 2px; }
-.net-find { display: flex; align-items: center; gap: 2px; width: 320px; max-width: calc(100% - 24px); height: 34px; padding: 0 6px 0 12px; box-sizing: border-box; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 10px; box-shadow: var(--float-shadow); }
+/* ⌘F 查找: 悬浮在内容右上角, 打开和关闭不改变内容高度 */
+.net-find-row { position: absolute; top: 6px; right: 12px; z-index: 6; width: 320px; max-width: calc(100% - 24px); }
+.net-detail-top > .net-find-row { top: calc(100% + 6px); }
+.net-find { display: flex; align-items: center; gap: 2px; width: 100%; height: 34px; padding: 0 6px 0 12px; box-sizing: border-box; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 8px; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.16); }
+.net-find input { width: 0; }
 .net-find input { flex: 1; min-width: 0; padding: 0; border: none; background: none; outline: none; color: var(--text); font-size: 13px; }
 .net-find-count { flex: none; padding: 0 6px; color: var(--text-2); font: 12px var(--mono); }
 .net-find-sep { flex: none; width: 1px; height: 18px; margin: 0 4px; background: var(--border-strong); }
@@ -1250,7 +1239,10 @@ body.log-open .log-pane { display: flex; }
 .json-num { color: var(--json-num); }
 .json-lit { color: var(--json-lit); }
 .json-punct { color: var(--muted); }
-.net-section h5 { margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--text); }
+.net-headers-section { flex: none; margin: 12px 0; }
+.net-headers-section > summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
+.net-headers-section[open] > summary { margin-bottom: 8px; }
+.net-section h5 { display: flex; align-items: center; gap: 6px; margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--text); }
 /* 详情的字体和字号跟随面板设置 */
 .net-kv { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 3px 16px; font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); }
 .net-k { color: var(--text-2); word-break: break-all; }

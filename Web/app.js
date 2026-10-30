@@ -5867,7 +5867,6 @@ const net = {
   detailTab: 'response',
   detailToken: 0,
   urlHeadCleanup: null,
-  urlPopoverClose: null,
   // 内容搜索由 Hub 完成, 见 net-filters.js
   searchSupported: false,
   // 设备据此取消本页面未完成的旧查找
@@ -6375,6 +6374,7 @@ function closeNetDetail() {
   net.selected = 0;
   net.detail = null;
   net.detailToken++;
+  $('netDetail').removeAttribute('aria-busy');
   $('netDetail').hidden = false;
   $('netSplitter').hidden = false;
   // 空状态也显示头部, 查找栏位置与选中请求时一致
@@ -6398,8 +6398,10 @@ async function loadNetDetail(id) {
   const panel = $('netDetail');
   panel.hidden = false;
   $('netSplitter').hidden = false;
-  // 加载时保留头部和查找栏, 切换请求时不跳动
-  if (!net.detail || net.detail.id !== id) setNetDetail(netDetailHead(net.records.get(id)), el('p', 'net-note', t('正在加载…')));
+  // 已有详情时保留当前画面, 新数据准备好后一次替换, 避免先清空成加载占位再显示内容
+  panel.setAttribute('aria-busy', 'true');
+  if (!net.detail) setNetDetail(netDetailHead(net.records.get(id)), el('p', 'net-note', t('正在加载…')));
+  else panel.querySelectorAll('[data-detail-tab], [data-detail-curl], [data-detail-url]').forEach((button) => { button.disabled = true; });
   try {
     const data = await fetchNetDetail(id);
     if (token !== net.detailToken) return;
@@ -6409,160 +6411,142 @@ async function loadNetDetail(id) {
     if (token !== net.detailToken) return;
     net.detail = null;
     setNetDetail(netDetailHead(net.records.get(id)), el('p', 'net-note', t('无法读取请求详情: {0}', e.message)));
+  } finally {
+    if (token === net.detailToken) panel.removeAttribute('aria-busy');
   }
 }
 
-// URL 在头部单行显示, 点击后用浮层显示完整内容, 不改变详情布局
-function netDetailHead(record, tabs) {
-  // 切换请求或重新渲染头部时收起旧浮层并移除全局监听
+// 头部显示 URL 摘要, 截断时可跳到请求中的完整 URL
+function netDetailHead(record) {
+  const ready = !!record && net.detail?.id === record.id;
+  const key = JSON.stringify(record ? [record.id, record.url, record.method, record.status, record.state, record.error] : null);
+  const existing = $('netDetail').querySelector('.net-detail-top');
+  const syncControls = (top) => {
+    top.querySelectorAll('[data-detail-tab]').forEach((button) => {
+      button.disabled = !ready;
+      button.classList.toggle('active', button.dataset.detailTab === net.detailTab);
+    });
+    top.querySelector('[data-detail-curl]').disabled = !ready;
+    const urlButton = top.querySelector('[data-detail-url]');
+    if (urlButton) urlButton.disabled = !ready;
+  };
+  // 加载结束和页签切换时复用头部和工具栏
+  if (existing?.dataset.recordKey === key) {
+    syncControls(existing);
+    return existing;
+  }
   net.urlHeadCleanup?.();
   net.urlHeadCleanup = null;
   const top = el('div', 'net-detail-top');
-  const head = el('div', 'net-detail-head');
-  const title = el('div', 'net-detail-title');
-  let full = null;
-  if (record) {
-    // 完整显示时是可选择的普通文本; 只有出现省略号时才显示箭头并启用浮层
-    const url = el('span', 'net-detail-url');
-    const urlText = el('span', 'net-detail-url-text', record.url);
-    const urlArrow = el('span', 'net-detail-url-arrow', '›');
-    urlArrow.hidden = true;
-    url.append(urlText, urlArrow);
-    url.setAttribute('aria-expanded', 'false');
-    title.append(netStatusCell(record), el('span', 'net-method', record.method), url);
-    full = el('div', 'net-detail-url-full');
-    full.setAttribute('role', 'dialog');
-    full.setAttribute('aria-label', t('完整 URL'));
-    const fullHead = el('div', 'net-detail-url-full-head');
-    const fullActions = el('div', 'net-detail-url-full-actions');
-    const fullCopy = el('button', 'icon-btn');
-    fullCopy.title = t('复制 URL');
-    fullCopy.appendChild(icon('copy'));
-    const fullClose = el('button', 'icon-btn');
-    fullClose.title = t('关闭');
-    fullClose.appendChild(icon('close'));
-    fullActions.append(fullCopy, fullClose);
-    fullHead.append(el('span', 'net-detail-url-full-label', t('完整 URL')), fullActions);
-    full.append(fullHead, el('div', 'net-detail-url-full-text', record.url));
-    full.hidden = true;
-    const setExpanded = (expanded) => {
-      net.urlExpanded = expanded;
-      url.classList.toggle('expanded', expanded);
-      url.setAttribute('aria-expanded', String(expanded));
-      url.title = expanded ? t('点击收起完整 URL') : t('点击查看完整 URL');
-      full.hidden = !expanded;
-    };
-    const close = () => {
-      setExpanded(false);
-      document.removeEventListener('pointerdown', outside);
-      document.removeEventListener('keydown', escape);
-      if (net.urlPopoverClose === close) net.urlPopoverClose = null;
-    };
-    const outside = (e) => {
-      if (!url.contains(e.target) && !full.contains(e.target)) close();
-    };
-    const escape = (e) => {
-      if (e.key === 'Escape') close();
-    };
-    fullCopy.addEventListener('click', () => copyText(record.url, '复制 URL'));
-    fullClose.addEventListener('click', close);
-    url.addEventListener('click', () => {
-      if (!url.classList.contains('truncated')) return;
-      if (net.urlExpanded) {
-        close();
-        return;
-      }
-      setExpanded(true);
-      net.urlPopoverClose = close;
-      document.addEventListener('pointerdown', outside);
-      document.addEventListener('keydown', escape);
-    });
-    url.addEventListener('keydown', (e) => {
-      if (!url.classList.contains('truncated') || (e.key !== 'Enter' && e.key !== ' ')) return;
-      e.preventDefault();
-      url.click();
-    });
-    const syncTruncated = () => {
-      const truncated = urlText.scrollWidth > urlText.clientWidth + 1;
-      url.classList.toggle('truncated', truncated);
-      urlArrow.hidden = !truncated;
-      if (truncated) {
-        url.setAttribute('role', 'button');
-        url.tabIndex = 0;
-        url.title = net.urlExpanded ? t('点击收起完整 URL') : t('点击查看完整 URL');
-      } else {
-        url.removeAttribute('role');
-        url.removeAttribute('tabindex');
-        url.removeAttribute('title');
-        if (net.urlExpanded) close();
-      }
-    };
-    const resize = new ResizeObserver(syncTruncated);
-    resize.observe(urlText);
-    const measure = requestAnimationFrame(syncTruncated);
-    net.urlHeadCleanup = () => {
-      cancelAnimationFrame(measure);
-      resize.disconnect();
-      close();
-    };
-  }
-  const tools = el('div', 'net-detail-tools');
-  const copyUrl = el('button', 'icon-btn');
-  copyUrl.title = t('复制 URL');
-  copyUrl.appendChild(icon('copy'));
-  copyUrl.addEventListener('click', () => copyText(record?.url || '', '复制 URL'));
-  copyUrl.disabled = !record;
-  const curl = el('button', 'sb-text-btn', 'cURL');
-  curl.addEventListener('click', () => copyNetCurl(net.detail?.id));
-  curl.disabled = !net.detail;
-  tools.append(copyUrl, curl);
-  head.append(...[title, tabs, tools].filter(Boolean));
-  top.appendChild(head);
-  if (full) top.appendChild(full);
-  return top;
-}
-
-function renderNetDetail() {
-  const detail = net.detail;
-  const panel = $('netDetail');
+  top.dataset.recordKey = key;
   const tabs = el('div', 'segmented small net-detail-tabs');
   [['response', '响应'], ['request', '请求'], ['headers', '标头']].forEach(([name, label]) => {
-    const button = el('button', name === net.detailTab ? 'active' : '', t(label));
+    const button = el('button', '', t(label));
+    button.dataset.detailTab = name;
     button.addEventListener('click', () => {
+      if (!record || net.detail?.id !== record.id) return;
       net.detailTab = name;
       renderNetDetail();
     });
     tabs.appendChild(button);
   });
+  const head = el('div', 'net-detail-head');
+  const title = el('div', 'net-detail-title');
+  if (record) {
+    const url = el('span', 'net-detail-url');
+    const text = el('span', 'net-detail-url-text', record.url);
+    const show = el('button', 'icon-btn net-detail-url-button');
+    show.dataset.detailUrl = '';
+    show.title = t('点击查看完整 URL');
+    show.setAttribute('aria-label', t('点击查看完整 URL'));
+    show.appendChild(icon('chevron-down'));
+    show.hidden = true;
+    show.addEventListener('click', () => {
+      if (net.detail?.id !== record.id) return;
+      net.detailTab = 'request';
+      renderNetDetail();
+      const full = $('netDetail').querySelector('.net-detail-full-url');
+      full?.focus({ preventScroll: true });
+      full?.scrollIntoView({ block: 'center', inline: 'nearest' });
+    });
+    url.append(text, show);
+    title.append(el('span', 'net-method', record.method), netStatusCell(record), url);
+    // 以按钮隐藏时的可用宽度判断, 避免按钮自身占宽导致反复显隐.
+    const syncURL = () => { show.hidden = text.scrollWidth <= url.clientWidth + 1; };
+    const observer = new ResizeObserver(syncURL);
+    observer.observe(url);
+    top.syncURL = syncURL;
+    net.urlHeadCleanup = () => observer.disconnect();
+  }
+  const tools = el('div', 'net-detail-tools');
+  const curl = el('button', 'sb-text-btn', 'cURL');
+  curl.dataset.detailCurl = '';
+  curl.addEventListener('click', () => copyNetCurl(net.detail?.id));
+  curl.disabled = !net.detail;
+  tools.appendChild(curl);
+  head.append(...[title, tabs, tools].filter(Boolean));
+  top.appendChild(head);
+  syncControls(top);
+  return top;
+}
+
+function renderNetDetail() {
+  const detail = net.detail;
   const body = el('div', 'net-detail-body');
-  if (net.detailTab === 'headers') {
-    body.append(
-      netSection(t('概要'), netGeneralRows(detail)),
-      netSection(t('响应头'), netHeaderRows(detail.responseHeaders)),
-      netSection(t('请求头'), netHeaderRows(detail.requestHeaders)),
-    );
-  } else if (net.detailTab === 'request') {
-    body.appendChild(netBodySection(detail, 'req'));
+  if (net.detailTab === 'request') {
+    const fullURL = el('div', 'net-detail-full-url', detail.url);
+    fullURL.tabIndex = -1;
+    const urlSection = netSection(t('完整 URL'), fullURL);
+    const copyUrl = el('button', 'icon-btn');
+    copyUrl.title = t('复制 URL');
+    copyUrl.appendChild(icon('copy'));
+    copyUrl.addEventListener('click', () => copyText(detail.url, '复制 URL'));
+    urlSection.querySelector('h5').appendChild(copyUrl);
+    body.appendChild(urlSection);
     const query = [...new URL(detail.url, location.href).searchParams];
     if (query.length) body.appendChild(netSection(t('查询参数'), netKeyValueRows(query)));
+    if (detail.reqSize || (detail.reqBody && detail.reqBody !== 'none')) {
+      const requestBody = netBodySection(detail, 'req');
+      requestBody.prepend(el('h5', null, t('请求体')));
+      body.appendChild(requestBody);
+    }
+  } else if (net.detailTab === 'headers') {
+    body.append(
+      netHeadersSection(t('请求头'), detail.requestHeaders),
+      netHeadersSection(t('响应头'), detail.responseHeaders),
+    );
   } else {
     body.appendChild(netBodySection(detail, 'res'));
   }
   const content = el('div', 'net-detail-content');
   content.appendChild(body);
-  setNetDetail(netDetailHead(net.records.get(detail.id) || detail, tabs), content);
+  setNetDetail(netDetailHead(net.records.get(detail.id) || detail), content);
   runNetFind();
 }
 
-// 详情内容, 查找栏打开时放在头部下方; 同一个查找栏移动后恢复输入焦点
+// 查找栏悬浮在头部下方, 不占用详情布局; 复用输入框并保留焦点
 function setNetDetail(head, ...rest) {
   const input = net.find.row?.querySelector('input');
   const focused = !!input && document.activeElement === input;
   const start = input?.selectionStart;
   const end = input?.selectionEnd;
-  // 没有头部(空状态)时查找栏放在最上方
-  const nodes = head?.classList.contains('net-detail-top') ? [head, netFindRow(), ...rest] : [netFindRow(), head, ...rest];
-  $('netDetail').replaceChildren(...nodes.filter(Boolean));
+  const row = netFindRow();
+  const hasHead = head?.classList.contains('net-detail-top');
+  if (hasHead && row && row.parentNode !== head) head.appendChild(row);
+  const nodes = hasHead ? [head, ...rest] : [row, head, ...rest];
+  // 保留仍在使用的头部和查找栏节点, 仅替换变化的内容区
+  const panel = $('netDetail');
+  let cursor = panel.firstChild;
+  for (const node of nodes.filter(Boolean)) {
+    if (node === cursor) cursor = cursor.nextSibling;
+    else panel.insertBefore(node, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
+  head?.syncURL?.();
   if (focused && input.isConnected) {
     input.focus({ preventScroll: true });
     input.setSelectionRange(start, end);
@@ -6610,20 +6594,12 @@ function netHeaderRows(headers) {
   return netKeyValueRows(Object.entries(headers || {}).sort(([a], [b]) => a.toLowerCase().localeCompare(b.toLowerCase())));
 }
 
-function netGeneralRows(detail) {
-  const status = detail.state === 'pending' ? t('进行中') : detail.state === 'failed' ? `${detail.status || ''} ${detail.error || ''}`.trim() : String(detail.status || '—');
-  const types = { data: t('数据'), upload: t('上传'), download: t('下载') };
-  return netKeyValueRows([
-    ['URL', detail.url],
-    [t('方法'), detail.method],
-    [t('状态'), status],
-    [t('开始时间'), logFullTime(detail.start)],
-    [t('耗时'), netDuration(detail.duration) || '—'],
-    [t('任务类型'), types[detail.type] || detail.type],
-    [t('请求大小'), logSize(detail.reqSize || 0)],
-    [t('响应大小'), logSize(detail.resSize || 0)],
-    ['MIME', detail.mime || '—'],
-  ]);
+// 原生折叠区域保持键盘可操作, 内容仍可被详情查找定位.
+function netHeadersSection(title, headers) {
+  const section = el('details', 'net-section net-headers-section');
+  section.open = true;
+  section.append(el('summary', null, `${title} (${Object.keys(headers || {}).length})`), netHeaderRows(headers));
+  return section;
 }
 
 function netBodySection(detail, side) {
@@ -6880,7 +6856,7 @@ function openNetFind() {
   const row = netFindRow();
   if (!row.isConnected) {
     const head = panel.querySelector(':scope > .net-detail-top');
-    if (head) head.after(row);
+    if (head) head.appendChild(row);
     else panel.prepend(row);
   }
   const input = row.querySelector('input');
@@ -6891,7 +6867,7 @@ function openNetFind() {
     net.find.index = -1;
   }
   saveNetFind();
-  input.focus();
+  input.focus({ preventScroll: true });
   input.select();
   runNetFind();
 }
@@ -6902,7 +6878,7 @@ function closeNetFind() {
   saveNetFind();
   net.find.row?.remove();
   runNetFind();
-  $('netList').focus();
+  $('netList').focus({ preventScroll: true });
   // 关闭后焦点回到列表, 再按 ⌘F 仍在详情中查找
   findArea = 'netDetail';
 }
@@ -6970,6 +6946,9 @@ function focusNetFind(scroll) {
   if (!mark) return;
   find.marks.forEach((item) => item.classList.toggle('current', item === mark));
   for (let node = mark.closest('.json-node.collapsed'); node; node = node.parentElement.closest('.json-node.collapsed')) node.classList.remove('collapsed');
+  for (let node = mark.parentElement; node; node = node.parentElement) {
+    if (node.tagName === 'DETAILS') node.open = true;
+  }
   if (scroll || find.index === 0) mark.scrollIntoView({ block: 'center', inline: 'nearest' });
 }
 

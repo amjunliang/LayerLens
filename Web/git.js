@@ -473,6 +473,7 @@ function gitRenderHead() {
   const pushAfter = !local && $('gitPushAfter').checked;
   $('gitPushAfterLabel').style.display = local ? 'none' : '';
   $('gitCommit').disabled = git.busy.has('commit') || git.committing || !git.status || (!staged && !amend);
+  $('gitCommit').classList.toggle('loading', git.busy.has('commit') || (git.committing && git.busy.has('push')));
   $('gitCommit').textContent = git.busy.has('commit') ? t('正在提交…') : git.committing && git.busy.has('push') ? t('正在推送…')
     : pushAfter ? (staged ? t('提交并推送 ({0})', staged) : t('提交并推送')) : staged ? t('提交 ({0})', staged) : t('提交');
 }

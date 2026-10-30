@@ -57,6 +57,7 @@ const EN = {
   '点击查看完整 URL': 'Show full URL',
   '点击收起完整 URL': 'Hide full URL',
   '完整 URL': 'Full URL',
+  '请求体': 'Request Body',
   '也可以在右上角选择以前保存的启动查看': 'You can also pick a saved launch at the top right',
   '当前启动': 'Current launch',
   '选择保存的启动': 'Saved launches',
