@@ -1201,7 +1201,12 @@ body.log-open .log-pane { display: flex; }
 .net-detail-url { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; }
 .net-detail-url-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; }
 .net-detail-url-button { flex: none; width: 22px; height: 22px; }
-.net-detail-url-button[hidden] { display: none; }
+.net-detail-url-button[hidden], .net-detail-url-copy[hidden] { display: none; }
+.net-detail-url-copy { flex: none; width: 22px; height: 22px; }
+.net-detail-head.url-expanded { height: auto; min-height: 36px; align-items: flex-start; padding-top: 7px; padding-bottom: 7px; }
+.net-detail-head.url-expanded .net-detail-title, .net-detail-head.url-expanded .net-detail-url { align-items: flex-start; }
+.net-detail-head.url-expanded .net-detail-url-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 22px; }
+.net-detail-head.url-expanded .net-method, .net-detail-head.url-expanded .net-status { line-height: 22px; }
 .net-detail-full-url { overflow-wrap: anywhere; white-space: pre-wrap; font: var(--log-size, 13px)/1.55 var(--log-font, var(--mono)); }
 .net-detail-tools { flex: none; display: flex; align-items: center; gap: 4px; }
 .net-detail-tools .icon-btn { width: 26px; height: 24px; }

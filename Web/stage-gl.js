@@ -265,6 +265,7 @@ function stage3DClear() {
 // 重绘: 本帧还没绘制过时立即绘制并提交给 GPU, 拖动、缩放不必等动画帧回调(WebKit 中常晚一帧);
 // 同一帧内的后续变化合并, 在下一次动画帧回调中绘制
 function stage3DInvalidate() {
+  if (!pageActivity.active) { stage3D.dirty = true; return; }
   if (stage3D.frame) {
     stage3D.dirty = true;
     return;

@@ -110,6 +110,16 @@ final class HubServer {
             connection.respond(.error(403, "Forbidden origin"))
             return
         }
+        if head.path == "/api/hub/event-socket" {
+            guard head.method == "GET", head.header("Upgrade")?.lowercased() == "websocket",
+                  head.header("Sec-WebSocket-Key") != nil,
+                  let target = head.query["target"], EventStreamSocket.allows(target) else {
+                connection.respond(.error(400, "Invalid event stream"))
+                return
+            }
+            EventStreamSocket(connection: connection.detach(), leftover: leftover, queue: queue).start(head, target: target)
+            return
+        }
         if head.path.hasPrefix("/t/") {
             proxyToApp(head, leftover: leftover, connection: connection)
             return
@@ -743,5 +753,96 @@ final class HubConnection {
         let tunnel = ProxyTunnel(client: connection, upstream: upstream, initialData: initialData, queue: server.queue) {}
         self.tunnel = tunnel
         tunnel.run()
+    }
+}
+
+/// 浏览器的 SSE 占用 HTTP/1.1 的每站点连接额度(多个标签页共享)。
+/// 通过 WebSocket 转发现有事件流, 保留各记录器及 iOS Pod 的协议。
+/// 上游固定为本机 Hub, 且仅允许只读事件端点。
+final class EventStreamSocket {
+    private let socket: WebSocketConnection
+    private let queue: DispatchQueue
+    private var upstream: NWConnection?
+    private var header = Data()
+    private var opened = false
+    private var closed = false
+
+    init(connection: NWConnection, leftover: Data, queue: DispatchQueue) {
+        socket = WebSocketConnection(connection: connection, leftover: leftover)
+        self.queue = queue
+    }
+
+    static func allows(_ target: String) -> Bool {
+        guard target.hasPrefix("/"), !target.contains("\r"), !target.contains("\n"),
+              let url = URLComponents(string: "http://localhost" + target), url.host == "localhost" else { return false }
+        if ["/api/hub/app-logs/stream", "/api/hub/git/events", "/api/hub/term/events"].contains(url.path) { return true }
+        let parts = url.path.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 6 && parts[1] == "t" && !parts[2].isEmpty && !parts[3].isEmpty
+            && parts[4] == "api" && ["events", "network"].contains(String(parts[5]))
+    }
+
+    func start(_ head: HTTPRequestHead, target: String) {
+        socket.onClose = { [self] in close() }
+        guard socket.accept(head), !closed else { close(); return }
+        let upstream = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: HubServer.port)!, using: .tcp)
+        self.upstream = upstream
+        upstream.stateUpdateHandler = { [self] state in
+            switch state {
+            case .ready:
+                let request = "GET \(target) HTTP/1.1\r\nHost: 127.0.0.1:\(HubServer.port)\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n"
+                upstream.send(content: Data(request.utf8), completion: .contentProcessed { [self] error in
+                    if error != nil { close() } else { receive() }
+                })
+            case .waiting, .failed, .cancelled: close()
+            default: break
+            }
+        }
+        upstream.start(queue: queue)
+    }
+
+    private func receive() {
+        guard !closed, let upstream else { return }
+        upstream.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [self] data, _, complete, error in
+            guard !closed else { return }
+            var body = data ?? Data()
+            if !opened {
+                header.append(body)
+                guard let end = header.range(of: HTTPRequestHead.terminator) else {
+                    if complete || error != nil || header.count > 64 * 1024 { close() } else { receive() }
+                    return
+                }
+                let text = String(decoding: header[..<end.lowerBound], as: UTF8.self)
+                let status = Int(text.split(separator: " ").dropFirst().first ?? "") ?? 502
+                guard status == 200, text.lowercased().contains("content-type: text/event-stream") else {
+                    // 与 EventSource 一样, HTTP 错误停止自动重连, 交给调用方处理。
+                    socket.sendText("{\"status\":\(status == 200 ? 502 : status)}")
+                    upstream.cancel()
+                    upstream.stateUpdateHandler = nil
+                    self.upstream = nil
+                    return
+                }
+                opened = true
+                socket.sendText("{\"status\":200}")
+                body = Data(header[end.upperBound...])
+                header = Data()
+            }
+            // 按发送完成节奏读取, 避免慢浏览器导致无界缓存。
+            if body.isEmpty {
+                if complete || error != nil { close() } else { receive() }
+            } else {
+                socket.sendBinary(body) { [self] sent in
+                    if !sent || complete || error != nil { close() } else { receive() }
+                }
+            }
+        }
+    }
+
+    private func close() {
+        guard !closed else { return }
+        closed = true
+        upstream?.stateUpdateHandler = nil
+        upstream?.cancel()
+        upstream = nil
+        socket.close()
     }
 }

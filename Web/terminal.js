@@ -47,7 +47,7 @@ function syncTermPanel() {
 
 function termConnect() {
   if (term.es) term.es.close();
-  const es = new EventSource('/api/hub/term/events');
+  const es = new LayerLensEventSource('/api/hub/term/events');
   term.es = es;
   es.addEventListener('sessions', (e) => {
     if (term.es !== es) return;
@@ -58,7 +58,7 @@ function termConnect() {
     }
   });
   es.onerror = () => {
-    if (es.readyState !== EventSource.CLOSED) return;
+    if (es.readyState !== LayerLensEventSource.CLOSED) return;
     setTimeout(() => {
       if (term.es === es) termConnect();
     }, TERM_RETRY_MS);

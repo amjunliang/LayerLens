@@ -417,6 +417,51 @@ function hideMenu() {
   hideLayer(menu, 120, () => menu.remove());
 }
 
+// 严格焦点模式: 只暂停页面的视图采集和播放, Hub 的日志/抓包/终端继续运行。
+const pageActivity = { active: false, ready: false, pending: false, controller: null, generation: 0 };
+
+function pageHasFocus() {
+  return document.visibilityState !== 'hidden' &&
+    (typeof window.LAYERLENS_WINDOW_FOCUSED === 'boolean' ? window.LAYERLENS_WINDOW_FOCUSED : document.hasFocus());
+}
+
+function setupPageActivity() {
+  pageActivity.active = pageHasFocus();
+  const update = () => {
+    const active = pageHasFocus();
+    if (active === pageActivity.active) return;
+    pageActivity.active = active;
+    ++pageActivity.generation;
+    if (!active) {
+      pageActivity.pending = true;
+      ++refreshSeq;
+      pageActivity.controller?.abort();
+      resetImages();
+      liveStop();
+      if (stage3D.frame) cancelAnimationFrame(stage3D.frame);
+      stage3D.frame = 0;
+      return;
+    }
+    if (pageActivity.ready) resumePageActivity();
+  };
+  window.addEventListener('focus', update);
+  window.addEventListener('blur', update);
+  window.addEventListener('layerlens-window-focus', update);
+  document.addEventListener('visibilitychange', update);
+}
+
+async function resumePageActivity() {
+  const generation = pageActivity.generation;
+  try { await loadTargets(); } catch (_) { /* 下一次轮询再试 */ }
+  if (!pageActivity.active || generation !== pageActivity.generation) return;
+  renderTargetMenu();
+  syncLive();
+  if (state.mode !== 'live' && targets.bundleId && pageActivity.pending) {
+    pageActivity.pending = false;
+    refresh();
+  }
+}
+
 // MARK: - Network
 
 async function api(path, options) {
@@ -456,6 +501,7 @@ function resetImages() {
   images.loaded.clear();
 }
 function pumpImages() {
+  if (!pageActivity.active) return;
   while (images.running < images.max && images.pending.length) {
     const job = images.pending.shift();
     const gen = images.gen;
@@ -579,13 +625,20 @@ function expandToSelected() {
 // 连续刷新时只采用最后一次请求的结果, 避免较早的响应晚到覆盖新层级
 let refreshSeq = 0;
 async function refresh() {
+  if (!pageActivity.active) { pageActivity.pending = true; return; }
+  pageActivity.pending = false;
+  pageActivity.controller?.abort();
+  const controller = new AbortController();
+  pageActivity.controller = controller;
   const seq = ++refreshSeq;
   try {
-    const roots = await api('/api/hierarchy');
-    if (seq !== refreshSeq) return;
+    const roots = await api('/api/hierarchy', { signal: controller.signal });
+    if (seq !== refreshSeq || !pageActivity.active) return;
     applyHierarchy(roots);
   } catch (e) {
-    showRefreshError(e);
+    if (seq === refreshSeq && e.name !== 'AbortError') showRefreshError(e);
+  } finally {
+    if (pageActivity.controller === controller) pageActivity.controller = null;
   }
 }
 
@@ -1621,6 +1674,7 @@ function liveSupported() {
 // 实时画面只取决于当前设备是否为运行中的模拟器(在 Mac App 的设备列表中), 与 App 是否运行、是否响应无关;
 // 加载时和每次刷新设备列表后调用, 模拟器关闭时断开, 重新启动后自动连上
 async function syncLive() {
+  if (!pageActivity.active) return;
   const device = currentDevice();
   const udid = device?.kind === 'simulator' ? device.id : '';
   // 真机也显示按钮, 置灰并说明原因
@@ -1655,7 +1709,7 @@ async function syncLive() {
 }
 
 function liveStart() {
-  if (live.ws || !liveAvailable()) return;
+  if (!pageActivity.active || live.ws || !liveAvailable()) return;
   clearTimeout(live.retryTimer);
   layoutLive();
   if (typeof VideoDecoder === 'undefined') {
@@ -2756,15 +2810,15 @@ async function probeCurrentBackground() {
 const foregroundCheck = { running: false };
 
 async function checkForeground() {
-  if (foregroundCheck.running) return;
+  if (!pageActivity.active || foregroundCheck.running) return;
   foregroundCheck.running = true;
   try {
-    for (let attempt = 0; attempt < 15 && currentAppAway(); attempt++) {
+    for (let attempt = 0; attempt < 15 && pageActivity.active && currentAppAway(); attempt++) {
       try {
         await loadTargets();
         // 只认直接询问得到的实时状态, 列表中的前台标记可能过期, 会在两个 App 间来回切换
         const next = await probeForeground();
-        if (next && currentAppAway()) {
+        if (next && pageActivity.active && currentAppAway()) {
           followForeground(next);
           return;
         }
@@ -2801,8 +2855,10 @@ function nextTarget() {
 // 定时刷新设备列表, 设备或 App 出现时自动连接
 function pollTargets() {
   setTimeout(async () => {
+    if (!pageActivity.active) { pollTargets(); return; }
     try {
       await loadTargets();
+      if (!pageActivity.active) { pollTargets(); return; }
       renderTargetMenu();
       syncLive();
       // 选中的设备断开或连回时更新提示
@@ -2838,7 +2894,7 @@ const OFFLINE_GRACE_MS = 4000;
 function watchApp() {
   appState.source?.close();
   const key = logTargetKey();
-  const source = new EventSource(targetBase() + '/api/events');
+  const source = new LayerLensEventSource(targetBase() + '/api/events');
   appState.source = source;
   const active = () => appState.source === source && logTargetKey() === key;
   source.onopen = () => {
@@ -3565,6 +3621,7 @@ function setupLayout() {
 // MARK: - Detail
 
 async function loadDetail() {
+  if (!pageActivity.active) { pageActivity.pending = true; return; }
   const node = state.nodes.get(state.selected);
   if (!node) {
     $('detail').replaceChildren(el('div', 'empty', t('选择一个视图')));
@@ -3579,7 +3636,7 @@ async function loadDetail() {
   if (!node.oid) return;
   try {
     const detail = await api(`/api/detail?oid=${node.oid}`);
-    if (state.selected !== node.key) return;
+    if (!pageActivity.active || state.selected !== node.key) return;
     state.detail = detail;
     renderDetail(node);
   } catch (e) {
@@ -3937,6 +3994,7 @@ async function modify(node, attr, value) {
 // MARK: - Class info
 
 async function loadClassInfo(node) {
+  if (!pageActivity.active) { pageActivity.pending = true; return; }
   const target = state.classTarget || { oid: node.viewOid || node.oid, name: node.cls };
   const container = $('detail');
   if (!target.oid) {
@@ -3946,7 +4004,7 @@ async function loadClassInfo(node) {
   container.replaceChildren(el('div', 'empty', t('加载中...')));
   try {
     const info = await api(`/api/class?oid=${target.oid}`);
-    if (state.selected !== node.key || state.tab !== 'class') return;
+    if (!pageActivity.active || state.selected !== node.key || state.tab !== 'class') return;
     renderClassInfo(info, node);
   } catch (e) {
     container.replaceChildren(el('div', 'empty', e.message));
@@ -4938,7 +4996,7 @@ function logConnect() {
   if (!logs.key) return;
   logs.loading = true;
   const query = `device=${encodeURIComponent(targets.deviceId)}&app=${encodeURIComponent(targets.bundleId)}`;
-  const es = new EventSource(`/api/hub/app-logs/stream?${query}`);
+  const es = new LayerLensEventSource(`/api/hub/app-logs/stream?${query}`);
   const parse = (e) => {
     try {
       return JSON.parse(e.data) || {};
@@ -5990,7 +6048,7 @@ async function netConnect() {
     }
   }
   syncNetCapture();
-  const es = new EventSource(`${targetBase()}/api/network?${new URLSearchParams(netSessionParams({ since: net.resync ? 0 : net.seq }))}`);
+  const es = new LayerLensEventSource(`${targetBase()}/api/network?${new URLSearchParams(netSessionParams({ since: net.resync ? 0 : net.seq }))}`);
   net.resync = false;
   const parse = (e) => {
     try {
@@ -6034,7 +6092,7 @@ async function netConnect() {
       scheduleNetRender();
       return;
     }
-    if (token === net.token && es.readyState === EventSource.CLOSED) {
+    if (token === net.token && es.readyState === LayerLensEventSource.CLOSED) {
       setTimeout(() => {
         if (token === net.token && net.active) netConnect();
       }, NET_RETRY_MS);
@@ -6416,7 +6474,7 @@ async function loadNetDetail(id) {
   }
 }
 
-// 头部显示 URL 摘要, 截断时可跳到请求中的完整 URL
+// 头部显示 URL 摘要, 截断时原地展开完整内容
 function netDetailHead(record) {
   const ready = !!record && net.detail?.id === record.id;
   const key = JSON.stringify(record ? [record.id, record.url, record.method, record.status, record.state, record.error] : null);
@@ -6461,18 +6519,29 @@ function netDetailHead(record) {
     show.setAttribute('aria-label', t('点击查看完整 URL'));
     show.appendChild(icon('chevron-down'));
     show.hidden = true;
+    show.setAttribute('aria-expanded', 'false');
+    const copy = el('button', 'icon-btn net-detail-url-copy');
+    copy.title = t('复制 URL');
+    copy.setAttribute('aria-label', t('复制 URL'));
+    copy.appendChild(icon('copy'));
+    copy.hidden = true;
+    copy.addEventListener('click', () => copyText(record.url, '复制 URL'));
+    let expanded = false;
     show.addEventListener('click', () => {
-      if (net.detail?.id !== record.id) return;
-      net.detailTab = 'request';
-      renderNetDetail();
-      const full = $('netDetail').querySelector('.net-detail-full-url');
-      full?.focus({ preventScroll: true });
-      full?.scrollIntoView({ block: 'center', inline: 'nearest' });
+      expanded = !expanded;
+      head.classList.toggle('url-expanded', expanded);
+      show.setAttribute('aria-expanded', String(expanded));
+      const label = t(expanded ? '点击收起完整 URL' : '点击查看完整 URL');
+      show.title = label;
+      show.setAttribute('aria-label', label);
+      show.replaceChildren(icon(expanded ? 'chevron-up' : 'chevron-down'));
+      copy.hidden = !expanded;
+      syncURL();
     });
-    url.append(text, show);
+    url.append(text, show, copy);
     title.append(el('span', 'net-method', record.method), netStatusCell(record), url);
-    // 以按钮隐藏时的可用宽度判断, 避免按钮自身占宽导致反复显隐.
-    const syncURL = () => { show.hidden = text.scrollWidth <= url.clientWidth + 1; };
+    // 展开时保留收起入口; 收起时按完整可用宽度判断是否需要展开按钮.
+    const syncURL = () => { show.hidden = !expanded && text.scrollWidth <= url.clientWidth + 1; };
     const observer = new ResizeObserver(syncURL);
     observer.observe(url);
     top.syncURL = syncURL;
@@ -7187,6 +7256,7 @@ function setupFindKey() {
 // MARK: - Setup
 
 function setup() {
+  setupPageActivity();
   if (new URLSearchParams(location.search).get('view') === 'logs') {
     setupLogsWindow();
     return;
@@ -7414,6 +7484,7 @@ async function start() {
   } catch (e) {
     toast(t('无法连接 LayerLens: {0}', e.message), true);
   }
+  pageActivity.ready = true;
   migrateTargetHistory();
   pickTarget();
   const device = currentDevice();

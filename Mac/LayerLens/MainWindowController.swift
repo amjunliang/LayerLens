@@ -13,6 +13,7 @@ import WebKit
 final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
     private let url: URL
     private var webView: WKWebView!
+    private var focusObservers: [NSObjectProtocol] = []
     private var loaded = false
     /// 首次加载完成后才显示窗口, 避免看到空白页面
     private var waitingFirstLoad = false
@@ -58,6 +59,11 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
         // 不绘制默认的白色背景, 网页绘制前透出窗口底色
         webView.setValue(false, forKey: "drawsBackground")
         window.contentView = webView
+        focusObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                self?.syncWindowFocus()
+            }
+        }
         applyTheme(UserDefaults.standard.string(forKey: Self.themeKey) ?? "auto")
         // 跟随系统外观时, 系统切换深浅色后同步更新底色
         appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
@@ -65,6 +71,15 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
                 self?.updateBackgroundColor()
             }
         }
+    }
+
+    deinit {
+        focusObservers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    private func syncWindowFocus() {
+        let focused = window?.isKeyWindow == true
+        webView.evaluateJavaScript("window.LAYERLENS_WINDOW_FOCUSED = \(focused ? "true" : "false"); window.dispatchEvent(new Event('layerlens-window-focus'));", completionHandler: nil)
     }
 
     required init?(coder: NSCoder) {
@@ -170,6 +185,7 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === self.webView else { return }
         finishFirstLoad()
+        syncWindowFocus()
         if let panel = pendingPanel {
             pendingPanel = nil
             openPanel(panel)

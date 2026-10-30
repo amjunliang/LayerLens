@@ -136,7 +136,7 @@ function syncGitPanel() {
   if (visible && !git.active) {
     git.active = true;
     clearTimeout(git.idleTimer);
-    if (!git.es || git.es.readyState === EventSource.CLOSED || (targets.bundleId || '') !== git.key) gitConnect();
+    if (!git.es || git.es.readyState === LayerLensEventSource.CLOSED || (targets.bundleId || '') !== git.key) gitConnect();
     // 同一窗口切换 App 时重新连接
     git.timer = setInterval(() => {
       if ((targets.bundleId || '') !== git.key) gitConnect();
@@ -189,7 +189,7 @@ async function gitConnect() {
 }
 
 function gitSubscribe(key) {
-  const es = new EventSource(`/api/hub/git/events?app=${encodeURIComponent(key)}`);
+  const es = new LayerLensEventSource(`/api/hub/git/events?app=${encodeURIComponent(key)}`);
   git.es = es;
   es.addEventListener('status', (e) => {
     if (git.es !== es) return;
@@ -197,7 +197,7 @@ function gitSubscribe(key) {
   });
   // LayerLens 重启等原因断开且不再重连时, 稍后重新连接
   es.onerror = () => {
-    if (es.readyState !== EventSource.CLOSED) return;
+    if (es.readyState !== LayerLensEventSource.CLOSED) return;
     setTimeout(() => {
       if (git.es === es && git.active) gitConnect();
     }, GIT_RETRY_MS);
