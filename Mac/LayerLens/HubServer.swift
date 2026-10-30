@@ -24,6 +24,7 @@ final class HubServer {
     let registry: TargetRegistry
     private let xcode = XcodeController()
     private let live = SimulatorLive()
+    private let deviceLive = DeviceLive()
     private let appLogs = AppLogRecorder()
     private let network: NetworkRecorder
     private let git = GitController()
@@ -124,6 +125,14 @@ final class HubServer {
             proxyToApp(head, leftover: leftover, connection: connection)
             return
         }
+        if head.path.hasPrefix("/device/") {
+            let parts = head.path.split(separator: "/").map(String.init)
+            guard parts.count == 3, head.method == "GET", parts[2] == "stream", parts[1].allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else {
+                connection.respond(.error(404, "Not Found")); return
+            }
+            deviceLive.accept(udid: parts[1], head: head, leftover: leftover, connection: connection)
+            return
+        }
         if head.path.hasPrefix("/sim/") {
             handleSimulator(head, leftover: leftover, connection: connection)
             return
@@ -150,6 +159,7 @@ final class HubServer {
         case "/api/targets":
             var hubInfo: [String: Any] = ["version": Self.version, "apiVersion": Self.apiVersion, "live": SimulatorLive.isAvailable]
             hubInfo["liveError"] = SimBridge.loadError
+            hubInfo["deviceLive"] = DeviceLive.isAvailable
             registry.snapshot { devices, simulators, history in
                 connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators, "history": history]))
             }

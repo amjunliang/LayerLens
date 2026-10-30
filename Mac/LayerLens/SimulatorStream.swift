@@ -379,6 +379,10 @@ final class SimulatorStream {
         guard let data = text.data(using: .utf8),
               let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = message["type"] as? String else { return }
+        if type == "release" {
+            releaseTouch(of: id)
+            return
+        }
         if type == "orientation" {
             let value = (message["value"] as? NSNumber)?.uint32Value ?? 0
             queue.async { [weak self] in self?.setOrientation(value) }

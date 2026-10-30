@@ -18,6 +18,10 @@
 @interface LLEListViewController () <UITableViewDataSource>
 
 @property (nonatomic, strong) UIView *headerCard;
+@property (nonatomic, strong) UILabel *captureLabel;
+@property (nonatomic, strong) NSTimer *captureTimer;
+@property (nonatomic, strong) NSMutableArray *captureEvents;
+@property (nonatomic, copy) NSDictionary *lastCaptureState;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIButton *actionButton;
 @property (nonatomic, strong) UIButton *requestButton;
@@ -60,6 +64,22 @@
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.headerCard addSubview:stack];
 
+    self.captureLabel = [[UILabel alloc] init];
+    self.captureLabel.numberOfLines = 0;
+    self.captureLabel.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    self.captureLabel.textColor = UIColor.whiteColor;
+    [stack addArrangedSubview:self.captureLabel];
+    self.captureEvents = [NSMutableArray array];
+    if (@available(iOS 17.0, *)) {
+        [self registerForTraitChanges:@[UITraitSceneCaptureState.class] withTarget:self action:@selector(captureStateChanged)];
+    }
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(captureStateChanged) name:UIScreenCapturedDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(captureStateChanged) name:UIApplicationDidBecomeActiveNotification object:nil];
+    __weak typeof(self) weakSelf = self;
+    self.captureTimer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf sampleCaptureState:@"poll"];
+    }];
+
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.tableView.dataSource = self;
     [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"cell"];
@@ -82,7 +102,45 @@
     ]];
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    UIApplication.sharedApplication.idleTimerDisabled = YES;
+    [self sampleCaptureState:@"appear"];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
+}
+
+- (void)captureStateChanged { [self sampleCaptureState:@"notification-or-trait"]; }
+
+- (void)sampleCaptureState:(NSString *)reason {
+    UIScreen *screen = self.view.window.windowScene.screen ?: UIScreen.mainScreen;
+    NSInteger viewState = -1, windowState = -1, sceneState = -1;
+    if (@available(iOS 17.0, *)) {
+        viewState = self.traitCollection.sceneCaptureState;
+        windowState = self.view.window.traitCollection.sceneCaptureState;
+        sceneState = self.view.window.windowScene.traitCollection.sceneCaptureState;
+    }
+    NSDictionary *state = @{@"view": @(viewState), @"window": @(windowState), @"scene": @(sceneState), @"screenCaptured": @(screen.isCaptured)};
+    self.captureLabel.text = [NSString stringWithFormat:@"Capture API (0=inactive, 1=active)\nview=%ld window=%ld scene=%ld\nUIScreen.isCaptured=%@", (long)viewState, (long)windowState, (long)sceneState, screen.isCaptured ? @"YES" : @"NO"];
+    if (![state isEqual:self.lastCaptureState] || ![reason isEqual:@"poll"]) {
+        [self.captureEvents addObject:@{@"time": @(NSDate.date.timeIntervalSince1970), @"reason": reason, @"state": state}];
+        if (self.captureEvents.count > 500) [self.captureEvents removeObjectAtIndex:0];
+        LLELog(@"Capture probe %@: %@", reason, state);
+        self.lastCaptureState = state;
+    }
+    NSDictionary *report = @{@"updatedAt": @(NSDate.date.timeIntervalSince1970), @"state": state, @"events": self.captureEvents, @"systemVersion": UIDevice.currentDevice.systemVersion};
+    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil];
+    [data writeToURL:[documents URLByAppendingPathComponent:@"capture-probe.json"] atomically:YES];
+}
+
+- (void)dealloc { [self.captureTimer invalidate]; [NSNotificationCenter.defaultCenter removeObserver:self]; }
+
 - (void)toggleColor {
+    [self sampleCaptureState:@"button-touch"];
     BOOL indigo = [self.headerCard.backgroundColor isEqual:UIColor.systemIndigoColor];
     self.headerCard.backgroundColor = indigo ? UIColor.systemTealColor : UIColor.systemIndigoColor;
     // 日志显示在 LayerLens 的日志面板中

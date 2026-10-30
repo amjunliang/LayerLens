@@ -16,6 +16,10 @@ targets:
       - path: ../Web
         type: folder
         buildPhase: resources
+    postBuildScripts:
+      - name: Build DeviceBridge
+        script: 'bash "$SRCROOT/DeviceBridge/build-runtime.sh"'
+        basedOnDependencyAnalysis: false
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
@@ -30,5 +34,5 @@ targets:
         INFOPLIST_FILE: LayerLens/Info.plist
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
-        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         CODE_SIGN_ENTITLEMENTS: LayerLens/LayerLens.entitlements

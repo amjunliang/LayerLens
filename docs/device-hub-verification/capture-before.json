@@ -1,0 +1,72 @@
+{
+  "systemVersion" : "27.0.1",
+  "state" : {
+    "screenCaptured" : false,
+    "view" : 0,
+    "scene" : 0,
+    "window" : 0
+  },
+  "updatedAt" : 1793364550.8902049,
+  "events" : [
+    {
+      "state" : {
+        "screenCaptured" : true,
+        "view" : 1,
+        "scene" : 1,
+        "window" : 1
+      },
+      "time" : 1793364539.9092431,
+      "reason" : "appear"
+    },
+    {
+      "state" : {
+        "screenCaptured" : true,
+        "view" : 1,
+        "scene" : 1,
+        "window" : 1
+      },
+      "time" : 1793364539.912827,
+      "reason" : "notification-or-trait"
+    },
+    {
+      "state" : {
+        "screenCaptured" : true,
+        "view" : 1,
+        "scene" : 1,
+        "window" : 1
+      },
+      "time" : 1793364540.3849859,
+      "reason" : "notification-or-trait"
+    },
+    {
+      "state" : {
+        "screenCaptured" : true,
+        "view" : 1,
+        "scene" : 1,
+        "window" : 1
+      },
+      "time" : 1793364543.7136941,
+      "reason" : "notification-or-trait"
+    },
+    {
+      "state" : {
+        "screenCaptured" : false,
+        "view" : 1,
+        "scene" : 1,
+        "window" : 1
+      },
+      "time" : 1793364543.7187171,
+      "reason" : "notification-or-trait"
+    },
+    {
+      "state" : {
+        "screenCaptured" : false,
+        "view" : 0,
+        "scene" : 0,
+        "window" : 0
+      },
+      "time" : 1793364543.7227221,
+      "reason" : "notification-or-trait"
+    }
+  ]
+}

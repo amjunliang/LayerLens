@@ -129,3 +129,24 @@ Press `?` for the full list. The common ones:
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Experimental physical-device live control
+
+Live is offered for every connected device without version-based gating. Capture
+is attempted on entry; failures show the reason and a Retry button. The verified
+physical-device combination is iOS 27, macOS 27 and Xcode 27. Pair and trust the Mac, enable Developer
+Mode, ensure the developer disk image is available, and unlock the device. Select
+the device or its app, then open Live. Single-finger input, Home, App Switcher,
+keyboard keys and text paste are implemented for testing. Option-click inspection
+requires the integrated app in the foreground. Rotate the phone itself; the
+physical-device rotation button is disabled.
+
+A separate GUI-session helper forwards the device’s original compressed video
+frames and decoder configuration (HEVC on the tested phone) to WebCodecs. The Mac
+backend does not decode or re-encode video. Encoder padding is cropped when
+drawing in the browser; the browser must support the device’s codec. Viewers share one device session;
+slow viewers drop frames. Idle physical-device sessions are retained for 30 seconds
+so switching back can reuse the stream. Sessions retain upstream's 1-hour / 8192-input limit.
+After a failure, switch to 2D and back to Live to retry. This uses private Apple
+ABI and is experimental. Source attribution and the MIT license are included in
+`Mac/DeviceBridge/`.

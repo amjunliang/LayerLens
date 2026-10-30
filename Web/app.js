@@ -256,6 +256,7 @@ function liveCanvasPNG() {
 
 // 屏幕截图(画布右键菜单): 实时模式取模拟器原始分辨率截图(画面按显示尺寸缩小编码), 取不到时用当前画面; 2D/3D 取当前窗口的 App 截图
 function screenShotPNG() {
+  if (state.mode === 'live' && live.real) return liveCanvasPNG();
   if (state.mode === 'live') return fetchPNG(`/sim/${encodeURIComponent(live.udid)}/screenshot`).catch(liveCanvasPNG);
   const win = currentWindow();
   return win ? fetchPNG(shotURL(win.oid, 'group')) : Promise.reject(new Error(t('暂无画面')));
@@ -417,7 +418,7 @@ function hideMenu() {
   hideLayer(menu, 120, () => menu.remove());
 }
 
-// 严格焦点模式: 只暂停页面的视图采集和播放, Hub 的日志/抓包/终端继续运行。
+// 失焦时暂停层级与舞台刷新；实时连接保留，解码后只保留最新一帧。
 const pageActivity = { active: false, ready: false, pending: false, controller: null, generation: 0 };
 
 function pageHasFocus() {
@@ -437,13 +438,14 @@ function setupPageActivity() {
       ++refreshSeq;
       pageActivity.controller?.abort();
       resetImages();
-      liveStop();
+      liveSuspend();
       if (stage3D.frame) cancelAnimationFrame(stage3D.frame);
       stage3D.frame = 0;
       return;
     }
     if (pageActivity.ready) resumePageActivity();
   };
+  window.addEventListener('pagehide', () => liveStop());
   window.addEventListener('focus', update);
   window.addEventListener('blur', update);
   window.addEventListener('layerlens-window-focus', update);
@@ -1040,7 +1042,7 @@ async function setMode(mode) {
     else fitView();
     return;
   }
-  liveStop();
+  liveSuspend();
   if (roots) applyHierarchy(roots);
   else renderCanvas();
   if (keepView) applyStageTransform();
@@ -1647,11 +1649,15 @@ const LIVE_ROTATE_LEFT = { 1: 3, 3: 2, 2: 4, 4: 1 };
 const LIVE_KEY_CODE = /^(Key[A-Z]|Digit\d|Enter|Backspace|Tab|Space|Arrow(Up|Down|Left|Right)|Minus|Equal|Bracket(Left|Right)|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash)$/;
 const live = {
   udid: '',
+  real: false,
+  error: '',
   screen: [0, 0],
   ws: null,
   decoder: null,
   retryTimer: 0,
   connected: false,
+  hasFrame: false,
+  pendingFrame: null,
   inspect: false,
   altHeld: false,
   touch: null,
@@ -1668,27 +1674,28 @@ function liveAvailable() {
 
 // Mac App 加载 Xcode 的模拟器私有框架失败时为 false
 function liveSupported() {
-  return targets.hub?.live !== false;
+  return live.real || targets.hub?.live !== false;
 }
 
-// 实时画面只取决于当前设备是否为运行中的模拟器(在 Mac App 的设备列表中), 与 App 是否运行、是否响应无关;
-// 加载时和每次刷新设备列表后调用, 模拟器关闭时断开, 重新启动后自动连上
+// 所有已连接设备都显示实时入口，采集能力由实际连接结果决定。
 async function syncLive() {
   if (!pageActivity.active) return;
   const device = currentDevice();
-  const udid = device?.kind === 'simulator' ? device.id : '';
-  // 真机也显示按钮, 置灰并说明原因
-  const realDevice = !!device && !udid;
-  $('liveModeBtn').hidden = !udid && !realDevice;
-  $('liveModeBtn').classList.toggle('unavailable', realDevice);
-  $('liveModeBtn').title = realDevice ? t('真机不支持实时画面') : t('模拟器实时画面');
+  const physical = device?.kind === 'device';
+  const udid = device?.id || '';
+  $('liveModeBtn').hidden = false;
+  $('liveModeBtn').classList.remove('unavailable');
+  $('liveModeBtn').title = physical ? '真机实时画面（实验性）' : t('模拟器实时画面');
+  $('liveRotate').disabled = physical;
   document.body.classList.toggle('has-live', !!udid);
   if (udid !== live.udid) {
     liveStop();
     live.udid = udid;
+    live.real = physical;
+    live.error = '';
     if (udid) {
       try {
-        const info = await fetch(`/sim/${encodeURIComponent(udid)}/info`).then((r) => r.json());
+        const info = physical ? { screen: { width: 402, height: 874 } } : await fetch(`/sim/${encodeURIComponent(udid)}/info`).then((r) => r.json());
         live.screen = [info.screen.width, info.screen.height];
       } catch (e) {
         // 查询失败时用常见尺寸, 只影响画面比例, 触摸按比例换算不受影响
@@ -1700,17 +1707,17 @@ async function syncLive() {
   if (state.mode !== 'live') return;
   if (udid) {
     liveStart();
-  } else if (realDevice) {
-    // 真机不支持实时画面, 回到 2D
-    setMode('2d');
   } else {
-    showLiveGuide(t('模拟器未运行'));
+    showLiveGuide(t('请先选择设备'));
   }
 }
 
 function liveStart() {
-  if (!pageActivity.active || live.ws || !liveAvailable()) return;
+  if (!pageActivity.active || !liveAvailable()) return;
+  if (live.ws) { liveResume(); return; }
   clearTimeout(live.retryTimer);
+  live.error = '';
+  live.frames = 0;
   layoutLive();
   if (typeof VideoDecoder === 'undefined') {
     showLiveGuide(t('当前浏览器不支持 WebCodecs, 请使用 Chrome 或 Safari'), false);
@@ -1720,13 +1727,19 @@ function liveStart() {
     showLiveGuide();
     return;
   }
-  const ws = new WebSocket(`ws://${location.host}/sim/${encodeURIComponent(live.udid)}/stream`);
+  showLiveGuide();
+  const ws = new WebSocket(`ws://${location.host}/${live.real ? 'device' : 'sim'}/${encodeURIComponent(live.udid)}/stream`);
   ws.binaryType = 'arraybuffer';
   live.ws = ws;
+  if (live.real) live.startTimer = setTimeout(() => {
+    if (live.ws !== ws) return;
+    live.error = LANG === 'en' ? 'Unable to capture the device screen. Check the connection, unlock the device, then retry.' : '无法获取设备画面，请确认设备已连接并解锁后重试。';
+    liveStop();
+    showLiveGuide(live.error);
+  }, 5000);
   ws.onopen = () => {
-    if (live.ws !== ws || !pageActivity.active) return;
+    if (live.ws !== ws) return;
     live.connected = true;
-    $('liveGuide').hidden = true;
     liveReportSize(true);
     if (live.restartOnOpen) {
       live.restartOnOpen = false;
@@ -1734,11 +1747,12 @@ function liveStart() {
     }
   };
   ws.onmessage = (e) => {
-    if (live.ws !== ws || !pageActivity.active) return;
+    if (live.ws !== ws) return;
     if (e.data instanceof ArrayBuffer) {
       const buf = new Uint8Array(e.data);
       feedLiveFrame(buf);
       live.frames++;
+
       // 0x02 关键帧: 手动修复后收到即画面已恢复
       if (live.restoring && buf[0] === 0x02) liveRestored();
       return;
@@ -1746,6 +1760,12 @@ function liveStart() {
     // 方向由 Mac App 记录并广播, 多个页面保持一致
     try {
       const message = JSON.parse(e.data);
+      if (message.type === 'geometry') {
+        live.screen = [message.width, message.height]; live.orientation = message.orientation; layoutLive();
+      }
+      if (message.type === 'error' || message.type === 'status') {
+        if (message.type === 'error') { live.error = message.detail; showLiveGuide(message.detail); }
+      }
       if (message.type === 'orientation' && LIVE_ROTATION[message.value] !== undefined) {
         live.orientation = message.value;
         layoutLive();
@@ -1759,13 +1779,37 @@ function liveStart() {
     const wasConnected = live.connected;
     liveStop();
     if (state.mode !== 'live') return;
-    showLiveGuide(wasConnected ? t('实时画面连接已断开') : '');
-    live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
+    if (live.real && !wasConnected && !live.error) live.error = LANG === 'en' ? 'Unable to connect to the device screen. Please retry.' : '无法连接设备画面，请重试。';
+    showLiveGuide(live.error || (wasConnected ? t('实时画面连接已断开') : ''));
+    if (!(live.real && live.error)) live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
 }
 
+// 离开实时页或失焦只释放输入，保留传输和解码状态。
+function liveSuspend() {
+  if (live.touch) clearTimeout(live.touch.timer);
+  live.touch = null;
+  liveSend({ type: 'release' });
+}
+
+function liveResume() {
+  layoutLive();
+  if (!pageActivity.active || state.mode !== 'live') return;
+  if (live.pendingFrame) {
+    const frame = live.pendingFrame;
+    live.pendingFrame = null;
+    paintLive(frame);
+  }
+  if (live.hasFrame) $('liveGuide').hidden = true;
+}
+
 function liveStop() {
+  liveSuspend();
+  live.pendingFrame?.close?.();
+  live.pendingFrame = null;
+  live.hasFrame = false;
   clearTimeout(live.retryTimer);
+  clearTimeout(live.startTimer);
   if (live.ws) {
     const ws = live.ws;
     live.ws = null;
@@ -1784,6 +1828,7 @@ function liveStop() {
     live.decoder = null;
   }
   live.connected = false;
+  live.rawGeometry = null;
   live.touch = null;
 }
 
@@ -1791,22 +1836,68 @@ function liveStop() {
 function showLiveGuide(title) {
   const supported = liveSupported();
   $('liveGuide').hidden = false;
-  $('liveGuideTitle').textContent = title || (supported ? t('正在连接实时画面…') : t('无法加载 Xcode 的模拟器框架'));
+  $('liveLoading').hidden = !!title || !!live.error || !supported || !liveAvailable();
+  $('liveRetry').hidden = !(live.real && live.error);
+  $('liveRetry').textContent = LANG === 'en' ? 'Retry' : '重试';
+  if (live.real && live.error) {
+    $('liveGuideTitle').textContent = LANG === 'en' ? 'Unable to capture device screen' : '无法获取设备画面';
+    $('liveError').hidden = false;
+    $('liveError').textContent = live.error;
+    $('liveWaiting').hidden = true;
+    return;
+  }
+  $('liveGuideTitle').textContent = title || (supported ? (LANG === 'en' ? 'Loading screen…' : '正在加载画面…') : t('无法加载 Xcode 的模拟器框架'));
   $('liveError').hidden = supported;
   $('liveError').textContent = supported ? '' : `${t('请确认已安装 Xcode, 并用 xcode-select 选中它')}\n${targets.hub?.liveError || ''}`;
   $('liveWaiting').hidden = !supported;
 }
 
-// 帧格式: 1 字节类型 + 数据. 0x01 解码配置, 0x02 关键帧, 0x03 增量帧, 0x04 首个关键帧前的 JPEG 占位图
+// 1 字节类型 + 数据: 模拟器 01=avcC, 02/03=H.264, 04=JPEG 占位; 真机 05=配置 JSON, 06/07=关键帧/增量帧(8 字节微秒时间戳 + 原始压缩数据).
 function feedLiveFrame(buf) {
   const type = buf[0];
   const payload = buf.slice(1);
   const socket = live.ws;
   const onFrame = (frame) => {
-    if (live.ws !== socket || !pageActivity.active) { frame.close?.(); return; }
+    if (live.ws !== socket) { frame.close?.(); return; }
+    clearTimeout(live.startTimer);
+    live.hasFrame = true;
+    live.error = '';
+    live.pendingFrame?.close?.();
+    live.pendingFrame = null;
+    if (!pageActivity.active || state.mode !== 'live') {
+      live.pendingFrame = frame;
+      return;
+    }
     paintLive(frame);
+    $('liveGuide').hidden = true;
   };
-  if (type === 0x01) {
+  if (type === 0x05) {
+    const metadata = JSON.parse(new TextDecoder().decode(payload));
+    if (live.decoder) live.decoder.close();
+    const description = Uint8Array.from(atob(metadata.description), (c) => c.charCodeAt(0));
+    live.decoder = new VideoDecoder({ output: onFrame, error: (e) => {
+      live.error = e.message; showLiveGuide(e.message);
+    }});
+    try {
+      live.decoder.configure({ codec: metadata.codec, description,
+        codedWidth: metadata.codedWidth, codedHeight: metadata.codedHeight,
+        optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+    } catch (e) {
+      live.error = `Video decoder (${metadata.codec}): ${e.message}`;
+      showLiveGuide(live.error);
+      return;
+    }
+    live.rawGeometry = metadata;
+    live.screen = [metadata.width, metadata.height];
+    live.orientation = metadata.orientation;
+    layoutLive();
+  } else if ((type === 0x06 || type === 0x07) && live.decoder?.state === 'configured') {
+    if (payload.length < 8) return;
+    const timestamp = Number(new DataView(payload.buffer, payload.byteOffset, 8).getBigUint64(0));
+    try {
+      live.decoder.decode(new EncodedVideoChunk({ type: type === 6 ? 'key' : 'delta', timestamp, data: payload.subarray(8) }));
+    } catch (e) { live.error = e.message; showLiveGuide(e.message); }
+  } else if (type === 0x01) {
     if (live.decoder) live.decoder.close();
     live.decoder = new VideoDecoder({ output: onFrame, error: (e) => console.warn('live decoder:', e.message) });
     const hex = (b) => b.toString(16).padStart(2, '0');
@@ -1825,7 +1916,8 @@ function feedLiveFrame(buf) {
       // 丢帧, 等下一个关键帧
     }
   } else if (type === 0x04) {
-    createImageBitmap(new Blob([payload], { type: 'image/jpeg' })).then(onFrame).catch(() => {});
+    const serial = live.jpegSerial = (live.jpegSerial || 0) + 1;
+    createImageBitmap(new Blob([payload], { type: 'image/jpeg' })).then((frame) => { if (serial !== live.jpegSerial) frame.close(); else onFrame(frame); }).catch(() => {});
   }
 }
 
@@ -1836,11 +1928,14 @@ function paintLive(frame) {
     const canvas = $('liveCanvas');
     const w = frame.displayWidth || frame.width;
     const h = frame.displayHeight || frame.height;
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+    const native = live.real ? live.rawGeometry : null;
+    const width = native?.width || w, height = native?.height || h;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
     }
-    canvas.getContext('2d').drawImage(frame, 0, 0);
+    if (native) canvas.getContext('2d').drawImage(frame, 0, 0, Math.min(width, w), Math.min(height, h), 0, 0, width, height);
+    else canvas.getContext('2d').drawImage(frame, 0, 0);
   } finally {
     // 包括绘制失败、失焦以及已断开的帧, 都必须归还解码/GPU 资源。
     frame.close?.();
@@ -1859,7 +1954,9 @@ function layoutLive() {
   const scale = Math.min(width / fw, height / fh) * planFitRatio() * state.zoom;
   canvas.style.width = sw * scale + 'px';
   canvas.style.height = sh * scale + 'px';
-  canvas.style.borderRadius = LIVE_CORNER * scale + 'px';
+  // 模拟器尺寸为 point，真机尺寸为像素：将同一圆角半径换算到各自坐标单位。
+  const cornerScale = live.real ? (live.rawGeometry?.pointScale || 1) : 1;
+  canvas.style.borderRadius = LIVE_CORNER * cornerScale * scale + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
   if (live.connected) liveReportSize();
 }
@@ -1880,6 +1977,7 @@ function checkLiveDrag(touch) {
 }
 
 function showLiveHeal() {
+  if (live.real) return;
   if (live.healing) return;
   $('liveHeal').dataset.state = 'warn';
   $('liveHealText').textContent = t('触摸似乎没有生效, 修复会结束前台 App');
@@ -1895,7 +1993,7 @@ function hideLiveHeal() {
 
 // 重启模拟器的 backboardd(连带 SpringBoard), 约 10 秒后界面恢复
 async function healLiveTouch() {
-  if (live.healing || !live.udid) return;
+  if (live.real || live.healing || !live.udid) return;
   live.healing = true;
   $('liveHeal').dataset.state = 'restarting';
   $('liveHealText').textContent = t('正在修复触摸, 模拟器桌面约 10 秒后恢复');
@@ -2332,7 +2430,7 @@ function activateSelectedAppLater(deviceId, bundleId, appName) {
   }, ACTIVATE_DEBOUNCE_MS);
 }
 
-// 切换设备会重新加载页面, 提示存到加载后再显示
+// 兼容旧页面重载时暂存的提示
 const PENDING_TOAST_KEY = 'layerlens_pending_toast';
 
 function showPendingToast() {
@@ -2346,15 +2444,27 @@ function showPendingToast() {
 }
 
 function switchTarget(deviceId, bundleId) {
-  // 重新加载后保持当前模式(如实时画面)和视角
   saveViewState();
-  try {
-    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId }));
-  } catch (e) {
-    // 不可用时只依赖地址参数
+  liveSuspend();
+  appState.source?.close();
+  appState.source = null;
+  clearTimeout(appState.offlineTimer);
+  appState.offlineTimer = 0;
+  appState.connected = false;
+  targets.deviceId = deviceId;
+  targets.bundleId = '';
+  targets.idle = false;
+  targets.hadDevice = !!currentDevice();
+  rememberTarget(deviceId, bundleId);
+  // 先连接设备画面，App 激活与层级请求独立进行，不再整页刷新。
+  syncLive();
+  if (bundleId) switchTargetInPlace(bundleId);
+  else {
+    ++appInfoSeq;
+    clearHierarchy();
+    connectInPlace(deviceId, '');
   }
-  const params = new URLSearchParams({ device: deviceId, app: bundleId });
-  location.search = params.toString();
+  renderTargetMenu();
 }
 
 const targetMenuUi = { offlineOpen: false };
@@ -2445,7 +2555,7 @@ function renderTargetMenu() {
 function targetDeviceRows(device, background) {
   const rows = [];
   // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
-  const selectable = device.kind === 'simulator';
+  const selectable = true;
   const head = el(selectable ? 'button' : 'div', 'target-device');
   // 真机名称是用户自定义的, 附上机型; 与名称相同(如模拟器)时不重复
   const model = device.model && device.model !== device.name ? device.model : '';
@@ -2459,7 +2569,8 @@ function targetDeviceRows(device, background) {
       if (device.id !== targets.deviceId || targets.bundleId) switchTarget(device.id, '');
     });
     const row = el('div', 'target-device-row');
-    row.append(head, simPowerButton(device.id, true));
+    row.append(head);
+    if (device.kind === 'simulator') row.append(simPowerButton(device.id, true));
     rows.push(row);
   } else {
     rows.push(head);
@@ -2530,60 +2641,26 @@ function targetAppRow(deviceId, app, background) {
       } catch (e) {
         // 不可用时照常跟随前台 App
       }
-      if (deviceId === targets.deviceId && targets.bundleId) {
+      if (deviceId === targets.deviceId) {
         switchTargetInPlace(app.bundleId);
         if (live) launchAwayApp(deviceId, app.bundleId, app.appName);
         return;
       }
-      // 切换设备会重新加载页面, 加载后再启动
-      if (live) {
-        try {
-          sessionStorage.setItem(PENDING_LAUNCH_KEY, deviceId + '|' + app.bundleId);
-        } catch (e) {
-          // 不可用时不启动
-        }
-      }
       switchTarget(deviceId, app.bundleId);
+      if (live) launchAwayApp(deviceId, app.bundleId, app.appName);
       return;
     }
     // 同一设备切 App 时先更新页面, 再在后台激活; 快速切换只会激活最后停留的 App
     if (live && (inBackground || away || !current)) {
-      if (deviceId === targets.deviceId && targets.bundleId) {
+      if (deviceId === targets.deviceId) {
         if (!current) switchTargetInPlace(app.bundleId, true, app.appName || app.bundleId);
         else setAppState('background', t('正在切换到 {0}…', app.appName || app.bundleId));
         activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
         return;
       }
-      // 跨设备需要重新加载页面, 仍先确认 App 可用, 避免新页面连到旧端口
-      // 激活要等 App 响应, 挂起的真机 App 要十几秒; 提示一直显示到结束, 期间可以切到别处
-      const job = { deviceId, bundleId: app.bundleId, controller: new AbortController(), action: 'switch' };
-      pendingSwitch = job;
-      toast(t('正在切换到 {0}…', app.appName || app.bundleId), false, false, true);
-      renderTargetMenu();
-      const result = await activateApp(deviceId, app.bundleId, job.controller.signal);
-      // 已被取消或被新的切换取代
-      if (pendingSwitch !== job) return;
-      pendingSwitch = null;
-      renderTargetMenu();
-      const { failure } = result;
-      // 启动失败(如设备锁屏)时仍然切过去, 查看 LayerLens 保存的日志和抓包
-      const hint = failure ? t('{0}. 显示的是保存在本机的日志和抓包', failure.replace(/[.。]$/, '')) : result.hint;
-      if (failure && !current) {
-        try {
-          sessionStorage.setItem(STAY_OFFLINE_KEY, deviceId + '|' + app.bundleId);
-        } catch (e) {
-          // 不可用时照常跟随前台 App
-        }
-      }
-      if (hint) toast(hint, true, true);
-      else hideToast();
-      if (hint && !current && !(deviceId === targets.deviceId && targets.bundleId)) {
-        try {
-          sessionStorage.setItem(PENDING_TOAST_KEY, hint);
-        } catch (e) {
-          // 不可用时没有提示
-        }
-      }
+      switchTarget(deviceId, app.bundleId);
+      activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
+      return;
     }
     // 当前 App 回到前台后由事件流恢复, 不必重新加载; 事件流断开时立即重连, 不等浏览器的重试间隔. 同一设备上换 App 原地切换, 实时画面不中断
     if (current) {
@@ -2595,7 +2672,7 @@ function targetAppRow(deviceId, app, background) {
       if (!appState.connected) watchApp();
       return;
     }
-    if (deviceId === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
+    if (deviceId === targets.deviceId) switchTargetInPlace(app.bundleId);
     else switchTarget(deviceId, app.bundleId);
   });
   return row;
@@ -2699,6 +2776,11 @@ function rememberTarget(deviceId, bundleId) {
 }
 
 function switchTargetInPlace(bundleId, activating = false, appName = '') {
+  if (bundleId) {
+    $('emptyState').hidden = true;
+    document.body.classList.remove('has-empty');
+    document.body.classList.add('has-app');
+  }
   rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
   ++appInfoSeq;
@@ -2752,7 +2834,7 @@ async function connectInPlace(deviceId, bundleId) {
   if (targets.bundleId) return;
   rememberTarget(deviceId, '');
   $('appName').textContent = currentDevice()?.name || t('未连接');
-  if (currentDevice()?.kind === 'simulator' && liveAvailable()) setMode('live');
+  if (liveAvailable()) setMode('live');
   const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
   showEmptyState(t('没有运行中的已集成 App'), body);
   setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
@@ -3298,6 +3380,7 @@ function setupLiveEvents() {
   // 多任务: 从底部上滑并停顿, 与真机手势一致
   $('liveSwitcher').addEventListener('click', () => liveSend({ type: 'button', button: 'app-switcher' }));
   $('liveRotate').addEventListener('click', liveRotate);
+  $('liveRetry').addEventListener('click', () => { liveStop(); live.error = ''; showLiveGuide(); liveStart(); });
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
   $('sandboxBtn').addEventListener('click', openSandbox);
@@ -4128,7 +4211,7 @@ function syncTreeFilter() {
 
 function requestMode(mode) {
   if (mode === 'live' && !liveAvailable()) {
-    toast(t('真机不支持实时画面'));
+    toast(t('请先选择设备'));
     return;
   }
   if (mode) setMode(mode);
@@ -7510,7 +7593,7 @@ async function start() {
   if (!targets.bundleId) {
     $('appName').textContent = device?.name || targetHistory[targets.deviceId]?.name || t('未连接');
     // 只选了模拟器(没有运行中的 App)时直接显示实时画面
-    if (device?.kind === 'simulator' && liveAvailable()) setMode('live');
+    if (liveAvailable()) setMode('live');
     const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
     showEmptyState(t('没有运行中的已集成 App'), body);
     setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });

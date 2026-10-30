@@ -79,7 +79,7 @@
   </div>
   <div class="toolbar-center">
     <div class="segmented" id="modeSeg">
-      <button data-mode="live" id="liveModeBtn" title="模拟器实时画面" hidden>实时</button>
+      <button data-mode="live" id="liveModeBtn" title="实时画面">实时</button>
       <button data-mode="2d" class="active">2D</button>
       <button data-mode="3d">3D</button>
     </div>
@@ -174,9 +174,11 @@
     <div class="live-wrap" id="liveWrap" hidden>
       <canvas class="live-canvas" id="liveCanvas" tabindex="0"></canvas>
       <div class="live-guide" id="liveGuide" hidden>
+        <div class="live-loading" id="liveLoading" role="status" aria-label="Loading" hidden></div>
         <div class="live-guide-title" id="liveGuideTitle">正在连接实时画面…</div>
         <div class="live-note live-error" id="liveError" hidden></div>
         <div class="live-waiting" id="liveWaiting">正在等待连接…</div>
+        <button class="empty-action" id="liveRetry" hidden>重试</button>
       </div>
     </div>
   </section>
