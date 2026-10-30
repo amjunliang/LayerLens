@@ -1724,6 +1724,7 @@ function liveStart() {
   ws.binaryType = 'arraybuffer';
   live.ws = ws;
   ws.onopen = () => {
+    if (live.ws !== ws || !pageActivity.active) return;
     live.connected = true;
     $('liveGuide').hidden = true;
     liveReportSize(true);
@@ -1733,6 +1734,7 @@ function liveStart() {
     }
   };
   ws.onmessage = (e) => {
+    if (live.ws !== ws || !pageActivity.active) return;
     if (e.data instanceof ArrayBuffer) {
       const buf = new Uint8Array(e.data);
       feedLiveFrame(buf);
@@ -1799,7 +1801,11 @@ function showLiveGuide(title) {
 function feedLiveFrame(buf) {
   const type = buf[0];
   const payload = buf.slice(1);
-  const onFrame = (frame) => paintLive(frame);
+  const socket = live.ws;
+  const onFrame = (frame) => {
+    if (live.ws !== socket || !pageActivity.active) { frame.close?.(); return; }
+    paintLive(frame);
+  };
   if (type === 0x01) {
     if (live.decoder) live.decoder.close();
     live.decoder = new VideoDecoder({ output: onFrame, error: (e) => console.warn('live decoder:', e.message) });
@@ -1825,19 +1831,20 @@ function feedLiveFrame(buf) {
 
 // 解码出一帧立即绘制, 不等动画帧回调(否则平均多等半帧); 绘制只需零点几毫秒, 同一刷新周期内多画几次也无妨
 function paintLive(frame) {
-  if (!live.ws) {
-    if (frame.close) frame.close();
-    return;
+  try {
+    if (!live.ws || !pageActivity.active) return;
+    const canvas = $('liveCanvas');
+    const w = frame.displayWidth || frame.width;
+    const h = frame.displayHeight || frame.height;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    canvas.getContext('2d').drawImage(frame, 0, 0);
+  } finally {
+    // 包括绘制失败、失焦以及已断开的帧, 都必须归还解码/GPU 资源。
+    frame.close?.();
   }
-  const canvas = $('liveCanvas');
-  const w = frame.displayWidth || frame.width;
-  const h = frame.displayHeight || frame.height;
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  canvas.getContext('2d').drawImage(frame, 0, 0);
-  if (frame.close) frame.close();
 }
 
 function layoutLive() {

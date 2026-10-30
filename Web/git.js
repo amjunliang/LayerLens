@@ -3,6 +3,7 @@
 // 改动面板: 当前 App 源码所在 git 仓库的未提交改动, 可暂存、放弃、提交、拉取和推送, 可查看提交记录的改动.
 // 仓库由 Mac App 根据 App 上报的源文件路径推断. 只在页签可见时连接事件流, Mac App 此时才监听仓库文件变化并执行 git
 const GIT_RETRY_MS = 2000;
+const GIT_REPO_TIMEOUT_MS = 15000;
 // 页签隐藏后保持连接的时间, 期间切回来无需重新读取
 const GIT_IDLE_MS = 60000;
 const GIT_DIFF_MAX_LINES = 20000;
@@ -35,6 +36,8 @@ const git = {
   timer: 0,
   key: '',
   es: null,
+  connectSeq: 0,
+  repoController: null,
   repo: null,
   status: null,
   statusText: '',
@@ -150,12 +153,16 @@ function syncGitPanel() {
 }
 
 function gitDisconnect() {
+  ++git.connectSeq;
+  git.repoController?.abort();
+  git.repoController = null;
   if (git.es) git.es.close();
   git.es = null;
 }
 
 async function gitConnect() {
   gitDisconnect();
+  const seq = git.connectSeq;
   const key = targets.bundleId || '';
   // 同一个 App 重新连接时保留列表、选中和 diff, 只重新订阅状态
   if (key && key === git.key && git.repo && git.status) {
@@ -174,8 +181,18 @@ async function gitConnect() {
   git.error = key ? '' : t('未选择 App');
   gitRender();
   if (!key) return;
-  const repo = await gitRequest('repo');
-  if (key !== git.key || !git.active) return;
+  const controller = new AbortController();
+  git.repoController = controller;
+  const timer = setTimeout(() => controller.abort(), GIT_REPO_TIMEOUT_MS);
+  let repo;
+  try {
+    repo = await gitRequest('repo', {}, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    if (git.repoController === controller) git.repoController = null;
+  }
+  if (seq !== git.connectSeq || key !== git.key || !git.active) return;
+  if (controller.signal.aborted) repo = { error: t('查找仓库超时，请点击刷新重试') };
   if (repo.error) {
     git.error = repo.reason === 'noSource'
       ? t('App 没有上报源码路径: 在模拟器上运行一次, 或更新 LayerLens Pod 后重新运行')
@@ -204,10 +221,10 @@ function gitSubscribe(key) {
   };
 }
 
-async function gitRequest(action, params = {}) {
+async function gitRequest(action, params = {}, options = {}) {
   const query = new URLSearchParams({ app: git.key, ...params });
   try {
-    const response = await fetch(`/api/hub/git/${action}?${query}`);
+    const response = await fetch(`/api/hub/git/${action}?${query}`, options);
     return await response.json();
   } catch (e) {
     return { error: e.message };

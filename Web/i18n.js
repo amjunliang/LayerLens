@@ -291,6 +291,7 @@ const EN = {
   '未选择 App': 'No app selected',
   'App 没有上报源码路径: 在模拟器上运行一次, 或更新 LayerLens Pod 后重新运行': 'The app has not reported its source path. Run it once on a simulator, or update the LayerLens pod and run again',
   'App 的源码不在 git 仓库中': 'The app source is not in a git repository',
+  '查找仓库超时，请点击刷新重试': 'Repository lookup timed out. Click Refresh to retry',
   '无法读取仓库: {0}': 'Cannot read the repository: {0}',
   'git 失败: {0}': 'git failed: {0}',
   '冲突': 'Conflicts',
