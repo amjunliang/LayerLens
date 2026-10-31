@@ -25,7 +25,7 @@
 		538F7587F1F1C6A0B880085C /* CacheStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D760766C30BE0F6534EE073 /* CacheStore.swift */; };
 		5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018BD14CAF3AA5013A6E67EA /* Usbmux.swift */; };
 		5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BEB09D7814382476662F06E /* XcodeController.swift */; };
-		64ED4F6E692A2A9ABF7CB5D7 /* SimulatorEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */; };
+		64ED4F6E692A2A9ABF7CB5D7 /* LiveVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C16AB2C85D24157085069F16 /* LiveVideo.swift */; };
 		85A4371EE71DA4B0E8EC23C5 /* DeviceLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5FFCAA8F7749680E8F92C31 /* DeviceLive.swift */; };
 		86B305117D922CBB7EE92B8B /* TerminalController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD29B7F3FDD57668D8ABCD5E /* TerminalController.swift */; };
 		89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */; };
@@ -65,7 +65,7 @@
 		B3BC5A8F4D22AAE498CC0D29 /* HubServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubServer.swift; sourceTree = "<group>"; };
 		BD29B7F3FDD57668D8ABCD5E /* TerminalController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalController.swift; sourceTree = "<group>"; };
 		BDE6DDF56FE107E2992470E5 /* HTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
-		C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorEncoder.swift; sourceTree = "<group>"; };
+		C16AB2C85D24157085069F16 /* LiveVideo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveVideo.swift; sourceTree = "<group>"; };
 		C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetRegistry.swift; sourceTree = "<group>"; };
 		D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorLive.swift; sourceTree = "<group>"; };
 		D9DC1FC312061B8E396D03F6 /* GitController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitController.swift; sourceTree = "<group>"; };
@@ -116,7 +116,7 @@
 				A06A5A73B39C76DCA8D04ABB /* PageZoom.swift */,
 				85C718ED987DE835F676F9F6 /* ProxyTunnel.swift */,
 				541966EE0D953E021F155FB9 /* SimulatorBridge.swift */,
-				C16AB2C85D24157085069F16 /* SimulatorEncoder.swift */,
+				C16AB2C85D24157085069F16 /* LiveVideo.swift */,
 				5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */,
 				D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */,
 				835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */,
@@ -221,6 +221,7 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/DeviceBridge/runtime.stamp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -249,7 +250,7 @@
 				17193F2776181150A07D780F /* PageZoom.swift in Sources */,
 				2F60E987BD741C84FE39106E /* ProxyTunnel.swift in Sources */,
 				295A63A8FF03D1C75A2E527A /* SimulatorBridge.swift in Sources */,
-				64ED4F6E692A2A9ABF7CB5D7 /* SimulatorEncoder.swift in Sources */,
+				64ED4F6E692A2A9ABF7CB5D7 /* LiveVideo.swift in Sources */,
 				C3328F67A77FE0E4F668B64C /* SimulatorKeyboard.swift in Sources */,
 				13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */,
 				89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */,

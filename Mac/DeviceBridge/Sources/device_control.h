@@ -2,6 +2,7 @@
 #define IPB_DEVICE_CONTROL_H
 #import <Foundation/Foundation.h>
 #include <signal.h>
+#include <fcntl.h>
 
 static NSTask *ipbActiveControlTask;
 static BOOL ipbControlStopped;
@@ -33,6 +34,7 @@ static NSData *ipbDeviceCommand(NSString *device, NSArray<NSString *> *arguments
     NSPipe *pipe=[NSPipe pipe]; task.standardOutput=pipe;
     task.standardError=NSFileHandle.fileHandleWithStandardError;
     NSPipe *inPipe=input?[NSPipe pipe]:nil;
+    if(inPipe) fcntl(inPipe.fileHandleForWriting.fileDescriptor,F_SETNOSIGPIPE,1);
     task.standardInput=inPipe ?: [NSFileHandle fileHandleWithNullDevice];
     NSError *error=nil;
     @synchronized(ipbControlLock()) {

@@ -12,14 +12,10 @@ import IOSurface
 /// 一台模拟器的画面与输入: 采集和编码只做一份, 广播给所有观看的网页; 触摸通道共用.
 /// 三个队列互不阻塞: queue 管理观看者与发送, captureQueue 采集和编码(每帧约十几毫秒), touchQueue 注入输入
 final class SimulatorStream {
-    /// 网络发送跟不上时该观看者跳过增量帧, 从下一个关键帧继续
-    static let maxInFlight = 6
     /// 底部 / 顶部边缘手势, 对应 Indigo 消息的边缘字段
     static let edges: [String: UInt8] = ["bottom": 0x01, "top": 0x08]
     /// 浏览器解码器可能滞留最后一帧, 画面静止后补编一帧把它顶出来
     static let trailingDelay: TimeInterval = 0.1
-    /// 强制关键帧的最小间隔, 关键帧较大, 频繁出现会拉低所有观看者的帧率
-    static let keyFrameInterval: TimeInterval = 0.5
     /// 按住不动时在原位补发移动的间隔, 模拟触摸屏持续上报
     static let holdInterval: DispatchTimeInterval = .milliseconds(30)
 
@@ -38,17 +34,14 @@ final class SimulatorStream {
     private var holdTimer: DispatchSourceTimer?
 
     // queue 上访问
-    private var viewers: [ObjectIdentifier: Viewer] = [:]
+    private lazy var video = LiveVideoBroadcaster(queue: queue) { [weak self] in self?.encodeKeyFrame() }
     private var device: NSObject?
-    private var config: Data?
     private var running = false
-    private var lastKeyFrameRequest: TimeInterval = 0
-    private var keyFrameScheduled = false
     /// 最近一次设置的方向, 新观看者据此旋转画面; 默认竖屏
     private var orientation: UInt32 = 1
 
     // captureQueue 上访问
-    private let encoder = SimulatorEncoder()
+    private let encoder = LiveVideoEncoder()
     private var screen: SimScreen?
     private var frameSerial = 0
     /// 编码比采集慢时只保留最新一帧
@@ -57,28 +50,16 @@ final class SimulatorStream {
     /// 按观看者中最大的显示尺寸编码, nil 时为原始分辨率
     private var targetSize: (width: Double, height: Double)?
 
-    private final class Viewer {
-        let socket: WebSocketConnection
-        var inFlight = 0
-        /// 新加入或丢帧后, 等到关键帧再开始发送
-        var waitingKeyFrame = true
-        /// 丢帧后等积压发完再申请关键帧, 收不动的页面(如被节流的后台标签)不会反复触发
-        var recovering = false
-        /// 画面在页面上显示的像素尺寸, 未上报(旧版页面)时按原始分辨率编码
-        var size: (width: Double, height: Double)?
-
-        init(socket: WebSocketConnection) {
-            self.socket = socket
-        }
-    }
-
     init(udid: String) {
         self.udid = udid
         queue = DispatchQueue(label: "com.layerlens.live.\(udid)")
         captureQueue = DispatchQueue(label: "com.layerlens.live.capture.\(udid)", qos: .userInteractive)
         touchQueue = DispatchQueue(label: "com.layerlens.live.touch.\(udid)")
         encoder.onOutput = { [weak self] type, data in
-            self?.queue.async { self?.broadcast(type, data) }
+            self?.queue.async {
+                guard let self, self.running else { return }
+                self.video.broadcast(type, data)
+            }
         }
     }
 
@@ -91,18 +72,13 @@ final class SimulatorStream {
             self?.queue.async { self?.remove(id) }
         }
         queue.async { [self] in
-            viewers[id] = Viewer(socket: socket)
-            updateTargetSize()
             guard running || start() else {
                 socket.close()
                 return
             }
-            // 新观看者需要解码配置和一个关键帧, 画面静止时也立即补一帧
-            if let config {
-                send(Data([0x01]) + config, to: viewers[id])
-            }
+            video.add(socket)
+            updateTargetSize()
             socket.sendText(orientationMessage)
-            requestKeyFrame()
         }
     }
 
@@ -132,12 +108,12 @@ final class SimulatorStream {
     }
 
     private func remove(_ id: ObjectIdentifier) {
-        viewers[id] = nil
+        video.remove(id)
         updateTargetSize()
         touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
-        guard viewers.isEmpty, running else { return }
+        guard video.isEmpty, running else { return }
         running = false
-        config = nil
+        video.reset()
         captureQueue.async { [self] in
             screen?.stop()
             screen = nil
@@ -147,64 +123,13 @@ final class SimulatorStream {
         touchQueue.async { [self] in touch = nil }
     }
 
-    private func broadcast(_ type: UInt8, _ data: Data) {
+    private func requestKeyFrame() { video.requestKeyFrame() }
+
+    private func encodeKeyFrame() {
         guard running else { return }
-        if type == 0x01 {
-            config = data
-        }
-        let frame = Data([type]) + data
-        for viewer in viewers.values {
-            switch type {
-            case 0x01:
-                send(frame, to: viewer)
-            case 0x02:
-                viewer.waitingKeyFrame = false
-                send(frame, to: viewer)
-            default:
-                guard !viewer.waitingKeyFrame else { continue }
-                if viewer.inFlight >= Self.maxInFlight {
-                    viewer.waitingKeyFrame = true
-                    viewer.recovering = true
-                    continue
-                }
-                send(frame, to: viewer)
-            }
-        }
-    }
-
-    private func send(_ frame: Data, to viewer: Viewer?) {
-        guard let viewer else { return }
-        viewer.inFlight += 1
-        viewer.socket.sendBinary(frame) { [weak self, weak viewer] _ in
-            self?.queue.async {
-                guard let self, let viewer else { return }
-                viewer.inFlight -= 1
-                if viewer.recovering && viewer.inFlight == 0 {
-                    viewer.recovering = false
-                    self.requestKeyFrame()
-                }
-            }
-        }
-    }
-
-    /// 下一帧编为关键帧并立即补编当前画面, 画面静止时也能恢复; 限制频率, 间隔内的请求合并
-    private func requestKeyFrame() {
-        guard running, !keyFrameScheduled else { return }
-        let wait = lastKeyFrameRequest + Self.keyFrameInterval - CFAbsoluteTimeGetCurrent()
-        guard wait <= 0 else {
-            keyFrameScheduled = true
-            queue.asyncAfter(deadline: .now() + wait) { [weak self] in
-                self?.keyFrameScheduled = false
-                self?.requestKeyFrame()
-            }
-            return
-        }
-        lastKeyFrameRequest = CFAbsoluteTimeGetCurrent()
         captureQueue.async { [self] in
             encoder.requestKeyFrame()
-            if let surface = screen?.surface() {
-                capture(surface, trailing: false)
-            }
+            if let surface = screen?.surface() { capture(surface, trailing: false) }
         }
     }
 
@@ -228,10 +153,7 @@ final class SimulatorStream {
             screen.start()
         }
         // 新的编码会话会重新输出解码配置和关键帧
-        config = nil
-        for viewer in viewers.values {
-            viewer.waitingKeyFrame = true
-        }
+        video.reset()
         requestKeyFrame()
     }
 
@@ -274,24 +196,13 @@ final class SimulatorStream {
     // MARK: - Size
 
     private func setSize(_ size: (width: Double, height: Double), of id: ObjectIdentifier) {
-        guard let viewer = viewers[id] else { return }
-        viewer.size = size
+        video.setSize(size, of: id)
         updateTargetSize()
     }
 
     /// 取所有观看者中最大的显示尺寸; 有未上报的观看者时用原始分辨率. 变化后立即重编当前画面, 画面静止时也能更新
     private func updateTargetSize() {
-        var target: (width: Double, height: Double)? = (0, 0)
-        for viewer in viewers.values {
-            guard let size = viewer.size, let current = target else {
-                target = nil
-                break
-            }
-            target = (max(current.width, size.width), max(current.height, size.height))
-        }
-        if let current = target, current.width <= 0 || current.height <= 0 {
-            target = nil
-        }
+        let target = video.targetSize
         captureQueue.async { [self] in
             let changed = targetSize?.width != target?.width || targetSize?.height != target?.height
             targetSize = target
@@ -311,9 +222,7 @@ final class SimulatorStream {
         guard (1...4).contains(value), let device, SimBridge.setOrientation(device, value) else { return }
         orientation = value
         let message = orientationMessage
-        for viewer in viewers.values {
-            viewer.socket.sendText(message)
-        }
+        video.forEachSocket { $0.sendText(message) }
     }
 
     // MARK: - Input
@@ -386,6 +295,10 @@ final class SimulatorStream {
         if type == "orientation" {
             let value = (message["value"] as? NSNumber)?.uint32Value ?? 0
             queue.async { [weak self] in self?.setOrientation(value) }
+            return
+        }
+        if type == "keyframe" {
+            queue.async { [weak self] in self?.requestKeyFrame() }
             return
         }
         if type == "restart" {

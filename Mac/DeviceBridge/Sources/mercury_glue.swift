@@ -1405,3 +1405,70 @@ public func coredeviceSendHIDDigitizerCGPoint(
     }
     return result
 }
+
+@_cdecl("layerlens_native_service_ids")
+public func layerlensNativeServiceIDs(_ connection: UnsafeMutableRawPointer?, _ touch: UnsafeMutablePointer<UInt64>, _ keyboard: UnsafeMutablePointer<UInt64>) -> Int32 {
+    guard let connection else {
+        fputs("connected descriptors async raw: remote connection is null\n", stderr)
+        return 2
+    }
+
+    let (service, witness) = makeDDIUniversalHIDService(connection)
+    let serviceAddress = UInt(bitPattern: service)
+    let witnessAddress = UInt(bitPattern: witness)
+    let state = AsyncProbeState()
+    let semaphore = DispatchSemaphore(value: 0)
+
+    Task {
+        let resultBuffer = UnsafeMutableRawPointer.allocate(byteCount: 64, alignment: 8)
+        resultBuffer.initializeMemory(as: UInt64.self, repeating: 0, count: 8)
+        defer {
+            resultBuffer.deallocate()
+        }
+
+        do {
+            guard let asyncService = UnsafeRawPointer(bitPattern: serviceAddress),
+                  let asyncWitness = UnsafeRawPointer(bitPattern: witnessAddress) else {
+                fputs("connected descriptors async raw: failed to rebuild service pointers\n", stderr)
+                state.result = 2
+                semaphore.signal()
+                return
+            }
+            let serviceBox = UnsafeMutableRawPointer.allocate(byteCount: 8, alignment: 8)
+            serviceBox.storeBytes(of: UInt(bitPattern: asyncService), as: UInt.self)
+            defer {
+                serviceBox.deallocate()
+            }
+            let raw = try await coredeviceConnectedServiceDescriptorsAsyncABI(resultBuffer, serviceBox, asyncWitness)
+            let words = resultBuffer.bindMemory(to: UInt64.self, capacity: 8)
+            if ProcessInfo.processInfo.environment["HIDCTL_VERBOSE_DESCRIPTORS"] != nil {
+                print(String(format: "connected descriptors async raw return=%016llx", UInt64(UInt(bitPattern: raw))))
+                print(String(format: "connected descriptors async raw buffer=%016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx",
+                             words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]))
+            }
+            let header = raw.bindMemory(to: UInt.self, capacity: 4)
+            let count = header[2]
+            let stride = Int(valueWitnessLayout(for: hidServiceDescriptorMetadata()).stride)
+            if count > 0 && count <= 1024 && stride > 0 && stride <= 4096 {
+                for index in 0..<Int(count) {
+                    let element = raw.advanced(by: 32 + index * stride)
+                    guard let storage = UnsafeRawPointer(bitPattern: element.load(as: UInt.self)) else { continue }
+                    let fields = Dictionary(uniqueKeysWithValues: codableDictionaryFields(storage))
+                    guard let idText = fields["_ServiceID"], let number = idText.split(separator: ":").last,
+                          let value = UInt64(number) else { continue }
+                    let product = fields["Product"] ?? ""
+                    if product.contains("CoreDevice touchscreen(") { touch.pointee = value }
+                    if product.contains("CoreDevice keyboard") { keyboard.pointee = value }
+                }
+            }
+            state.result = 0
+        } catch {
+            fputs("connected descriptors async raw error: \(error)\n", stderr)
+            state.result = 1
+        }
+        semaphore.signal()
+    }
+
+    semaphore.wait()
+    return state.result
+}

@@ -20,6 +20,8 @@ targets:
       - name: Build DeviceBridge
         script: 'bash "$SRCROOT/DeviceBridge/build-runtime.sh"'
         basedOnDependencyAnalysis: false
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/DeviceBridge/runtime.stamp"
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig

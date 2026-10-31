@@ -1,28 +1,49 @@
 # LayerLens DeviceBridge
 
-Derived from ipb (MIT), https://github.com/ipbtools/ipb at
-bf3fcad375db5e11d5573a7ef11fa9a02c8cd1d7. See LICENSE.
+The device resolution and CoreDevice/HID glue are derived from ipb (MIT),
+commit `bf3fcad375db5e11d5573a7ef11fa9a02c8cd1d7`. See LICENSE.
 
-LayerLens changes mirror.m to run without a window, receive JSON lines on stdin,
-and emit big-endian uint32 length-prefixed compressed video packets on stdout.
-The ipb launcher forwards stdin to the child. Upstream session limits remain:
-3600 seconds and 8192 input events; reconnect after a session ends.
-Apple private ABI requires compatible Xcode/CoreDevice and an unlocked paired iOS 27 device.
+## Current runtime
 
-The app bundles DeviceBridgeHelper.app and launches it with LaunchServices to
-obtain the console user's display session. Private session FIFOs (0700 directory,
-0600 endpoints) carry JSON input and framed images. The helper watches its parent
-PID and closes its session when LayerLens exits. Upstream stdout diagnostics are
-redirected to stderr, keeping the frame stream clean. Build uses an explicit
-Mercury rpath; build-runtime.sh signs and embeds the helper.
+- `bin/device-resolve` resolves a device identifier and its CoreDevice tunnel,
+  returning `[deviceUUID, interface, hostIP, deviceIP, productType]` as JSON.
+- `libLayerLensDevice.dylib` runs media reception and HID input in the GUI app.
+  Apple's receiver decodes device video; a bounded latest-frame slot passes borrowed
+  CVPixelBuffers to Swift at up to 30 fps. The GUI app's LiveVideoEncoder and
+  LiveVideoBroadcaster handle H.264 encoding and WebSocket recovery for both devices
+  and simulators. There is no JPEG encode/decode stage.
+- `bin/lease-guardian` owns the Apple `devicectl` tunnel observer. Only LayerLens
+  holds the lifetime pipe's write end, marked close-on-exec. Session closure or
+  main-process death triggers EOF; the guardian terminates and reaps its command,
+  then exits. TERM has a 500 ms grace period before KILL. The observer's 15-second
+  timeout remains a secondary fallback. No shared system service is terminated.
 
-CompressedStream.m is LayerLens code. Its linked interpose library observes the
-VideoProcessing/VideoToolbox decompression entrypoints inside our helper process.
-The callback copies the device's compressed CMSampleBuffer bytes, then skips the
-host decode. No Apple process is injected or modified. The helper forwards hvcC
-(or avcC), source timestamps and original length-prefixed NAL units. WebCodecs in
-the shared webpage is the only video decoder. Encoder padding is cropped only
-when drawing the decoded frame in the browser. Protocol: 05 = JSON configuration,
-06/07 = key/delta with big-endian 64-bit microsecond PTS followed by source bytes.
-Swift caches a bounded GOP for newly joined or recovering viewers. No JPEG
-conversion or VideoToolbox encoding occurs on the physical-device live path.
+Native callback types: 9 = geometry JSON, 10 = borrowed CVPixelBuffer pointer
+(count=0, retained by Swift before returning), 254 = status, 255 = error,
+0 = final closure. WebSocket types are shared: 1 = avcC, 2 = H.264 keyframe,
+3 = delta. Slow viewers skip deltas until a fresh keyframe; late viewers request
+one from the encoder without reconnecting device capture.
+RemoteXPC owns service sockets after creation; the original RTP socket remains
+session-owned. Input, image conversion and setup run off the UI thread.
+
+One physical device can be active at a time; multiple windows share its session.
+Simulator capture is independent. Mode/focus changes retain the connection;
+closing the last viewer retains the session for 30 seconds.
+
+## Build and validation
+
+`make` builds only the native library and lifetime guardian. The app's
+`build-runtime.sh` packages and signs these with the resolver and license.
+Private frameworks require a compatible Apple Silicon Mac and developer tools.
+
+After building, run the guardian lifecycle checks:
+
+```sh
+mkdir -p /private/tmp/LayerLens-release-build
+python3 Mac/DeviceBridge/scripts/test_lease_guardian.py
+```
+
+Run this command from the repository root. The tests use disposable commands
+that ignore TERM and cover normal closure, parent SIGKILL and guardian SIGTERM.
+Current architecture and verified behavior are documented in
+[device-live.md](../../docs/device-live.md).

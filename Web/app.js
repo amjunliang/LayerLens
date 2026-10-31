@@ -1639,7 +1639,7 @@ function setupCanvasEvents() {
 }
 
 // MARK: - Live
-// 模拟器实时画面: Mac App 采集模拟器屏幕编码为 H.264 经 /sim/ 推送, 并注入触摸与按键, 页面只负责解码绘制与转发操作
+// 真机与模拟器共用 H.264 解码显示; 采集和输入由各自的 Mac 后端负责。
 
 const LIVE_RETRY_MS = 2000;
 const LIVE_CORNER = 55;
@@ -1761,6 +1761,7 @@ function liveStart() {
     try {
       const message = JSON.parse(e.data);
       if (message.type === 'geometry') {
+        if (live.real) live.sourceGeometry = message;
         live.screen = [message.width, message.height]; live.orientation = message.orientation; layoutLive();
       }
       if (message.type === 'error' || message.type === 'status') {
@@ -1828,7 +1829,10 @@ function liveStop() {
     live.decoder = null;
   }
   live.connected = false;
-  live.rawGeometry = null;
+  live.decoderConfig = null;
+  live.waitingKeyFrame = true;
+  live.keyFrameRequestedAt = 0;
+  live.sourceGeometry = null;
   live.touch = null;
 }
 
@@ -1852,7 +1856,36 @@ function showLiveGuide(title) {
   $('liveWaiting').hidden = !supported;
 }
 
-// 1 字节类型 + 数据: 模拟器 01=avcC, 02/03=H.264, 04=JPEG 占位; 真机 05=配置 JSON, 06/07=关键帧/增量帧(8 字节微秒时间戳 + 原始压缩数据).
+// Both sources: 01 = avcC, 02 = H.264 keyframe, 03 = H.264 delta.
+function requestLiveKeyFrame() {
+  live.waitingKeyFrame = true;
+  const now = performance.now();
+  if (live.keyFrameRequestedAt && now - live.keyFrameRequestedAt < 500) return;
+  live.keyFrameRequestedAt = now;
+  liveSend({ type: 'keyframe' });
+}
+
+function configureLiveDecoder(payload, onFrame) {
+  if (live.decoder && live.decoder.state !== 'closed') live.decoder.close();
+  const socket = live.ws;
+  const decoder = new VideoDecoder({ output: onFrame, error: (e) => {
+    if (live.ws !== socket || live.decoder !== decoder) return;
+    console.warn('live decoder:', e.message);
+    live.decoder = null;
+    requestLiveKeyFrame();
+  } });
+  live.decoder = decoder;
+  const hex = (b) => b.toString(16).padStart(2, '0');
+  decoder.configure({
+    codec: `avc1.${hex(payload[1])}${hex(payload[2])}${hex(payload[3])}`,
+    description: payload,
+    optimizeForLatency: true,
+    hardwareAcceleration: 'prefer-hardware',
+  });
+  live.timestamp = 0;
+  live.waitingKeyFrame = true;
+}
+
 function feedLiveFrame(buf) {
   const type = buf[0];
   const payload = buf.slice(1);
@@ -1871,53 +1904,26 @@ function feedLiveFrame(buf) {
     paintLive(frame);
     $('liveGuide').hidden = true;
   };
-  if (type === 0x05) {
-    const metadata = JSON.parse(new TextDecoder().decode(payload));
-    if (live.decoder) live.decoder.close();
-    const description = Uint8Array.from(atob(metadata.description), (c) => c.charCodeAt(0));
-    live.decoder = new VideoDecoder({ output: onFrame, error: (e) => {
-      live.error = e.message; showLiveGuide(e.message);
-    }});
+  if (type === 0x01) {
+    if (payload.length < 4) return;
+    live.decoderConfig = payload;
+    try { configureLiveDecoder(payload, onFrame); }
+    catch (e) { live.error = e.message; showLiveGuide(e.message); }
+  } else if (type === 0x02 || type === 0x03) {
+    if (type === 0x03 && live.waitingKeyFrame) return;
     try {
-      live.decoder.configure({ codec: metadata.codec, description,
-        codedWidth: metadata.codedWidth, codedHeight: metadata.codedHeight,
-        optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
-    } catch (e) {
-      live.error = `Video decoder (${metadata.codec}): ${e.message}`;
-      showLiveGuide(live.error);
-      return;
-    }
-    live.rawGeometry = metadata;
-    live.screen = [metadata.width, metadata.height];
-    live.orientation = metadata.orientation;
-    layoutLive();
-  } else if ((type === 0x06 || type === 0x07) && live.decoder?.state === 'configured') {
-    if (payload.length < 8) return;
-    const timestamp = Number(new DataView(payload.buffer, payload.byteOffset, 8).getBigUint64(0));
-    try {
-      live.decoder.decode(new EncodedVideoChunk({ type: type === 6 ? 'key' : 'delta', timestamp, data: payload.subarray(8) }));
-    } catch (e) { live.error = e.message; showLiveGuide(e.message); }
-  } else if (type === 0x01) {
-    if (live.decoder) live.decoder.close();
-    live.decoder = new VideoDecoder({ output: onFrame, error: (e) => console.warn('live decoder:', e.message) });
-    const hex = (b) => b.toString(16).padStart(2, '0');
-    live.decoder.configure({
-      codec: `avc1.${hex(payload[1])}${hex(payload[2])}${hex(payload[3])}`,
-      description: payload,
-      optimizeForLatency: true,
-      hardwareAcceleration: 'prefer-hardware',
-    });
-    live.timestamp = 0;
-  } else if ((type === 0x02 || type === 0x03) && live.decoder && live.decoder.state === 'configured') {
-    try {
+      if (live.decoder?.state !== 'configured') {
+        if (type !== 0x02 || !live.decoderConfig) return;
+        configureLiveDecoder(live.decoderConfig, onFrame);
+      }
+      if (type === 0x03 && live.decoder.decodeQueueSize > 6) {
+        requestLiveKeyFrame();
+        return;
+      }
       live.decoder.decode(new EncodedVideoChunk({ type: type === 0x02 ? 'key' : 'delta', timestamp: live.timestamp, data: payload }));
       live.timestamp += 16667;
-    } catch (e) {
-      // 丢帧, 等下一个关键帧
-    }
-  } else if (type === 0x04) {
-    const serial = live.jpegSerial = (live.jpegSerial || 0) + 1;
-    createImageBitmap(new Blob([payload], { type: 'image/jpeg' })).then((frame) => { if (serial !== live.jpegSerial) frame.close(); else onFrame(frame); }).catch(() => {});
+      if (type === 0x02) live.waitingKeyFrame = false;
+    } catch (e) { requestLiveKeyFrame(); }
   }
 }
 
@@ -1928,13 +1934,13 @@ function paintLive(frame) {
     const canvas = $('liveCanvas');
     const w = frame.displayWidth || frame.width;
     const h = frame.displayHeight || frame.height;
-    const native = live.real ? live.rawGeometry : null;
+    const native = live.real ? live.sourceGeometry : null;
     const width = native?.width || w, height = native?.height || h;
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
       canvas.height = height;
     }
-    if (native) canvas.getContext('2d').drawImage(frame, 0, 0, Math.min(width, w), Math.min(height, h), 0, 0, width, height);
+    if (native) canvas.getContext('2d').drawImage(frame, 0, 0, width, height);
     else canvas.getContext('2d').drawImage(frame, 0, 0);
   } finally {
     // 包括绘制失败、失焦以及已断开的帧, 都必须归还解码/GPU 资源。
@@ -1955,7 +1961,7 @@ function layoutLive() {
   canvas.style.width = sw * scale + 'px';
   canvas.style.height = sh * scale + 'px';
   // 模拟器尺寸为 point，真机尺寸为像素：将同一圆角半径换算到各自坐标单位。
-  const cornerScale = live.real ? (live.rawGeometry?.pointScale || 1) : 1;
+  const cornerScale = live.real ? (live.sourceGeometry?.pointScale || 1) : 1;
   canvas.style.borderRadius = LIVE_CORNER * cornerScale * scale + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
   if (live.connected) liveReportSize();

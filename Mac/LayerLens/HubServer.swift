@@ -29,6 +29,7 @@ final class HubServer {
     private let network: NetworkRecorder
     private let git = GitController()
     let terminal = TerminalController()
+    func stopDeviceLive() { deviceLive.shutdown() }
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     /// 同一设备的 App 激活必须串行; 运行中的命令结束后只执行排队目标中的最后一个

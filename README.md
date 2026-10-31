@@ -141,12 +141,21 @@ keyboard keys and text paste are implemented for testing. Option-click inspectio
 requires the integrated app in the foreground. Rotate the phone itself; the
 physical-device rotation button is disabled.
 
-A separate GUI-session helper forwards the device’s original compressed video
-frames and decoder configuration (HEVC on the tested phone) to WebCodecs. The Mac
-backend does not decode or re-encode video. Encoder padding is cropped when
-drawing in the browser; the browser must support the device’s codec. Viewers share one device session;
-slow viewers drop frames. Idle physical-device sessions are retained for 30 seconds
-so switching back can reuse the stream. Sessions retain upstream's 1-hour / 8192-input limit.
-After a failure, switch to 2D and back to Live to retry. This uses private Apple
-ABI and is experimental. Source attribution and the MIT license are included in
+Physical-device media and HID now run in a native library inside LayerLens. No
+standalone capture helper or FIFO is used. Apple's receiver decodes continuously;
+the library passes decoded pixel buffers to the same low-latency H.264 encoder
+and WebSocket broadcaster used by simulators, with device input capped at 30 fps.
+Encoding scales to viewer size; late or slow viewers recover through fresh keyframes.
+There is no JPEG conversion. Device video is still decoded and re-encoded.
+
+Multiple viewers may share one physical device; only one physical device can be
+active at a time. Simulator sessions remain independent. Existing connections
+survive mode/focus changes; the last viewer leaving retains the session for
+30 seconds. Only the latest source frame is retained, with on-demand keyframes and no GOP replay.
+Short devicectl commands resolve device metadata. A session-owned tunnel observer
+is owned by a small guardian bound to the app through a lifetime pipe. Normal closure
+or app death triggers termination and reaping of that observer, with a 500 ms TERM
+grace period before KILL. Its 15-second timeout remains a secondary fallback.
+Private-framework crashes can now affect the main app; this remains experimental.
+Source attribution and the MIT license are included in
 `Mac/DeviceBridge/`.

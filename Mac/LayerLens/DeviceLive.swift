@@ -1,31 +1,49 @@
 import AppKit
 import Foundation
 import Darwin
+import CoreVideo
 
-/// Experimental iOS 27 transport, isolated from the simulator's private frameworks.
-/// A single helper owns each device and forwards the original compressed frames.
+/// Device media and HID run in the GUI application; there is no capture helper.
 final class DeviceLive {
-    static var bridgeURL: URL { Bundle.main.resourceURL!.appendingPathComponent("DeviceBridge/bin/ipb") }
-    static var isAvailable: Bool { FileManager.default.isExecutableFile(atPath: bridgeURL.path) }
+    static var bridgeURL: URL { Bundle.main.resourceURL!.appendingPathComponent("DeviceBridge/bin/device-resolve") }
+    static var libraryURL: URL { bridgeURL.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("libLayerLensDevice.dylib") }
+    static var isAvailable: Bool { FileManager.default.isExecutableFile(atPath: bridgeURL.path) && FileManager.default.fileExists(atPath: libraryURL.path) }
     static var unavailableReason: String {
-        let file = bridgeURL.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("unavailable.txt")
-        return (try? String(contentsOf: file, encoding: .utf8)) ?? "当前安装缺少真机采集组件，请使用包含设备采集组件的 LayerLens 构建。"
+        let file = libraryURL.deletingLastPathComponent().appendingPathComponent("unavailable.txt")
+        return (try? String(contentsOf: file, encoding: .utf8)) ?? "当前安装缺少真机采集组件。"
     }
     private let queue = DispatchQueue(label: "com.layerlens.device.live")
     private var sessions: [String: DeviceLiveSession] = [:]
 
+    func shutdown() {
+        queue.sync {
+            let current = Array(sessions.values)
+            sessions.removeAll()
+            for session in current { session.shutdown() }
+        }
+    }
     func accept(udid: String, head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
         guard head.header("Upgrade")?.lowercased() == "websocket" else {
             connection.respond(.error(400, "Device live stream unavailable")); return
         }
         let socket = WebSocketConnection(connection: connection.detach(), leftover: leftover)
-        if !Self.isAvailable {
+        func reject(_ reason: String) {
             guard socket.accept(head) else { socket.close(); return }
-            let data = try? JSONSerialization.data(withJSONObject: ["type": "error", "detail": Self.unavailableReason])
+            let data = try? JSONSerialization.data(withJSONObject: ["type": "error", "detail": reason])
             socket.sendText(data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}") { _ in socket.close() }
-            return
         }
+        guard Self.isAvailable else { reject(Self.unavailableReason); return }
         queue.async { [self] in
+            // AVConference's private image queue is routed to one physical device
+            // at a time. Simulator sessions remain independent.
+            if sessions[udid] == nil {
+                for other in sessions.values {
+                    guard other.isIdle else { reject("主进程采集一次支持一台真机，请先关闭其他真机观看窗口。"); return }
+                }
+                let previous = Array(sessions.values)
+                sessions.removeAll()
+                for other in previous { other.shutdown() }
+            }
             let session = sessions[udid] ?? DeviceLiveSession(udid: udid)
             sessions[udid] = session
             session.add(socket, head: head) { [weak self, weak session] in
@@ -34,203 +52,211 @@ final class DeviceLive {
                 }
             }
         }
-        // HTTP upgrade parsing is safe after callbacks have been installed by add.
     }
+}
+
+private final class NativeDeviceAPI {
+    typealias Callback = @convention(c) (UnsafeMutableRawPointer?, UInt8, UnsafeRawPointer?, Int) -> Void
+    typealias Create = @convention(c) (UnsafePointer<CChar>?, Callback, UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?
+    typealias Input = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
+    typealias Close = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    let create: Create
+    let input: Input
+    let close: Close
+    private let library: UnsafeMutableRawPointer
+    static let shared: NativeDeviceAPI? = NativeDeviceAPI()
+    private init?() {
+        guard let handle = dlopen(DeviceLive.libraryURL.path, RTLD_NOW | RTLD_LOCAL),
+              let make = dlsym(handle, "LLNativeCreate"), let send = dlsym(handle, "LLNativeInput"), let stop = dlsym(handle, "LLNativeClose") else {
+            LiveLog.write("native device library: \(dlerror().map { String(cString: $0) } ?? "symbol unavailable")")
+            return nil
+        }
+        library = handle // Keep private ABI code loaded while callbacks may exist.
+        create = unsafeBitCast(make, to: Create.self)
+        input = unsafeBitCast(send, to: Input.self)
+        close = unsafeBitCast(stop, to: Close.self)
+    }
+}
+private final class NativeDeviceCallback {
+    let receive: (UInt8, Data, CVPixelBuffer?) -> Void
+    init(_ receive: @escaping (UInt8, Data, CVPixelBuffer?) -> Void) { self.receive = receive }
+}
+private let nativeDeviceCallback: NativeDeviceAPI.Callback = { context, type, bytes, count in
+    guard let context else { return }
+    let box = Unmanaged<NativeDeviceCallback>.fromOpaque(context)
+    let pixels = type == 10 ? bytes.map { Unmanaged<CVPixelBuffer>.fromOpaque(UnsafeMutableRawPointer(mutating: $0)).takeUnretainedValue() } : nil
+    let data = type == 10 ? Data() : bytes.flatMap { count > 0 ? Data(bytes: $0, count: count) : nil } ?? Data()
+    box.takeUnretainedValue().receive(type, data, pixels)
+    if type == 0 { box.release() }
 }
 
 private final class DeviceLiveSession {
     private let udid: String
     private let queue = DispatchQueue(label: "com.layerlens.device.session")
-    private let inputQueue = DispatchQueue(label: "com.layerlens.device.input")
-    private let readQueue = DispatchQueue(label: "com.layerlens.device.frames")
-    private var process: Process?
-    private var inputHandle: FileHandle?
-    private var outputHandle: FileHandle?
-    private var sessionDirectory: URL?
-    private var errorTimer: DispatchSourceTimer?
-    private var viewers: [ObjectIdentifier: WebSocketConnection] = [:]
-    private var inFlight: [ObjectIdentifier: Int] = [:]
-    private var owner: ObjectIdentifier?
-    private var orientation = 1
-    private var errorText = ""
+    private let captureQueue = DispatchQueue(label: "com.layerlens.device.encode", qos: .userInteractive)
+    private let encoder = LiveVideoEncoder(frameRate: 30)
+    private lazy var video = LiveVideoBroadcaster(queue: queue) { [weak self] in
+        guard let self else { return }
+        self.forceKeyFrame = true
+        self.framePending = self.latestPixels != nil
+        self.encodePending()
+    }
+    private var resolver: Process?
+    private var native: UnsafeMutableRawPointer?
+    private var startupTimer: DispatchSourceTimer?
     private var idleStop: DispatchWorkItem?
+    private var viewers: [ObjectIdentifier: WebSocketConnection] = [:]
+    private var owner: ObjectIdentifier?
+    private var errorText = ""
+    private var geometry: [String: Any]?
+    private var latestPixels: CVPixelBuffer?
+    private var framePending = false
+    private var encoding = false
+    private var forceKeyFrame = false
     private var stopping = false
     private var onEmpty: (() -> Void)?
-
-    init(udid: String) { self.udid = udid }
+    var isIdle: Bool { queue.sync { viewers.isEmpty } }
+    init(udid: String) {
+        self.udid = udid
+        encoder.onOutput = { [weak self] type, data in self?.queue.async {
+            guard let self, !self.stopping else { return }
+            if type == 0x02 { self.startupTimer?.cancel(); self.startupTimer = nil }
+            self.video.broadcast(type, data)
+        } }
+        encoder.onError = { [weak self] error in self?.queue.async { self?.fail(error) } }
+    }
 
     func add(_ socket: WebSocketConnection, head: HTTPRequestHead, onEmpty: @escaping () -> Void) {
         queue.async { [self] in
-            idleStop?.cancel()
-            idleStop = nil
-            let id = ObjectIdentifier(socket)
+            guard !stopping else { socket.close(); return }
+            idleStop?.cancel(); idleStop = nil
             self.onEmpty = onEmpty
+            let id = ObjectIdentifier(socket)
             socket.onText = { [weak self] text in self?.queue.async { self?.input(text, id: id) } }
             socket.onClose = { [weak self] in self?.queue.async { self?.remove(id) } }
             guard socket.accept(head) else { socket.close(); return }
             viewers[id] = socket
-            needsKey.insert(id)
-            replay(to: socket, id: id)
-            // A very long GOP can exceed the bounded replay cache. Restart the
-            // shared session on a new join so every viewer gets a fresh source key.
-            if config != nil && gop.isEmpty {
-                for viewer in viewers.values { viewer.close() }
-                stop()
-                return
-            }
-            if process == nil { start() }
+            if let geometry { message(geometry, to: socket) }
+            video.add(socket)
+            if resolver == nil && native == nil { start() }
         }
     }
-
     private func start() {
-        let child = Process(), output = Pipe(), errors = Pipe()
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("layerlens-live-" + UUID().uuidString)
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            for name in ["input", "output"] {
-                guard mkfifo(directory.appendingPathComponent(name).path, 0o600) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-            }
-            inputHandle = try FileHandle(forUpdating: directory.appendingPathComponent("input"))
-            outputHandle = try FileHandle(forUpdating: directory.appendingPathComponent("output"))
-            sessionDirectory = directory
-        } catch {
-            fail(error.localizedDescription); return
-        }
-        child.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        child.arguments = [DeviceLive.bridgeURL.path, "-s", udid, "mirror", "--seconds", "3600"]
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-        env["LAYERLENS_SESSION"] = directory.path
-        env["LAYERLENS_PARENT_PID"] = String(getpid())
-        child.environment = env
-        child.standardInput = FileHandle.nullDevice; child.standardOutput = output; child.standardError = errors
+        let process = Process(), output = Pipe(), errors = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [DeviceLive.bridgeURL.path, udid]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice; process.standardOutput = output; process.standardError = errors
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { handle.readabilityHandler = nil; return }
             let text = String(decoding: data, as: UTF8.self)
-            LiveLog.write("device: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            LiveLog.write("device resolve: " + text)
+            self?.queue.async { self?.errorText = String(((self?.errorText ?? "") + text).suffix(3000)) }
+        }
+        process.terminationHandler = { [weak self] child in
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            try? output.fileHandleForReading.close()
             self?.queue.async {
-                guard let self else { return }
-                self.errorText = String((self.errorText + text).suffix(3000))
-                self.message(["type": "status", "detail": String(self.errorText.suffix(1500))])
+                guard let self, !self.stopping else { return }
+                self.resolver = nil
+                guard child.terminationStatus == 0, (try? JSONSerialization.jsonObject(with: data)) is [String],
+                      let arguments = String(data: data, encoding: .utf8), let api = NativeDeviceAPI.shared else {
+                    self.fail(self.errorText.isEmpty ? "无法初始化主进程设备采集" : self.errorText); return
+                }
+                let box = Unmanaged.passRetained(NativeDeviceCallback { [weak self] kind, packet, pixels in
+                    // At most one native image is waiting on the session queue.
+                    let done = DispatchSemaphore(value: 0)
+                    guard let self else { return }
+                    self.queue.async { self.receive(kind, packet, pixels: pixels); done.signal() }
+                    done.wait()
+                })
+                self.native = arguments.withCString { api.create($0, nativeDeviceCallback, box.toOpaque()) }
+                if self.native == nil { box.release(); self.fail("主进程采集创建失败") }
+                else { LiveLog.write("device \(self.udid): capture and HID in main process pid=\(getpid())") }
             }
         }
-        child.terminationHandler = { [weak self] child in
-            self?.queue.async {
-                guard let self else { return }
-                self.fail(self.errorText.isEmpty ? "Device helper exited (\(child.terminationStatus))" : String(self.errorText.suffix(1500)))
-                if self.viewers.isEmpty { self.stop() }
-            }
-        }
-        process = child
+        resolver = process
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .seconds(1))
-        timer.setEventHandler { [weak self] in
-            guard let self, let data = try? Data(contentsOf: directory.appendingPathComponent("errors")), !data.isEmpty else { return }
-            let text = String(decoding: data.suffix(3000), as: UTF8.self)
-            if text != self.errorText {
-                self.errorText = text
-                LiveLog.write("device GUI: " + text)
-                self.message(["type": "status", "detail": String(text.suffix(1500))])
-            }
-        }
-        errorTimer = timer; timer.resume()
-        do { try child.run() } catch {
-            fail(error.localizedDescription)
-            process = nil
+        timer.schedule(deadline: .now() + 20)
+        timer.setEventHandler { [weak self] in self?.fail("设备采集初始化超时，请确认设备已连接并解锁。") }
+        startupTimer = timer; timer.resume()
+        do { try process.run() } catch { fail(error.localizedDescription) }
+        try? output.fileHandleForWriting.close(); try? errors.fileHandleForWriting.close()
+    }
+    private func receive(_ kind: UInt8, _ data: Data, pixels: CVPixelBuffer?) {
+        if kind == 0 {
+            if let token = native { native = nil; NativeDeviceAPI.shared?.close(token) }
+            if !stopping { fail("设备采集已结束") }
             return
         }
-        readQueue.async { [weak self] in
-            guard let handle = self?.outputHandle else { return }
-            func read(_ count: Int) -> Data? {
-                var result = Data()
-                while result.count < count {
-                    guard let chunk = try? handle.read(upToCount: count - result.count), !chunk.isEmpty else { return nil }
-                    result.append(chunk)
-                }
-                return result
-            }
-            while let header = read(4) {
-                let size = header.reduce(0) { ($0 << 8) | Int($1) }
-                guard size > 1, size <= 20_000_000, let payload = read(size) else { break }
-                // Keep one pending frame; the reader never builds an unbounded dispatch queue.
-                let semaphore = DispatchSemaphore(value: 0)
-                self?.queue.async {
-                    defer { semaphore.signal() }
-                    guard let self, !self.stopping else { return }
-                    self.forward(payload)
-
-                }
-                if self == nil { break }
-                semaphore.wait()
-            }
-            try? handle.close()
+        guard !stopping else { return }
+        if kind == 254 { LiveLog.write(String(decoding: data, as: UTF8.self)); return }
+        if kind == 255 { fail(String(decoding: data, as: UTF8.self)); return }
+        if kind == 9, var info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            info["type"] = "geometry"; geometry = info
+            for socket in viewers.values { message(info, to: socket) }
+        }
+        if let pixels {
+            latestPixels = pixels; framePending = true
+            encodePending()
         }
     }
-
-    private var gop: [Data] = []
-    private var gopBytes = 0
-    private var config: Data?
-    private var needsKey: Set<ObjectIdentifier> = []
-    private func forward(_ packet: Data) {
-        guard let type = packet.first else { return }
-        if type == 5 {
-            config = packet
-            gop = []; gopBytes = 0
-            if let metadata = try? JSONSerialization.jsonObject(with: Data(packet.dropFirst())) as? [String: Any] {
-                var geometry = metadata
-                geometry["type"] = "geometry"
-                message(geometry)
-            }
-            // A new configuration requires a keyframe for every decoder.
-            needsKey.formUnion(viewers.keys)
-            return
-        }
-        guard type == 6 || type == 7 else { return }
-        if type == 6 { gop = []; gopBytes = 0 }
-        if type == 6 || !gop.isEmpty {
-            gop.append(packet); gopBytes += packet.count
-            if gop.count > 12000 || gopBytes > 12_000_000 { gop = []; gopBytes = 0 }
-        }
-        for (id, socket) in viewers {
-            if (inFlight[id] ?? 0) >= 12 { needsKey.insert(id); continue }
-            if needsKey.contains(id) {
-                guard type == 6, let config else { continue }
-                socket.sendBinary(config) { _ in }
-                needsKey.remove(id)
-            }
-            send(packet, to: socket, id: id)
+    /// Bounded to one encoding submission plus the newest source frame.
+    private func encodePending() {
+        guard !stopping, !encoding, framePending, let pixels = latestPixels, let geometry,
+              let width = geometry["width"] as? Double, let height = geometry["height"] as? Double,
+              width.isFinite, height.isFinite, width > 0, height > 0 else { return }
+        encoding = true; framePending = false
+        let keyFrame = forceKeyFrame; forceKeyFrame = false
+        let target = video.targetSize
+        let ratio = target.map { max($0.width / width, $0.height / height) } ?? 1
+        let scale = min((ratio * 16).rounded(.up) / 16, 1)
+        captureQueue.async { [self] in
+            if keyFrame { encoder.requestKeyFrame() }
+            encoder.encode(pixels, scale: scale, contentSize: CGSize(width: width, height: height))
+            queue.async { [self] in encoding = false; encodePending() }
         }
     }
-    private func send(_ packet: Data, to socket: WebSocketConnection, id: ObjectIdentifier) {
-        inFlight[id, default: 0] += 1
-        socket.sendBinary(packet) { [weak self] _ in self?.queue.async {
-            guard let self, self.viewers[id] != nil else { return }
-            self.inFlight[id] = max(0, (self.inFlight[id] ?? 1) - 1)
-            if self.inFlight[id] == 0 && self.needsKey.contains(id) { self.replay(to: socket, id: id) }
-        } }
-    }
-    private func replay(to socket: WebSocketConnection, id: ObjectIdentifier) {
-        guard let config, !gop.isEmpty, gop.first?.first == 6 else { return }
-        needsKey.remove(id)
-        socket.sendBinary(config) { _ in }
-        for packet in gop { send(packet, to: socket, id: id) }
+    private func message(_ value: [String: Any], to socket: WebSocketConnection) {
+        if let data = try? JSONSerialization.data(withJSONObject: value), let text = String(data: data, encoding: .utf8) { socket.sendText(text) }
     }
     private func fail(_ detail: String) {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["type": "error", "detail": detail]), let text = String(data: data, encoding: .utf8) else { return }
+        guard !stopping else { return }
+        let data = try? JSONSerialization.data(withJSONObject: ["type": "error", "detail": detail])
+        let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         for socket in viewers.values { socket.sendText(text) { _ in socket.close() } }
-    }
-    private func message(_ value: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: value), let text = String(data: data, encoding: .utf8) else { return }
-        for socket in viewers.values { socket.sendText(text) }
+        stop()
     }
     private func write(_ text: String) {
-        guard let handle = inputHandle else { return }
-        inputQueue.async { try? handle.write(contentsOf: Data((text + "\n").utf8)) }
+        if let native, let api = NativeDeviceAPI.shared { text.withCString { api.input(native, $0) } }
     }
     private func input(_ text: String, id: ObjectIdentifier) {
         guard text.utf8.count < 1_000_000, let data = text.data(using: .utf8),
-              let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let type = m["type"] as? String else { return }
+              let item = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let type = item["type"] as? String else { return }
+        if type.hasPrefix("touch1-") {
+            guard ["x", "y", "width", "height"].allSatisfy({ key in
+                (item[key] as? NSNumber)?.doubleValue.isFinite == true
+            }), let width = item["width"] as? NSNumber, let height = item["height"] as? NSNumber,
+                  width.doubleValue > 0, height.doubleValue > 0 else { return }
+        }
+        if type == "button" { guard let button = item["button"] as? String, ["swipe-to-home", "app-switcher"].contains(button) else { return } }
+        if type == "key" {
+            guard let code = item["code"] as? String, code.count <= 64,
+                  item["modifiers"] == nil || item["modifiers"] is [String] else { return }
+        }
+        if type == "paste" { guard item["text"] is String else { return } }
+        if type == "size" {
+            guard let width = item["width"] as? Double, let height = item["height"] as? Double else { return }
+            video.setSize((width, height), of: id)
+            framePending = latestPixels != nil; encodePending(); return
+        }
+        if type == "keyframe" { video.requestKeyFrame(); return }
+        if type == "restart" {
+            for socket in viewers.values { socket.close() }; stop(); return
+        }
         if type == "touch1-down" { guard owner == nil || owner == id else { return }; owner = id }
         if type.hasPrefix("touch1-") { guard owner == id else { return }; if type == "touch1-up" { owner = nil } }
         if type == "release" { guard owner == nil || owner == id else { return }; owner = nil }
@@ -238,34 +264,27 @@ private final class DeviceLiveSession {
         write(text)
     }
     private func remove(_ id: ObjectIdentifier) {
-        viewers[id] = nil; inFlight[id] = nil; needsKey.remove(id)
+        viewers[id] = nil; video.remove(id)
+        framePending = latestPixels != nil; encodePending()
         if owner == id { write("{\"type\":\"release\"}"); owner = nil }
         guard viewers.isEmpty, !stopping else { return }
-        if process?.isRunning != true { stop(); return }
-        // 快速切回同一设备时复用媒体协商结果和 GOP，不重启 helper。
-        idleStop?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.viewers.isEmpty else { return }
-            self.stop()
+            guard let self, self.viewers.isEmpty else { return }; self.stop()
         }
-        idleStop = work
-        queue.asyncAfter(deadline: .now() + 30, execute: work)
+        idleStop?.cancel(); idleStop = work; queue.asyncAfter(deadline: .now() + 30, execute: work)
     }
+    func shutdown() { queue.sync { stop() } }
     private func stop() {
         guard !stopping else { return }
-        idleStop?.cancel(); idleStop = nil
-        stopping = true
-        errorTimer?.cancel(); errorTimer = nil
-        let handle = inputHandle
-        inputQueue.async {
-            try? handle?.write(contentsOf: Data("{\"type\":\"close\"}\n".utf8))
+        stopping = true; idleStop?.cancel(); startupTimer?.cancel(); latestPixels = nil
+        video.reset()
+        captureQueue.async { [self] in encoder.invalidate() }
+        if let resolver {
+            if resolver.isRunning { resolver.terminate() }
+            queue.asyncAfter(deadline: .now() + 3) { if resolver.isRunning { kill(resolver.processIdentifier, SIGKILL) } }
         }
-        if let outputHandle { try? outputHandle.write(contentsOf: Data([0, 0, 0, 0])) }
-        if let directory = sessionDirectory {
-            queue.asyncAfter(deadline: .now() + 12) { try? FileManager.default.removeItem(at: directory) }
-        }
-        let child = process
-        queue.asyncAfter(deadline: .now() + 3) { if child?.isRunning == true { child?.terminate() } }
+        resolver = nil
+        if let token = native { native = nil; NativeDeviceAPI.shared?.close(token) }
         onEmpty?()
     }
 }
