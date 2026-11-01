@@ -26,6 +26,8 @@ final class LiveVideoEncoder {
     private var forceKeyFrame = true
     var onError: ((String) -> Void)?
     private let outputLock = NSLock()
+    private let frameLock = NSLock()
+    private var activeFrame: FrameCompletion?
     private var generation = 0
     private let frameRate: Int
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
@@ -37,25 +39,42 @@ final class LiveVideoEncoder {
     private var transfer: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
 
+    /// A failed submission and its callback may both finish; notify the source once.
+    private final class FrameCompletion {
+        private let lock = NSLock()
+        private var action: (() -> Void)?
+        init(_ action: @escaping () -> Void) { self.action = action }
+        func finish() {
+            lock.lock(); let action = self.action; self.action = nil; lock.unlock()
+            action?()
+        }
+    }
+
     deinit {
         invalidate()
     }
 
     /// 下一帧强制为关键帧, 用于丢帧后恢复
     func requestKeyFrame() {
+        outputLock.lock(); defer { outputLock.unlock() }
         forceKeyFrame = true
     }
 
     /// scale 为相对原始分辨率的比例, 不大于 1
-    func encode(_ surface: IOSurface, scale: Double = 1) {
+    func encode(_ surface: IOSurface, scale: Double = 1, completion: @escaping () -> Void = {}) {
         var unmanaged: Unmanaged<CVPixelBuffer>?
         guard CVPixelBufferCreateWithIOSurface(nil, surface, nil, &unmanaged) == kCVReturnSuccess,
-              let source = unmanaged?.takeRetainedValue() else { return }
-        encode(source, scale: scale)
+              let source = unmanaged?.takeRetainedValue() else { completion(); return }
+        encode(source, scale: scale, completion: completion)
     }
 
     /// contentSize excludes device encoder padding at the right/bottom edges.
-    func encode(_ source: CVPixelBuffer, scale: Double = 1, contentSize: CGSize? = nil) {
+    func encode(_ source: CVPixelBuffer, scale: Double = 1, contentSize: CGSize? = nil,
+                completion: @escaping () -> Void = {}) {
+        // The source retains its latest frame while this submission is outstanding.
+        // Never let VideoToolbox become another unbounded frame queue.
+        frameLock.lock(); let busy = activeFrame != nil; frameLock.unlock()
+        guard !busy else { completion(); return }
         let sourceWidth = CVPixelBufferGetWidth(source)
         let sourceHeight = CVPixelBufferGetHeight(source)
         let visibleWidth = min(sourceWidth, max(2, Int(contentSize?.width ?? CGFloat(sourceWidth))))
@@ -65,39 +84,45 @@ final class LiveVideoEncoder {
         let w = max(2, Int(Double(visibleWidth) * ratio / 2) * 2)
         let h = max(2, Int(Double(visibleHeight) * ratio / 2) * 2)
         if session == nil || w != width || h != height {
-            guard setup(width: w, height: h) else { return }
+            guard setup(width: w, height: h) else { completion(); return }
         }
-        guard let session else { return }
+        guard let session else { completion(); return }
         var buffer = source
         if w != sourceWidth || h != sourceHeight {
-            guard let adjusted = scaled(source, visibleWidth: visibleWidth, visibleHeight: visibleHeight) else { return }
+            guard let adjusted = scaled(source, visibleWidth: visibleWidth, visibleHeight: visibleHeight) else { completion(); return }
             buffer = adjusted
         }
         outputLock.lock()
         let currentGeneration = generation
-        outputLock.unlock()
         let options: CFDictionary? = forceKeyFrame ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         forceKeyFrame = false
+        outputLock.unlock()
+        let frame = FrameCompletion(completion)
+        frameLock.lock(); activeFrame = frame; frameLock.unlock()
         let time = CMClockGetTime(CMClockGetHostTimeClock())
         let status = VTCompressionSessionEncodeFrame(session, imageBuffer: buffer, presentationTimeStamp: time, duration: .invalid, frameProperties: options, infoFlagsOut: nil) { [weak self] status, _, sample in
-            guard status == noErr, let sample else {
-                LiveLog.write("encode frame failed: \(status)")
-                return
-            }
-            guard let self else { return }
+            guard let self else { frame.finish(); return }
             self.outputLock.lock()
-            defer { self.outputLock.unlock() }
-            guard currentGeneration == self.generation else { return }
-            self.output(sample)
+            if currentGeneration == self.generation {
+                if status == noErr, let sample { self.output(sample) }
+                else {
+                    self.forceKeyFrame = true
+                    LiveLog.write("encode frame failed: \(status)")
+                }
+            }
+            self.outputLock.unlock()
+            self.finish(frame)
         }
         if status != noErr {
-            forceKeyFrame = true
+            requestKeyFrame()
+            finish(frame)
             reportError("encode failed: \(status)")
         }
     }
 
     func invalidate() {
         outputLock.lock(); generation += 1; outputLock.unlock()
+        frameLock.lock(); let frame = activeFrame; activeFrame = nil; frameLock.unlock()
         if let session {
             VTCompressionSessionInvalidate(session)
         }
@@ -107,6 +132,14 @@ final class LiveVideoEncoder {
         }
         transfer = nil
         pool = nil
+        frame?.finish()
+    }
+
+    private func finish(_ frame: FrameCompletion) {
+        frameLock.lock()
+        if activeFrame === frame { activeFrame = nil }
+        frameLock.unlock()
+        frame.finish()
     }
 
     private func scaled(_ source: CVPixelBuffer, visibleWidth: Int, visibleHeight: Int) -> CVPixelBuffer? {
@@ -180,7 +213,7 @@ final class LiveVideoEncoder {
         session = created
         self.width = width
         self.height = height
-        forceKeyFrame = true
+        requestKeyFrame()
         return true
     }
 
@@ -211,7 +244,7 @@ final class LiveVideoEncoder {
 /// Both capture sources use this H.264 WebSocket protocol and recovery policy.
 /// All methods and callbacks run on the supplied session queue.
 final class LiveVideoBroadcaster {
-    static let maxInFlight = 6
+    static let maxInFlight = 2
     private let queue: DispatchQueue
     private let onKeyFrame: () -> Void
     private var config: Data?
@@ -224,6 +257,7 @@ final class LiveVideoBroadcaster {
         var inFlight = 0
         var waitingKeyFrame = true
         var recovering = false
+        var sentConfig: Data?
         var size: (width: Double, height: Double)?
         init(_ socket: WebSocketConnection) { self.socket = socket }
     }
@@ -247,7 +281,7 @@ final class LiveVideoBroadcaster {
     func add(_ socket: WebSocketConnection) {
         let viewer = Viewer(socket)
         viewers[ObjectIdentifier(socket)] = viewer
-        if let config { send(Data([0x01]) + config, to: viewer) }
+        sendConfig(to: viewer)
         requestKeyFrame()
     }
 
@@ -267,21 +301,22 @@ final class LiveVideoBroadcaster {
         config = nil
         keyFrameRequest?.cancel(); keyFrameRequest = nil
         lastKeyFrameRequest = 0
-        for viewer in viewers.values { viewer.waitingKeyFrame = true }
+        for viewer in viewers.values { viewer.waitingKeyFrame = true; viewer.sentConfig = nil }
     }
 
     func broadcast(_ type: UInt8, _ data: Data) {
         if type == 0x01 {
             guard data != config else { return }
             config = data
-            for viewer in viewers.values { viewer.waitingKeyFrame = true }
+            for viewer in viewers.values {
+                viewer.waitingKeyFrame = true
+                if !viewer.recovering && viewer.inFlight < Self.maxInFlight { sendConfig(to: viewer) }
+                else { viewer.recovering = true }
+            }
+            return
         }
         let packet = Data([type]) + data
         for viewer in viewers.values {
-            if type == 0x01 {
-                send(packet, to: viewer)
-                continue
-            }
             // Once a delta is skipped, never send more deltas before a fresh keyframe.
             guard !viewer.recovering else { continue }
             if viewer.inFlight >= Self.maxInFlight {
@@ -289,10 +324,24 @@ final class LiveVideoBroadcaster {
                 viewer.recovering = true
                 continue
             }
-            if type == 0x02 { viewer.waitingKeyFrame = false }
+            if type == 0x02 {
+                if viewer.sentConfig != config {
+                    // Configuration changes also obey the send bound. Keep only
+                    // the newest config, then send it with a fresh keyframe.
+                    guard viewer.inFlight == 0 else { viewer.recovering = true; continue }
+                    sendConfig(to: viewer)
+                }
+                viewer.waitingKeyFrame = false
+            }
             guard !viewer.waitingKeyFrame else { continue }
             send(packet, to: viewer)
         }
+    }
+
+    private func sendConfig(to viewer: Viewer) {
+        guard let config, viewer.sentConfig != config else { return }
+        viewer.sentConfig = config
+        send(Data([0x01]) + config, to: viewer)
     }
 
     private func send(_ packet: Data, to viewer: Viewer) {

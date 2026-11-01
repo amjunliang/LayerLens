@@ -21,6 +21,7 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
 @main enum LiveVideoTests {
     static func main() {
         broadcastRecovery()
+        encoderBackpressure()
         encodeAndCrop()
         print("PASS shared H.264 pipeline checks")
     }
@@ -36,8 +37,9 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
             video.broadcast(1, config)
             video.broadcast(2, Data([0x65]))
             for _ in 0..<20 { video.broadcast(3, Data([0x41])) }
+            for i in 0..<20 { video.broadcast(1, Data([1, 100, 0, UInt8(i)])) }
             require(slow.packets.count == LiveVideoBroadcaster.maxInFlight, "Unbounded send queue")
-            require(slow.packets.map { $0[0] } == [1,2,3,3,3,3], "Unexpected packet order")
+            require(slow.packets.map { $0[0] } == [1,2], "Unexpected packet order")
         }
         require(requested.wait(timeout: .now() + 1) == .success, "Initial keyframe not requested")
         let completions = queue.sync { slow.completions }
@@ -49,7 +51,7 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
             require(slow.packets.count == count, "Delta sent after a dropped reference")
             video.add(joined)
             video.broadcast(3, Data([0x41]))
-            require(joined.packets.count == 1 && joined.packets[0][0] == 1, "New viewer did not wait for keyframe")
+            require(joined.packets.count == 1 && joined.packets[0] == Data([1,1,100,0,19]), "New viewer did not receive newest config and wait for keyframe")
             video.broadcast(2, Data([0x65]))
             require(slow.packets.last?[0] == 2 && joined.packets.last?[0] == 2, "Keyframe did not recover viewers")
             video.broadcast(1, Data([1, 100, 0, 41]))
@@ -59,6 +61,31 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
             video.remove(ObjectIdentifier(slow)); video.remove(ObjectIdentifier(joined)); video.reset()
         }
         print("PASS bounded sends, slow-client recovery, late join and changed configuration")
+    }
+
+    static func encoderBackpressure() {
+        var source: CVPixelBuffer?
+        require(CVPixelBufferCreate(nil, 128, 160, kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &source) == noErr, "Create busy source")
+        let encoder = LiveVideoEncoder()
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let firstDone = DispatchSemaphore(value: 0), skipped = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "test.encode")
+        encoder.onOutput = { type, _ in
+            if type == 2 { entered.signal(); _ = release.wait(timeout: .now() + 5) }
+        }
+        queue.async { encoder.encode(source!) { firstDone.signal() } }
+        require(entered.wait(timeout: .now() + 5) == .success, "No active encoding callback")
+        // Hold the first submission in its actual callback; another input must be
+        // rejected immediately without waiting for the encoder or queuing work.
+        encoder.encode(source!) { skipped.signal() }
+        require(skipped.wait(timeout: .now()) == .success, "Encoder queued a second frame")
+        require(firstDone.wait(timeout: .now()) == .timedOut, "Source released before encoding completed")
+        release.signal()
+        require(firstDone.wait(timeout: .now() + 5) == .success, "Missing encode completion")
+        queue.sync { encoder.invalidate() }
+        require(firstDone.wait(timeout: .now()) == .timedOut, "Encode completion fired twice")
+        print("PASS single encoder submission: busy input dropped, completion waits for actual output")
     }
 
     static func encodeAndCrop() {

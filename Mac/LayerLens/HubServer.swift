@@ -28,6 +28,7 @@ final class HubServer {
     private let appLogs = AppLogRecorder()
     private let network: NetworkRecorder
     private let git = GitController()
+    private let targetStates = TargetStateBroadcaster()
     let terminal = TerminalController()
     func stopDeviceLive() { deviceLive.shutdown() }
     /// AppleScript 与 simctl 较慢, 不占用服务队列
@@ -52,6 +53,9 @@ final class HubServer {
             registry?.captureEnabled(deviceId: deviceId, bundleId: bundleId) ?? false
         }
         webRoot = Self.locateWebRoot()
+        registry.onStatesChanged = { [weak self] state in
+            self?.queue.async { [weak self] in self?.targetStates.update(state) }
+        }
         registry.onAppsChanged = { [appLogs, network] apps in
             appLogs.update(apps: apps)
             network.update(apps: apps)
@@ -110,6 +114,13 @@ final class HubServer {
         // 跨站页面可以发起请求但带有其 Origin, 拒绝以防被借用修改 App 或操作 Xcode
         if let origin = head.header("Origin"), !allowedHosts.contains(where: { origin.lowercased() == "http://" + $0 }) {
             connection.respond(.error(403, "Forbidden origin"))
+            return
+        }
+        if head.path == "/api/hub/target-states" {
+            guard head.method == "GET", head.header("Upgrade")?.lowercased() == "websocket", head.header("Sec-WebSocket-Key") != nil else {
+                connection.respond(.error(400, "WebSocket required")); return
+            }
+            targetStates.accept(head: head, leftover: leftover, connection: connection.detach())
             return
         }
         if head.path == "/api/hub/event-socket" {

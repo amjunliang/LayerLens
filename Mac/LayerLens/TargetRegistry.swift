@@ -53,8 +53,9 @@ struct AppRecord {
     let endpoint: TargetEndpoint
     /// iOS 端 /api/app 的原始内容
     let info: [String: Any]
-    /// 本次扫描端口超时(进程在但不响应), 即 App 在后台被挂起, 沿用上次的信息
+    /// 连续扫描无法响应, 疑似挂起; 不代表系统确认的前后台状态
     var suspended = false
+    var responding = true
 }
 
 /// 定时发现模拟器和集成了 LayerLens 的 App, 所有状态只在 queue 上读写
@@ -75,6 +76,8 @@ final class TargetRegistry {
     private var detailsLoading: Set<String> = []
     private var apps: [AppRecord] = []
     private var scanning = false
+    /// 短暂通信超时不能立即当作挂起; 成功响应或端口移除时重置。
+    private var scanMisses: [String: Int] = [:]
     private var scanWaiters: [() -> Void] = []
     /// 已取到过 USB 设备列表, 之后的扫描才包含真机上的 App
     private var usbListed = false
@@ -94,6 +97,19 @@ final class TargetRegistry {
     private let captureLock = NSLock()
     /// 每次扫描完成后在 queue 上回调当前的 App 列表, 启动前设置
     var onAppsChanged: (([AppRecord]) -> Void)?
+    var onStatesChanged: (([String: Any]) -> Void)?
+    private lazy var stateMonitor: TargetStateMonitor = {
+        let monitor = TargetStateMonitor { [queue] in AppEventStream(queue: queue) }
+        monitor.onChange = { [weak self] states, snapshot in
+            guard let self else { return }
+            self.appStates = states
+            self.onStatesChanged?(snapshot)
+        }
+        return monitor
+    }()
+    private var appStates: [[String: Any]] = []
+
+    func stop() { queue.sync { timer?.cancel(); stateMonitor.stop() } }
 
     init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -231,12 +247,10 @@ final class TargetRegistry {
                     .filter { $0.deviceId == device.id }
                     .sorted { ($0.info["appName"] as? String ?? "") < ($1.info["appName"] as? String ?? "") }
                     .map { app -> [String: Any] in
-                        var info = app.info
+                        var info = appStates.first { $0["deviceId"] as? String == app.deviceId && $0["bundleId"] as? String == app.bundleId } ?? app.info
                         info["port"] = app.endpoint.port
                         info["connection"] = app.endpoint.connectionType
-                        if app.suspended {
-                            info["suspended"] = true
-                        }
+                        if info["suspended"] == nil { info["suspended"] = app.suspended }
                         return info
                     }
                 return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "model": device.model, "apps": deviceApps]
@@ -460,7 +474,10 @@ final class TargetRegistry {
     // MARK: - Apps
 
     private func findApp(deviceId: String, bundleId: String) -> AppRecord? {
-        apps.first { $0.deviceId == deviceId && $0.bundleId == bundleId }
+        guard let app = apps.first(where: { $0.deviceId == deviceId && $0.bundleId == bundleId }) else { return nil }
+        guard let state = appStates.first(where: { $0["deviceId"] as? String == deviceId && $0["bundleId"] as? String == bundleId }) else { return app }
+        return AppRecord(deviceId: app.deviceId, bundleId: app.bundleId, endpoint: app.endpoint, info: state,
+                         suspended: state["suspended"] as? Bool ?? app.suspended, responding: app.responding)
     }
 
     /// 并发请求端口范围内每个端口的 /api/app; 扫描进行中时合并到同一次扫描
@@ -518,7 +535,9 @@ final class TargetRegistry {
         }
         group.notify(queue: queue) { [self] in
             found = Self.uniqueInstances(found)
+            scanMisses = scanMisses.filter { transientPorts.contains($0.key) }
             apps = found + suspendedApps(found: found, devices: devices, transientPorts: transientPorts)
+            stateMonitor.update(apps)
             rememberSourceFiles()
             onAppsChanged?(apps)
             scanning = false
@@ -564,7 +583,10 @@ final class TargetRegistry {
                 return nil
             }
             var app = app
-            app.suspended = true
+            let misses = (scanMisses[key] ?? 0) + 1
+            scanMisses[key] = misses
+            app.suspended = misses >= 3
+            app.responding = false
             return app
         }
     }

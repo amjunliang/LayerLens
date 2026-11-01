@@ -1008,7 +1008,7 @@ async function setMode(mode) {
   const fromLive = state.mode === 'live';
   // 从实时画面切出时层级已过期: 先取到新层级再切换, 只绘制一次, 避免先画旧层级再刷新
   let roots = null;
-  if (fromLive) {
+  if (fromLive && targets.bundleId && currentDevice()) {
     ++refreshSeq;
     try {
       roots = await api('/api/hierarchy');
@@ -1117,6 +1117,7 @@ function drawableNodes(win) {
 }
 
 function syncModeUI() {
+  syncOfflineView();
   document.body.classList.toggle('mode-3d', state.mode === '3d');
   document.body.classList.toggle('mode-live', state.mode === 'live');
   $('liveWrap').hidden = state.mode !== 'live';
@@ -1681,7 +1682,7 @@ function liveSupported() {
 async function syncLive() {
   if (!pageActivity.active) return;
   const device = currentDevice();
-  const physical = device?.kind === 'device';
+  const physical = (device?.kind || targetHistory[targets.deviceId]?.kind) === 'device';
   const udid = device?.id || '';
   $('liveModeBtn').hidden = false;
   $('liveModeBtn').classList.remove('unavailable');
@@ -1704,16 +1705,20 @@ async function syncLive() {
       if (live.udid !== udid) return;
     }
   }
+  live.real = physical;
+  $('liveRotate').disabled = !device || physical;
+  $('liveCanvas').hidden = !device;
   if (state.mode !== 'live') return;
   if (udid) {
     liveStart();
   } else {
-    showLiveGuide(t('请先选择设备'));
+    showLiveGuide();
   }
 }
 
 function liveStart() {
-  if (!pageActivity.active || !liveAvailable()) return;
+  if (!pageActivity.active) return;
+  if (!liveAvailable()) { showLiveGuide(); return; }
   if (live.ws) { liveResume(); return; }
   clearTimeout(live.retryTimer);
   live.error = '';
@@ -1802,6 +1807,7 @@ function liveResume() {
     paintLive(frame);
   }
   if (live.hasFrame) $('liveGuide').hidden = true;
+  else showLiveGuide(live.error || undefined);
 }
 
 function liveStop() {
@@ -1838,6 +1844,20 @@ function liveStop() {
 
 // 私有框架加载失败时说明原因, 否则显示等待连接
 function showLiveGuide(title) {
+  if (targets.deviceId && currentDeviceGone()) {
+    syncOfflineView();
+    return;
+  }
+  syncOfflineView();
+  if (!targets.deviceId) {
+    $('liveGuide').hidden = false;
+    $('liveLoading').hidden = true;
+    $('liveRetry').hidden = true;
+    $('liveError').hidden = true;
+    $('liveGuideTitle').textContent = t('请先选择设备');
+    $('liveWaiting').hidden = true;
+    return;
+  }
   const supported = liveSupported();
   $('liveGuide').hidden = false;
   $('liveLoading').hidden = !!title || !!live.error || !supported || !liveAvailable();
@@ -1853,7 +1873,8 @@ function showLiveGuide(title) {
   $('liveGuideTitle').textContent = title || (supported ? (LANG === 'en' ? 'Loading screen…' : '正在加载画面…') : t('无法加载 Xcode 的模拟器框架'));
   $('liveError').hidden = supported;
   $('liveError').textContent = supported ? '' : `${t('请确认已安装 Xcode, 并用 xcode-select 选中它')}\n${targets.hub?.liveError || ''}`;
-  $('liveWaiting').hidden = !supported;
+  $('liveWaiting').hidden = !supported || !!title || !!live.error;
+  $('liveWaiting').textContent = t('正在等待连接…');
 }
 
 // Both sources: 01 = avcC, 02 = H.264 keyframe, 03 = H.264 delta.
@@ -1867,8 +1888,13 @@ function requestLiveKeyFrame() {
 
 function configureLiveDecoder(payload, onFrame) {
   if (live.decoder && live.decoder.state !== 'closed') live.decoder.close();
+  live.pendingFrame?.close?.();
+  live.pendingFrame = null;
   const socket = live.ws;
-  const decoder = new VideoDecoder({ output: onFrame, error: (e) => {
+  const decoder = new VideoDecoder({ output: (frame) => {
+    if (live.ws !== socket || live.decoder !== decoder) { frame.close?.(); return; }
+    onFrame(frame);
+  }, error: (e) => {
     if (live.ws !== socket || live.decoder !== decoder) return;
     console.warn('live decoder:', e.message);
     live.decoder = null;
@@ -1916,9 +1942,11 @@ function feedLiveFrame(buf) {
         if (type !== 0x02 || !live.decoderConfig) return;
         configureLiveDecoder(live.decoderConfig, onFrame);
       }
-      if (type === 0x03 && live.decoder.decodeQueueSize > 6) {
-        requestLiveKeyFrame();
-        return;
+      if (live.decoder.decodeQueueSize >= 2) {
+        if (type !== 0x02) { requestLiveKeyFrame(); return; }
+        // A fresh keyframe replaces queued work. Until then, stop adding deltas;
+        // repeatedly cancelling a slow decoder would prevent it outputting anything.
+        configureLiveDecoder(live.decoderConfig, onFrame);
       }
       live.decoder.decode(new EncodedVideoChunk({ type: type === 0x02 ? 'key' : 'delta', timestamp: live.timestamp, data: payload }));
       live.timestamp += 16667;
@@ -2107,12 +2135,37 @@ const TARGETS_POLL_MS = 2000;
 const API_VERSION = 1;
 // hadDevice: 页面加载时选中的设备是否存在
 // idle: 正在显示没有设备的默认页
-const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false, idle: false };
+const targets = { hub: null, devices: [], deviceId: '', bundleId: '', deviceOnly: false, hadDevice: false, idle: false };
 
 // 连接过的设备和 App: 断开后仍显示在菜单中, 选中项不随设备断开跳动, 连回来后自动恢复.
 // 由 Mac App 记录和保存(扫描到的设备和 App 自动记录), 随设备列表返回; 网页和 App 窗口共用一份, 重启后保留, 用户可从菜单中移除
 // { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version } } } }
 const targetHistory = {};
+// Keep names scoped to the exact device/app, including while metadata is loading.
+const targetNames = new Map();
+
+function targetAppName(deviceId, bundleId, hint = '') {
+  const key = JSON.stringify([deviceId, bundleId]);
+  const app = targets.devices.find((device) => device.id === deviceId)?.apps.find((app) => app.bundleId === bundleId);
+  const name = [hint, app?.appName, targetHistory[deviceId]?.apps?.[bundleId]?.appName, targetNames.get(key)]
+    .find((name) => typeof name === 'string' && name.trim() && name !== bundleId);
+  if (name) targetNames.set(key, name);
+  return name || bundleId;
+}
+
+function renderSelectedAppName(hint = '') {
+  if (!targets.bundleId) {
+    $('appName').title = '';
+    $('targetBtn').title = t('切换设备 / App');
+    return;
+  }
+  const name = targetAppName(targets.deviceId, targets.bundleId, hint);
+  $('appName').textContent = name;
+  $('appName').title = targets.bundleId;
+  $('targetBtn').title = name === targets.bundleId ? targets.bundleId : `${name}\n${targets.bundleId}`;
+  appInfo.name = name;
+  document.title = `${name} - LayerLens`;
+}
 // 旧版存在网页本地的记录, 首次加载时交给 Mac App
 const LEGACY_HISTORY_KEY = 'layerlens_target_history';
 
@@ -2155,7 +2208,10 @@ function recordTargetHistory() {
   const entry = existing || { id: targets.deviceId, name: device?.name || t('已断开的设备'), model: device?.model || '', os: device?.os || '', kind: device?.kind || (currentDevice() ? '' : device ? 'simulator' : '') };
   entry.apps = entry.apps || {};
   const app = currentApp();
-  if (targets.bundleId) entry.apps[targets.bundleId] = { bundleId: targets.bundleId, appName: app?.appName || appInfo.name || '', version: app?.version || '' };
+  if (targets.bundleId) {
+    const name = targetAppName(targets.deviceId, targets.bundleId);
+    entry.apps[targets.bundleId] = { bundleId: targets.bundleId, appName: name === targets.bundleId ? '' : name, version: app?.version || '' };
+  }
   targetHistory[targets.deviceId] = entry;
   postTargetHistory({ op: 'add', entry });
 }
@@ -2209,12 +2265,91 @@ function compatibilityWarning(app) {
   return t('LayerLens Mac App 版本过旧, 部分功能可能不可用, 请更新 Mac App');
 }
 
+// 每个窗口只连接 Mac 汇总状态; App 上游订阅由 Mac 统一维护。
+const targetStateHub = { socket: null, timer: 0, epoch: '', revision: -1, ready: false, states: new Map() };
+const targetStateKey = (device, app) => JSON.stringify([device, app]);
+
+function receiveTargetForeground(deviceId, bundleId, foreground) {
+  if (deviceId !== targets.deviceId || bundleId !== targets.bundleId) return;
+  appState.stateRevision = (appState.stateRevision || 0) + 1;
+  if (!foreground && appState.value === 'online') {
+    setAppState('background');
+    checkForeground();
+  } else if (foreground && appState.value === 'background') {
+    setAppState('online');
+    if (state.mode !== 'live') refresh();
+  }
+}
+
+function mergeTargetStates() {
+  if (!targetStateHub.ready) return;
+  for (const device of targets.devices) {
+    device.apps = device.apps.filter(app => {
+      const entry = targetStateHub.states.get(targetStateKey(device.id, app.bundleId));
+      // 已移除的记录留作墓碑, 防止在途旧扫描把它复活。
+      if (entry?.removed) return false;
+      if (entry) Object.assign(app, entry);
+      return true;
+    });
+    for (const entry of targetStateHub.states.values()) {
+      if (!entry.removed && entry.deviceId === device.id && !device.apps.some(app => app.bundleId === entry.bundleId)) device.apps.push({...entry});
+    }
+  }
+}
+
+function acceptTargetStates(message) {
+  if (message.type !== 'states' || !Array.isArray(message.apps)) return;
+  if (message.epoch !== targetStateHub.epoch) {
+    if (!message.replace) return;
+    targetStateHub.epoch = message.epoch;
+    targetStateHub.revision = -1;
+  }
+  if (message.revision <= targetStateHub.revision) return;
+  targetStateHub.revision = message.revision;
+  if (message.replace) {
+    // 快照中缺失的旧 App 同样视为移除。
+    for (const [key, entry] of targetStateHub.states) targetStateHub.states.set(key, {...entry, removed: true});
+  }
+  for (const entry of message.apps) targetStateHub.states.set(targetStateKey(entry.deviceId, entry.bundleId), entry);
+  for (const entry of message.removed || []) targetStateHub.states.set(targetStateKey(entry.deviceId, entry.bundleId), {...entry, removed: true});
+  targetStateHub.ready = true;
+  mergeTargetStates();
+  syncSelectedTargetState();
+  renderTargetMenu();
+}
+
+function ensureTargetStateSocket() {
+  if (targetStateHub.socket) return;
+  clearTimeout(targetStateHub.timer);
+  const url = new URL('/api/hub/target-states', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(url);
+  targetStateHub.socket = socket;
+  socket.onmessage = event => {
+    if (targetStateHub.socket !== socket) return;
+    acceptTargetStates(JSON.parse(event.data));
+  };
+  socket.onclose = () => {
+    if (targetStateHub.socket !== socket) return;
+    targetStateHub.socket = null;
+    targetStateHub.ready = false;
+    // 同一 revision 的重连快照也需要重新同步。
+    targetStateHub.revision = -1;
+    selectedTargetDisconnected();
+    targetStateHub.timer = setTimeout(ensureTargetStateSocket, 2000);
+  };
+  socket.onerror = () => {};
+}
+
 async function loadTargets() {
   const res = await fetch('/api/targets', { cache: 'no-store' });
   const data = await res.json();
   targets.hub = data.hub;
   targets.devices = data.devices || [];
   targets.simulators = data.simulators || [];
+  mergeTargetStates();
+  ensureTargetStateSocket();
+  syncSelectedTargetState();
   // 旧版 Mac App 不返回历史, 保留本页的记录
   if (data.history) {
     replaceTargetHistory(data.history);
@@ -2302,11 +2437,13 @@ function pickTarget() {
   if (saved.explicit || known || device?.apps.some((a) => a.bundleId === saved.bundleId)) {
     targets.deviceId = saved.deviceId || '';
     targets.bundleId = saved.bundleId || '';
+    targets.deviceOnly = !!targets.deviceId && !targets.bundleId;
     return;
   }
   const first = defaultDevice();
   targets.deviceId = first ? first.id : '';
   targets.bundleId = firstAppId(first);
+  targets.deviceOnly = false;
 }
 
 // 优先有运行中 App 的设备; 都没有时选第一台已启动的模拟器, 以便直接显示实时画面
@@ -2452,13 +2589,13 @@ function showPendingToast() {
 function switchTarget(deviceId, bundleId) {
   saveViewState();
   liveSuspend();
-  appState.source?.close();
   appState.source = null;
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
   appState.connected = false;
   targets.deviceId = deviceId;
   targets.bundleId = '';
+  targets.deviceOnly = !bundleId;
   targets.idle = false;
   targets.hadDevice = !!currentDevice();
   rememberTarget(deviceId, bundleId);
@@ -2490,6 +2627,7 @@ function compareTargetApps(a, b) {
 
 // 顶栏按钮中应用名后显示所在设备, 同一 App 同时运行在模拟器和真机上时能区分; 只选了设备时名称已是设备名, 不重复
 function renderTargetLabel() {
+  renderSelectedAppName();
   // 未启动的模拟器在模拟器列表中, 历史里可能只有占位记录
   const device = currentDevice() || (targets.simulators || []).find((sim) => sim.id === targets.deviceId);
   const entry = targetHistory[targets.deviceId];
@@ -2560,7 +2698,7 @@ function renderTargetMenu() {
 // 已启动的设备及其上运行的 App
 function targetDeviceRows(device, background) {
   const rows = [];
-  // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
+  // 真机和模拟器都可只选设备，不连接 App 时也能使用实时画面。
   const selectable = true;
   const head = el(selectable ? 'button' : 'div', 'target-device');
   // 真机名称是用户自定义的, 附上机型; 与名称相同(如模拟器)时不重复
@@ -2592,9 +2730,16 @@ function targetDeviceRows(device, background) {
 
 // 已断开的历史设备: 灰色显示, 可从列表移除; 选中的设备不能移除
 function goneDeviceRows(entry) {
-  const head = el('div', 'target-device offline');
+  const head = el('button', 'target-device offline');
   const model = entry.model && entry.model !== entry.name ? entry.model : '';
   head.append(el('span', 'status-dot'), el('span', 'target-device-name', entry.name), el('span', 'target-device-os', [model, entry.os].filter(Boolean).join(' · ') || t('已断开')));
+  head.classList.toggle('current', entry.id === targets.deviceId && !targets.bundleId);
+  head.title = t('只使用实时画面');
+  head.addEventListener('click', () => {
+    hidePopovers();
+    cancelSwitch();
+    if (entry.id !== targets.deviceId || targets.bundleId) switchTarget(entry.id, '');
+  });
   if (entry.id !== targets.deviceId) head.appendChild(historyRemoveButton(entry.id, ''));
   const group = el('div', 'target-apps');
   historyApps(entry.id).sort(compareTargetApps).forEach((app) => group.append(targetAppRow(entry.id, app, false)));
@@ -2631,7 +2776,8 @@ function targetAppRow(deviceId, app, background) {
   row.classList.toggle('background', inBackground);
   row.classList.toggle('away', away);
   row.classList.toggle('switching', switching);
-  row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
+  const name = targetAppName(deviceId, app.bundleId, app.appName);
+  row.append(el('span', 'status-dot'), el('span', 'target-app-name', name));
   if (!away && !appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
   row.append(el('span', 'target-app-meta', switching ? t(pendingSwitch.action === 'launch' ? '启动中…' : '切换中…') : inBackground ? t('在后台') : away ? t('未连接') : app.version || ''));
   if (away && !current) row.appendChild(historyRemoveButton(deviceId, app.bundleId));
@@ -2789,8 +2935,11 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
   }
   rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
+  targets.deviceOnly = !bundleId;
   ++appInfoSeq;
   renderTargetLabel();
+  renderSelectedAppName(appName);
+  appInfo.base = '';
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
   appState.dropped = false;
@@ -2803,9 +2952,6 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
   setAppState(app ? (activating ? 'background' : 'online') : 'offline', activating ? t('正在切换到 {0}…', appName || app?.appName || bundleId) : '');
   watchApp();
   if (activating) {
-    $('appName').textContent = appName || app?.appName || bundleId;
-    appInfo.name = appName || app?.appName || bundleId;
-    appInfo.base = '';
     updateAppMeta();
   } else {
     loadAppInfo();
@@ -2839,11 +2985,22 @@ async function connectInPlace(deviceId, bundleId) {
   // 已选的 App 未运行时等事件流连上, 由 reconnected 原地更新
   if (targets.bundleId) return;
   rememberTarget(deviceId, '');
-  $('appName').textContent = currentDevice()?.name || t('未连接');
-  if (liveAvailable()) setMode('live');
-  const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
-  showEmptyState(t('没有运行中的已集成 App'), body);
-  setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
+  showDeviceOnly();
+}
+
+function showDeviceOnly() {
+  const device = currentDevice();
+  const name = device?.name || targetHistory[targets.deviceId]?.name
+    || (targets.simulators || []).find((sim) => sim.id === targets.deviceId)?.name || t('设备');
+  $('appName').textContent = name;
+  appInfo.base = '';
+  appState.warning = '';
+  document.title = `${name} - LayerLens`;
+  document.body.classList.remove('has-app');
+  showEmptyState(t('请选择 App 查看视图层级'), t('也可以切换到实时查看设备画面'));
+  setAppState(device ? 'online' : 'offline', device ? t('只使用实时画面') : '');
+  setMode('live');
+  if (state.mode === 'live') syncLive();
 }
 
 // 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
@@ -2866,6 +3023,8 @@ async function probeForeground() {
   if (!device) return null;
   const others = device.apps.filter((a) => a.bundleId !== targets.bundleId);
   const found = await Promise.all(others.map(async (a) => {
+    const entry = targetStateHub.ready && targetStateHub.states.get(targetStateKey(device.id, a.bundleId));
+    if (entry?.stateConnected && [true, false, 0, 1].includes(entry.foreground)) return appInForeground(entry) ? a.bundleId : null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 800);
     try {
@@ -2882,20 +3041,26 @@ async function probeForeground() {
   return bundleId ? [device.id, bundleId] : null;
 }
 
-// 当前 App 是否确实在后台: 以 App 实时返回的状态为准; 挂起不响应时沿用列表中的挂起标记
-// 接口在 App 主线程执行, 前台时主线程繁忙(取层级、截图、加载视频)也会超时; 连续多次超时才视为挂起
-const PROBE_MISS_LIMIT = 3;
-
+// 只有 App 明确返回的前后台状态才用于切换提示。通信超时表示未知。
+// 请求期间切换目标、事件流重连或收到新状态后, 丢弃旧响应。
 async function probeCurrentBackground() {
+  const key = logTargetKey();
+  const source = appState.source;
+  const revision = appState.stateRevision;
+  const entry = targetStateHub.ready && targetStateHub.states.get(targetStateKey(targets.deviceId, targets.bundleId));
+  if (entry?.stateConnected && [true, false, 0, 1].includes(entry.foreground)) return entry.foreground === false || entry.foreground === 0;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 800);
   try {
     const res = await fetch(targetBase() + '/api/app', { cache: 'no-store', signal: controller.signal });
-    appState.probeMisses = 0;
-    return appInBackground(await res.json());
+    if (!res.ok) return null;
+    const info = await res.json();
+    if (key !== logTargetKey() || source !== appState.source || revision !== appState.stateRevision) return null;
+    if (info.foreground === false || info.foreground === 0) return true;
+    if (info.foreground === true || info.foreground === 1) return false;
+    return null;
   } catch (e) {
-    appState.probeMisses = (appState.probeMisses || 0) + 1;
-    return appState.probeMisses >= PROBE_MISS_LIMIT && !!currentApp()?.suspended;
+    return null;
   } finally {
     clearTimeout(timer);
   }
@@ -2929,6 +3094,8 @@ async function checkForeground() {
 
 // 需要自动切换时返回 [设备 ID, Bundle ID]: 选中的设备启动了, 选中的设备上出现 App, 或未选设备时出现设备
 function nextTarget() {
+  // Explicit device-only selection must survive scans and device reconnection.
+  if (targets.deviceOnly && targets.deviceId) return null;
   if (targets.idle) {
     if (!targets.devices.length) return null;
     const back = currentDevice();
@@ -2957,9 +3124,11 @@ function pollTargets() {
       renderTargetMenu();
       syncLive();
       // 选中的设备断开或连回时更新提示
-      if (appState.value === 'offline' && appState.deviceGone !== currentDeviceGone()) setAppState('offline');
+      if (!targets.bundleId && targets.deviceId && appState.deviceGone !== currentDeviceGone()) {
+        setAppState(currentDevice() ? 'online' : 'offline', currentDevice() ? t('只使用实时画面') : '');
+      } else if (appState.value === 'offline' && appState.deviceGone !== currentDeviceGone()) setAppState('offline');
       // 回到前台的通知可能早于事件流连上而错过, 列表里显示已在前台时恢复
-      if (appState.value === 'background' && currentApp() && appInForeground(currentApp())) {
+      if (appState.value === 'background' && currentApp() && appInForeground(currentApp()) && await probeCurrentBackground() === false) {
         setAppState('online');
         if (state.mode !== 'live') refresh();
       }
@@ -2967,9 +3136,7 @@ function pollTargets() {
       if (next) await connectInPlace(...next);
       // 事件流里的后台通知可能丢失(如重连时被覆盖), 列表显示在后台时直接询问当前 App 确认
       if (appState.value === 'online' && currentApp() && appInBackground(currentApp())) {
-        if (await probeCurrentBackground()) setAppState('background');
-      } else {
-        appState.probeMisses = 0;
+        if (await probeCurrentBackground() === true) setAppState('background');
       }
       if (currentAppAway()) checkForeground();
     } catch (e) {
@@ -2987,47 +3154,53 @@ const appState = { value: 'online', connected: false, dropped: false, blank: fal
 const OFFLINE_GRACE_MS = 4000;
 
 function watchApp() {
-  appState.source?.close();
-  const key = logTargetKey();
-  const source = new LayerLensEventSource(targetBase() + '/api/events');
-  appState.source = source;
-  const active = () => appState.source === source && logTargetKey() === key;
-  source.onopen = () => {
-    if (!active()) return;
-    appState.connected = true;
-    clearTimeout(appState.offlineTimer);
+  // 只是切换本窗口观察的目标, 不建立或关闭 App 上游连接。
+  appState.source = { key: logTargetKey() };
+  ensureTargetStateSocket();
+  syncSelectedTargetState();
+}
+
+function selectedTargetDisconnected() {
+  if (!targets.bundleId || !appState.source || appState.source.key !== logTargetKey()) return;
+  appState.connected = false;
+  appState.dropped = true;
+  if (appState.value === 'restarting' || appState.offlineTimer) return;
+  appState.offlineTimer = setTimeout(() => {
     appState.offlineTimer = 0;
-    if (!appState.dropped) {
-      setAppState('online');
+    if (!appState.connected && appState.value !== 'restarting') setAppState('offline');
+  }, OFFLINE_GRACE_MS);
+}
+
+function syncSelectedTargetState() {
+  if (!targetStateHub.ready || !targets.bundleId || appState.source?.key !== logTargetKey()) return;
+  const entry = targetStateHub.states.get(targetStateKey(targets.deviceId, targets.bundleId));
+  if (!entry || entry.removed || !entry.stateConnected) {
+    // 明确在后台时保留后台提示, 通信中断本身不等于 App 退出。
+    if (entry && !entry.removed && (entry.foreground === false || entry.foreground === 0)) {
+      clearTimeout(appState.offlineTimer);
+      appState.offlineTimer = 0;
+      receiveTargetForeground(targets.deviceId, targets.bundleId, false);
+      appState.connected = false;
       return;
     }
-    reconnected();
-  };
-  // App 进入后台后被挂起, 事件流不断开, 由 App 推送前后台状态; 旧版 Pod 不推送, 视为前台
-  source.addEventListener('state', (e) => {
-    if (!active()) return;
-    const { foreground } = JSON.parse(e.data || '{}');
-    const away = foreground === false || foreground === 0;
-    if (away && appState.value === 'online') {
-      setAppState('background');
-      checkForeground();
-    } else if (!away && appState.value === 'background') {
-      setAppState('online');
-      // 在后台期间页面可能已变化, 实时画面之外重新获取层级
-      if (state.mode !== 'live') refresh();
+    selectedTargetDisconnected();
+    return;
+  }
+  const wasConnected = appState.connected;
+  const restarted = appState.instanceId && entry.instanceId !== appState.instanceId;
+  appState.connected = true;
+  clearTimeout(appState.offlineTimer);
+  appState.offlineTimer = 0;
+  if ((!wasConnected && appState.dropped) || restarted) {
+    if (!appState.reconnecting) {
+      const selection = appState.source;
+      appState.reconnecting = selection;
+      reconnected().finally(() => { if (appState.reconnecting === selection) appState.reconnecting = null; });
     }
-  });
-  source.onerror = () => {
-    if (!active()) return;
-    appState.connected = false;
-    appState.dropped = true;
-    if (appState.value === 'restarting' || appState.offlineTimer) return;
-    // 回到前台时 App 会重启监听, 事件流短暂断开后约 2s 重连; 宽限一段时间再显示离线, 避免提示条闪现
-    appState.offlineTimer = setTimeout(() => {
-      appState.offlineTimer = 0;
-      if (!appState.connected && appState.value !== 'restarting') setAppState('offline');
-    }, OFFLINE_GRACE_MS);
-  };
+  } else if (!wasConnected && appState.value !== 'restarting') {
+    setAppState(entry.foreground === false || entry.foreground === 0 ? 'background' : 'online');
+  }
+  if ([true, false, 0, 1].includes(entry.foreground)) receiveTargetForeground(targets.deviceId, targets.bundleId, !!entry.foreground);
 }
 
 // link 为提示条上的次要按钮, 如 { text, panel }
@@ -3035,15 +3208,17 @@ function watchApp() {
 // 刚连上时首页还未加载完(实测约 2s 后启动遮罩才移除), 过早拉取的层级会过期.
 // 重启后通常停在首页, 模拟器上先切到实时画面便于操作到目标页, 切回 2D/3D 时会刷新层级
 async function reconnected() {
+  const selection = appState.source;
   try {
     await loadTargets();
   } catch (e) {
     // 取不到时按重启处理
   }
+  if (appState.source !== selection) return;
   if (appState.instanceId && currentApp()?.instanceId === appState.instanceId) {
     appState.dropped = false;
     // 等待列表期间事件流可能已推送在后台, 不覆盖
-    if (appState.value !== 'background') setAppState('online');
+    setAppState(appInBackground(currentApp() || {}) ? 'background' : 'online');
     return;
   }
   const toLive = liveAvailable() && state.mode !== 'live';
@@ -3055,7 +3230,7 @@ async function reconnected() {
     appState.warning = compatibilityWarning(currentApp());
     // 原来靠整页重新加载复位, 这里手动结束运行跟踪
     setRunning(false);
-    setAppState('online');
+    setAppState(appInBackground(currentApp() || {}) ? 'background' : 'online');
     if (toLive) toast(t('App 已重启, 已切换到实时画面'));
     loadAppInfo();
     clearHierarchy();
@@ -3105,8 +3280,10 @@ function setAppState(value, message, link) {
   renderTargetMenu();
 }
 
-// 画布中央的引导, 实时模式下不显示
+// 画布中央的引导；离线目标由 syncOfflineView 标记后在所有模式显示。
 function showEmptyState(title, body) {
+  $('emptyState').classList.remove('offline-state');
+  document.body.classList.remove('has-offline-state');
   $('emptyTitle').textContent = title;
   $('emptyBody').textContent = body;
   offlineViewShown = false;
@@ -4216,7 +4393,7 @@ function syncTreeFilter() {
 }
 
 function requestMode(mode) {
-  if (mode === 'live' && !liveAvailable()) {
+  if (mode === 'live' && !targets.deviceId) {
     toast(t('请先选择设备'));
     return;
   }
@@ -7589,7 +7766,7 @@ async function start() {
   await syncLive();
   pollTargets();
   // 一台设备都没有时显示默认页, 保留选中的目标, 该设备回来时优先连接
-  if (!targets.devices.length && !targets.bundleId) {
+  if (!targets.devices.length && !targets.deviceId && !targets.bundleId) {
     targets.idle = true;
     $('appName').textContent = t('未连接');
     showGuide();
@@ -7597,12 +7774,7 @@ async function start() {
     return;
   }
   if (!targets.bundleId) {
-    $('appName').textContent = device?.name || targetHistory[targets.deviceId]?.name || t('未连接');
-    // 只选了模拟器(没有运行中的 App)时直接显示实时画面
-    if (liveAvailable()) setMode('live');
-    const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
-    showEmptyState(t('没有运行中的已集成 App'), body);
-    setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
+    showDeviceOnly();
     return;
   }
   document.body.classList.add('has-app');
@@ -7612,7 +7784,7 @@ async function start() {
   // App 未运行时等事件流连上后整页重新加载; 模拟器的实时画面照常可用
   if (!currentApp()) {
     appState.dropped = true;
-    $('appName').textContent = targetHistory[targets.deviceId]?.apps[targets.bundleId]?.appName || targets.bundleId;
+    renderSelectedAppName();
     appState.blank = true;
     setAppState('offline');
     return;
@@ -7624,20 +7796,19 @@ async function start() {
 let appInfoSeq = 0;
 
 function loadAppInfo() {
+  renderSelectedAppName();
   const seq = ++appInfoSeq;
   const key = logTargetKey();
   return api('/api/app').then((info) => {
     if (seq !== appInfoSeq || key !== logTargetKey()) return;
-    $('appName').textContent = info.appName;
-    appInfo.name = info.appName;
+    renderSelectedAppName(info.appName);
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
     updateAppMeta();
-    document.title = `${info.appName} - LayerLens`;
   }).catch((e) => {
     if (seq !== appInfoSeq || key !== logTargetKey()) return;
     // App 刚换端口等情况下取不到, 仍显示名称, 事件流重连后会重新加载
-    $('appName').textContent = currentApp()?.appName || targets.bundleId;
+    renderSelectedAppName();
     toast(e.message, true);
   });
 }

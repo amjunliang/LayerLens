@@ -236,7 +236,7 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 .status-dot.ok { background: var(--success); }
 .status-dot.error { background: var(--danger); }
 .status-dot.warn { background: var(--warning, #e6a23c); }
-.app-name { font-weight: 600; font-size: 14px; }
+.app-name { font-weight: 600; font-size: 14px; min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 设备 / App 切换 */
 /* 状态点、名称和箭头合成一个按钮, 点按区域覆盖整块 */
 .target-btn { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 28px; padding: 0 8px; border: none; background: none; border-radius: 999px; color: var(--text); }
@@ -282,7 +282,7 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 .target-remove:hover { background: var(--hover); color: var(--text); }
 .target-app:hover .target-remove, .target-device:hover .target-remove { display: inline-flex; }
 .target-app:hover .target-remove ~ .target-app-meta, .target-app.away:not(.current):hover .target-app-meta { display: none; }
-.target-app-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.target-app-name { flex: 1; min-width: 0; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.4; }
 .target-app-meta { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .target-badge { padding: 0 5px; border-radius: 3px; background: var(--danger); color: #fff; font-size: 11px; line-height: 16px; }
 .target-empty { padding: 4px 8px; color: var(--muted); font-size: 12px; }
@@ -764,7 +764,7 @@ body:not(.has-app) #liveInspect, body.app-offline #liveInspect { display: none; 
 .app-banner[data-state="warn"] .app-banner-text::before { background: var(--warning, #e6a23c); }
 
 /* 没有设备或 App 时画布中央的引导 */
-.mode-live .empty-state, .has-empty:not(.mode-live) .app-banner { display: none; }
+.mode-live .empty-state:not(.offline-state), .has-empty:not(.mode-live) .app-banner, .has-offline-state .app-banner { display: none; }
 #liveModeBtn.unavailable { opacity: 0.45; }
 .empty-state { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px 16px; background: var(--stage-bg); color: var(--stage-muted); text-align: center; }
 .empty-state[hidden] { display: none; }

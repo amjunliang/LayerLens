@@ -15,6 +15,7 @@ final class AppEventStream {
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var closed = false
+    var onOpen: (() -> Void)?
     var onEvent: ((_ name: String, _ payload: Data) -> Void)?
     /// status 为 0 表示连接失败或中途断开
     var onClose: ((_ status: Int) -> Void)?
@@ -105,6 +106,8 @@ final class AppEventStream {
                 }
                 buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                 headerDone = true
+                self.onOpen?()
+                if self.closed { return }
             }
             if headerDone {
                 while let range = buffer.range(of: Data("\n\n".utf8)) {

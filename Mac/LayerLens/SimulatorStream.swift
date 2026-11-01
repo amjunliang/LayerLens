@@ -47,6 +47,7 @@ final class SimulatorStream {
     /// 编码比采集慢时只保留最新一帧
     private var pendingSurface: IOSurface?
     private var encoding = false
+    private var captureGeneration = 0
     /// 按观看者中最大的显示尺寸编码, nil 时为原始分辨率
     private var targetSize: (width: Double, height: Double)?
 
@@ -92,6 +93,7 @@ final class SimulatorStream {
         self.device = device
         running = true
         captureQueue.async { [self] in
+            captureGeneration += 1
             self.screen = screen
             screen.onFrame = { [weak self] surface in
                 self?.capture(surface, trailing: false)
@@ -115,9 +117,11 @@ final class SimulatorStream {
         running = false
         video.reset()
         captureQueue.async { [self] in
+            captureGeneration += 1
             screen?.stop()
             screen = nil
             pendingSurface = nil
+            encoding = false
             encoder.invalidate()
         }
         touchQueue.async { [self] in touch = nil }
@@ -142,6 +146,7 @@ final class SimulatorStream {
             return
         }
         captureQueue.async { [self] in
+            captureGeneration += 1
             self.screen?.stop()
             pendingSurface = nil
             encoding = false
@@ -177,10 +182,19 @@ final class SimulatorStream {
     }
 
     private func encodePending() {
-        defer { encoding = false }
-        guard screen != nil, let surface = pendingSurface else { return }
+        guard screen != nil, let surface = pendingSurface else { encoding = false; return }
         pendingSurface = nil
-        encoder.encode(surface, scale: encodeScale(of: surface))
+        let generation = captureGeneration
+        encoder.encode(surface, scale: encodeScale(of: surface)) { [weak self] in
+            self?.captureQueue.async { [weak self] in
+                guard let self, generation == self.captureGeneration else { return }
+                self.encoding = false
+                if self.pendingSurface != nil {
+                    self.encoding = true
+                    self.encodePending()
+                }
+            }
+        }
     }
 
     /// 编码比例按 1/16 取整(向上), 缩放画面时不会每一点变化都重建编码器

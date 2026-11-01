@@ -216,8 +216,12 @@ private final class DeviceLiveSession {
         let scale = min((ratio * 16).rounded(.up) / 16, 1)
         captureQueue.async { [self] in
             if keyFrame { encoder.requestKeyFrame() }
-            encoder.encode(pixels, scale: scale, contentSize: CGSize(width: width, height: height))
-            queue.async { [self] in encoding = false; encodePending() }
+            encoder.encode(pixels, scale: scale, contentSize: CGSize(width: width, height: height)) { [weak self] in
+                self?.queue.async { [weak self] in
+                    guard let self else { return }
+                    self.encoding = false; self.encodePending()
+                }
+            }
         }
     }
     private func message(_ value: [String: Any], to socket: WebSocketConnection) {
