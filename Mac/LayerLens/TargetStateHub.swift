@@ -18,23 +18,33 @@ final class TargetStateMonitor {
         var stream: TargetStateStream?
         var connected = false
         var foreground: Bool?
+        var foregroundSource = "unknown"
+        var observation: UInt64 = 0
+        var mismatches = 0
         var unsupported = false
+        var failures = 0
+        var retryAt = Date.distantPast
+        var connectingAt = Date.distantPast
         init(_ app: AppRecord) { self.app = app }
     }
     private var entries: [String: Entry] = [:]
+    private var stopped = false
     private let makeStream: () -> TargetStateStream
+    private let now: () -> Date
+    private(set) var observationVersion: UInt64 = 0
     private let epoch = UUID().uuidString
     private var revision = 0
     private var previous = Data()
     var onChange: (([[String: Any]], [String: Any]) -> Void)?
 
-    init(makeStream: @escaping () -> TargetStateStream) { self.makeStream = makeStream }
+    init(now: @escaping () -> Date = Date.init, makeStream: @escaping () -> TargetStateStream) { self.now = now; self.makeStream = makeStream }
     private func key(_ app: AppRecord) -> String { app.deviceId + "|" + app.bundleId }
     private func sameProcess(_ a: AppRecord, _ b: AppRecord) -> Bool {
         a.endpoint == b.endpoint && a.info["instanceId"] as? String == b.info["instanceId"] as? String
     }
 
     func update(_ apps: [AppRecord]) {
+        guard !stopped else { return }
         let present = Set(apps.map(key))
         for (key, entry) in entries where !present.contains(key) {
             entry.stream?.cancel()
@@ -48,16 +58,34 @@ final class TargetStateMonitor {
             }
             let entry = entries[id] ?? Entry(app)
             entries[id] = entry
+            let resumed = !entry.app.responding && app.responding
             entry.app = app
-            // 扫描用于发现和兜底; 已连上的实时通知不能被在途的旧扫描覆盖。
-            if entry.foreground == nil || entry.unsupported { entry.foreground = app.info["foreground"] as? Bool }
-            // 活跃 App 的握手长时间未完成时重试。状态接口没有周期心跳, 已连接后允许无限静默。
-            if let stream = entry.stream, !entry.connected && app.responding && Date().timeIntervalSince(stream.lastReceive) > 40 {
+            // 只接受在最近通知之后发起的扫描; 矛盾结果连续确认两次, 避免缓存和在途请求回写旧状态。
+            if app.responding, app.scanVersion >= entry.observation, let foreground = app.info["foreground"] as? Bool {
+                if entry.foreground == nil || entry.unsupported || !entry.connected {
+                    entry.foreground = foreground
+                    entry.foregroundSource = "query"
+                    entry.mismatches = 0
+                } else if entry.foreground != foreground {
+                    entry.mismatches += 1
+                    if entry.mismatches >= 2 {
+                        entry.foreground = foreground
+                        entry.foregroundSource = "query"
+                        entry.mismatches = 0
+                        observationVersion += 1
+                        entry.observation = observationVersion
+                    }
+                } else { entry.mismatches = 0 }
+            }
+            // 只限制握手, 已建立的状态连接允许长期静默。
+            if let stream = entry.stream, !entry.connected, now().timeIntervalSince(entry.connectingAt) >= 5 {
                 stream.cancel()
                 entry.stream = nil
-                entry.connected = false
+                failed(entry)
             }
-            if entry.stream == nil && !entry.unsupported && app.responding { connect(entry, id: id) }
+            if resumed { entry.retryAt = .distantPast }
+            if entry.stream == nil && !entry.unsupported && app.responding && now() >= entry.retryAt { connect(entry, id: id) }
+
         }
         publish()
     }
@@ -65,6 +93,7 @@ final class TargetStateMonitor {
     private func connect(_ entry: Entry, id: String) {
         let stream = makeStream()
         entry.stream = stream
+        entry.connectingAt = now()
         let active = { [weak self, weak entry, weak stream] in
             guard let self, let entry, let stream else { return false }
             return self.entries[id] === entry && entry.stream === stream
@@ -80,18 +109,31 @@ final class TargetStateMonitor {
                   let number = json["foreground"] as? NSNumber,
                   number == 0 || number == 1 else { return }
             entry.foreground = number.boolValue
+            entry.foregroundSource = "event"
+            self?.observationVersion += 1
+            entry.observation = self?.observationVersion ?? entry.observation
+            entry.mismatches = 0
+            entry.failures = 0
             entry.app.suspended = false
+            entry.app.responding = true
             self?.publish()
         }
         stream.onClose = { [weak self, weak entry] status in
             guard active(), let entry else { return }
             entry.connected = false
             entry.stream = nil
-            // 404 等接口错误不反复重试; 新进程或新端口会建立新 Entry。
-            entry.unsupported = status != 0
+            // 接口不存在不重试; 临时 HTTP 错误和传输失败按退避恢复。
+            entry.unsupported = status == 404 || status == 410
+            self?.failed(entry)
             self?.publish()
         }
         stream.start(endpoint: entry.app.endpoint, path: "/api/events")
+    }
+
+    private func failed(_ entry: Entry) {
+        entry.connected = false
+        entry.failures = min(entry.failures + 1, 5)
+        entry.retryAt = now().addingTimeInterval(min(pow(2, Double(entry.failures - 1)), 10))
     }
 
     private func publish() {
@@ -102,6 +144,9 @@ final class TargetStateMonitor {
             info["connection"] = entry.app.endpoint.connectionType
             if let foreground = entry.foreground { info["foreground"] = foreground }
             info["suspended"] = entry.app.suspended
+            info["stateReachable"] = entry.app.responding
+            info["foregroundSource"] = entry.foregroundSource
+            info["stateConnection"] = entry.connected ? "connected" : entry.stream != nil ? "connecting" : "disconnected"
             // 旧 Pod 无 events 接口时沿用扫描的可达性。新接口以长连接为准。
             info["stateConnected"] = entry.connected || (entry.unsupported && entry.app.responding)
             return info
@@ -115,6 +160,7 @@ final class TargetStateMonitor {
     }
 
     func stop() {
+        stopped = true
         entries.values.forEach { $0.stream?.cancel() }
         entries.removeAll()
         publish()
@@ -130,6 +176,8 @@ final class TargetStateBroadcaster {
         init(_ socket: WebSocketConnection) { self.socket = socket }
     }
     private var viewers: [ObjectIdentifier: Viewer] = [:]
+    private var inventory: [String: Any]?
+    private var inventoryRevision = 0
     private var latest: [String: Any] = ["epoch": "", "revision": 0, "apps": [], "upstreamCount": 0]
 
     func accept(head: HTTPRequestHead, leftover: Data, connection: NWConnection) {
@@ -146,7 +194,18 @@ final class TargetStateBroadcaster {
         var result = latest
         result["replace"] = true
         result["type"] = "states"
+        if let inventory { result["inventory"] = inventory; result["inventoryRevision"] = inventoryRevision }
         return result
+    }
+
+    func updateInventory(_ value: [String: Any]) {
+        if let inventory, NSDictionary(dictionary: inventory).isEqual(to: value) { return }
+        inventory = value
+        inventoryRevision += 1
+        for viewer in viewers.values {
+            if viewer.sending { viewer.pending = snapshot() }
+            else { send(snapshot(), to: viewer) }
+        }
     }
 
     func update(_ state: [String: Any]) {
@@ -162,6 +221,7 @@ final class TargetStateBroadcaster {
         delta["removed"] = old.filter { !ids.contains(key($0)) }.map { ["deviceId": $0["deviceId"]!, "bundleId": $0["bundleId"]!] }
         delta["type"] = "states"
         delta["replace"] = false
+        delta["inventoryRevision"] = inventoryRevision
         for viewer in viewers.values {
             if viewer.sending { viewer.pending = snapshot() }
             else { send(changedEpoch ? snapshot() : delta, to: viewer) }

@@ -570,6 +570,12 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 /* 实时: 模拟器画面 (H.264 流) */
 .mode-live .stage-wrap, .mode-live .hover-tip { display: none; }
 .live-wrap { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-user-select: none; user-select: none; }
+/* 平面画面共用固定留白, 不按高度再缩小; 底部 40px 包含 8px 间隔、24px 按钮和 8px 边距。 */
+body:not(.mode-3d) .stage-wrap, .live-wrap { padding: 8px 12px 40px; }
+.live-home-dock { display: flex; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 2; }
+.live-home-dock .icon-btn { width: 56px; height: 24px; border-radius: 999px; background: var(--float-bg); border-color: var(--float-line); color: var(--stage-text); }
+.live-home-dock .icon-btn .icon { width: 16px; height: 16px; }
+.live-home-dock .icon-btn:hover { background: var(--stage-fill-strong); }
 /* 细线勾出设备边缘 */
 .live-canvas { flex: none; display: block; background: #000; cursor: default; outline: none; box-shadow: var(--screen-shadow); }
 .live-wrap.inspecting .live-canvas { cursor: crosshair; }
@@ -1319,6 +1325,11 @@ body.log-open .log-pane { display: flex; }
   /* 窄屏画面受宽度限制: 浮动工具横排到底部居中, 左右只留 8px, 底部让出工具条, 画面可以更大 */
   .stage-wrap, .live-wrap { padding: 8px 8px calc(60px + env(safe-area-inset-bottom)); }
   .canvas-float { top: auto; right: auto; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom)); transform: translateX(-50%); flex-direction: row; }
+  /* 2D 与实时继续共用画面区域; 工具放右侧, 不再额外占用底部高度。 */
+  body:not(.mode-3d) .stage-wrap, .live-wrap { padding: 8px 8px calc(40px + env(safe-area-inset-bottom)); }
+  body:not(.mode-3d) .canvas-float { top: 38px; bottom: auto; left: auto; right: 8px; transform: none; flex-direction: column; }
+  body:not(.mode-3d) .float-group { flex-direction: column; }
+  body:not(.mode-3d) .float-group.live-only::after { width: auto; height: 1px; margin: 4px 6px; }
   .float-group { flex-direction: row; }
   .float-group.live-only::after, .float-group.three-only::before { width: 1px; height: auto; margin: 6px 4px; }
   /* 层间距弹层向上弹出, 以整个工具条为参照水平居中, 不超出窗口 */

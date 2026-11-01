@@ -30,7 +30,7 @@ final class HubServer {
     private let git = GitController()
     private let targetStates = TargetStateBroadcaster()
     let terminal = TerminalController()
-    func stopDeviceLive() { deviceLive.shutdown() }
+    func stopDeviceLive() { deviceLive.shutdown(); appLogs.stop(); network.stop() }
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     /// 同一设备的 App 激活必须串行; 运行中的命令结束后只执行排队目标中的最后一个
@@ -56,10 +56,24 @@ final class HubServer {
         registry.onStatesChanged = { [weak self] state in
             self?.queue.async { [weak self] in self?.targetStates.update(state) }
         }
+        registry.onInventoryChanged = { [weak self] inventory in
+            self?.queue.async { [weak self] in
+                guard let self else { return }
+                var value = inventory
+                value["hub"] = self.hubInfo
+                self.targetStates.updateInventory(value)
+            }
+        }
         registry.onAppsChanged = { [appLogs, network] apps in
             appLogs.update(apps: apps)
             network.update(apps: apps)
         }
+    }
+
+    private var hubInfo: [String: Any] {
+        var info: [String: Any] = ["version": Self.version, "apiVersion": Self.apiVersion, "live": SimulatorLive.isAvailable, "deviceLive": DeviceLive.isAvailable]
+        info["liveError"] = SimBridge.loadError
+        return info
     }
 
     var baseURL: URL {
@@ -169,9 +183,7 @@ final class HubServer {
         case "/":
             connection.respond(staticFile("index.html"))
         case "/api/targets":
-            var hubInfo: [String: Any] = ["version": Self.version, "apiVersion": Self.apiVersion, "live": SimulatorLive.isAvailable]
-            hubInfo["liveError"] = SimBridge.loadError
-            hubInfo["deviceLive"] = DeviceLive.isAvailable
+            let hubInfo = self.hubInfo
             registry.snapshot { devices, simulators, history in
                 connection.respond(.json(["hub": hubInfo, "devices": devices, "simulators": simulators, "history": history]))
             }
@@ -310,16 +322,6 @@ final class HubServer {
                 case .failure(let failure):
                     connection.respond(.json(["error": failure.code.rawValue, "message": failure.message], status: 400))
                 }
-            }
-        case "/api/hub/home":
-            // 启动 SpringBoard 回到桌面, 没有上滑手势的动画过程
-            guard let device = json["device"] as? String, UUID(uuidString: device) != nil else {
-                connection.respond(.error(400, "Invalid device"))
-                return
-            }
-            workQueue.async {
-                let ok = TargetRegistry.run("/usr/bin/xcrun", ["simctl", "launch", device, "com.apple.springboard"]) != nil
-                connection.respond(ok ? .json(["ok": true]) : .error(500, "simctl launch failed"))
             }
         case "/api/hub/simulator":
             // 启动(同时打开 Simulator 窗口)或关闭模拟器, 完成后立即刷新列表, 网页下次轮询即可看到

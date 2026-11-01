@@ -24,6 +24,7 @@ final class SimulatorStream {
     private let captureQueue: DispatchQueue
     private let touchQueue: DispatchQueue
     private var touch: SimTouch?
+    private var homeButton: SimHomeButton?
     /// 尚未注入的最新一条移动, 任意线程写入, moveLock 保护
     private let moveLock = NSLock()
     private var pendingMove: (id: ObjectIdentifier, text: String)?
@@ -104,6 +105,7 @@ final class SimulatorStream {
         touchQueue.async { [self] in
             if touch == nil {
                 touch = SimTouch(device: device)
+                homeButton = SimHomeButton(device: device)
             }
         }
         return true
@@ -124,7 +126,11 @@ final class SimulatorStream {
             encoding = false
             encoder.invalidate()
         }
-        touchQueue.async { [self] in touch = nil }
+        touchQueue.async { [self] in
+            homeButton?.stop()
+            homeButton = nil
+            touch = nil
+        }
     }
 
     private func requestKeyFrame() { video.requestKeyFrame() }
@@ -344,12 +350,21 @@ final class SimulatorStream {
                 startHold()
             }
         case "button" where message["button"] as? String == "swipe-to-home":
-            touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
-            for step in 1...10 {
-                usleep(12_000)
-                touch.send(phase: .move, x: 0.5, y: 0.995 - 0.05 * Double(step), edge: 0x01)
-            }
-            touch.send(phase: .up, x: 0.5, y: 0.5, edge: 0x01)
+            homeButton?.press(legacyPress: { [weak self, weak touch] in
+                self?.touchQueue.async { [weak self, weak touch] in
+                    guard let self, let touch, self.touch === touch else { return }
+                    touch.sendHome(down: true)
+                    usleep(30_000)
+                    touch.sendHome(down: false)
+                }
+            }, unavailable: { [weak self] in
+                self?.queue.async { [weak self] in
+                    self?.video.forEachSocket { socket in
+                        guard ObjectIdentifier(socket) == id else { return }
+                        socket.sendText("{\"type\":\"input-error\",\"detail\":\"home-unavailable\"}")
+                    }
+                }
+            })
         case "button" where message["button"] as? String == "app-switcher":
             // 上滑到屏幕中部时先快后慢(缓出), 末速度接近 0 即被识别为停顿而进入多任务, 不必久停
             touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)

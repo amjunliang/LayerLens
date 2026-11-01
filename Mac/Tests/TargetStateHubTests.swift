@@ -8,7 +8,7 @@ enum TargetEndpoint: Equatable { case local(port: UInt16); case usb(deviceId: In
 }
 struct AppRecord {
     let deviceId: String; let bundleId: String; let endpoint: TargetEndpoint; let info: [String: Any]
-    var suspended = false; var responding = true
+    var suspended = false; var responding = true; var scanVersion: UInt64 = 0
 }
 final class AppEventStream {
     var onOpen: (() -> Void)?; var onEvent: ((String, Data) -> Void)?; var onClose: ((Int) -> Void)?
@@ -38,7 +38,8 @@ final class WebSocketConnection {
 @main struct Tests {
     static func main() {
         var streams: [AppEventStream] = [], snapshots: [[String: Any]] = []
-        let monitor = TargetStateMonitor { let stream = AppEventStream(); streams.append(stream); return stream }
+        var now = Date()
+        let monitor = TargetStateMonitor(now: { now }) { let stream = AppEventStream(); streams.append(stream); return stream }
         monitor.onChange = { _, snapshot in snapshots.append(snapshot) }
         func app(_ device: String = "phone", instance: String = "one", port: UInt16 = 9527, foreground: Bool = true, responding: Bool = true) -> AppRecord {
             var app = AppRecord(deviceId: device, bundleId: "test", endpoint: .local(port: port), info: ["bundleId": "test", "instanceId": instance, "foreground": foreground])
@@ -92,11 +93,15 @@ final class WebSocketConnection {
         streams[2].onClose?(0)
         monitor.update([app(instance: "three", port: 9529, responding: false)])
         assert(streams.count == 3, "Unresponsive background app should not reconnect on every scan")
+        now = now.addingTimeInterval(1)
         monitor.update([app(instance: "three", port: 9529)])
         assert(streams.count == 4, "Reachable app reconnects after transport failure")
-        streams[3].lastReceive = Date().addingTimeInterval(-41)
+        now = now.addingTimeInterval(5)
         monitor.update([app(instance: "three", port: 9529)])
-        assert(streams[3].cancelled && streams.count == 5, "A stalled handshake on a reachable App must reconnect")
+        assert(streams[3].cancelled && streams.count == 4, "Handshake timeout must also respect retry backoff")
+        now = now.addingTimeInterval(2)
+        monitor.update([app(instance: "three", port: 9529)])
+        assert(streams.count == 5, "A stalled handshake on a reachable App must reconnect")
         streams[4].onOpen?()
         streams[4].lastReceive = Date().addingTimeInterval(-100)
         monitor.update([app(instance: "three", port: 9529)])
@@ -104,7 +109,50 @@ final class WebSocketConnection {
         monitor.update([app("other", instance: "other")])
         assert(streams[4].cancelled && streams.count == 6)
         monitor.stop()
+        monitor.update([app()])
+        assert(streams.count == 6, "Late scans cannot recreate streams after stop")
         assert(streams[5].cancelled && (snapshots.last!["apps"] as! [[String: Any]]).isEmpty)
+        // Fresh successful queries reconcile missed notifications, stale scans never do.
+        var events: [AppEventStream] = [], state: [String: Any] = [:]
+        let recovering = TargetStateMonitor(now: { now }) { let stream = AppEventStream(); events.append(stream); return stream }
+        recovering.onChange = { _, snapshot in state = snapshot }
+        func observed(_ foreground: Bool, version: UInt64) -> AppRecord {
+            var value = app(foreground: foreground); value.scanVersion = version; return value
+        }
+        recovering.update([app()]); events[0].onOpen?(); events[0].foreground(false)
+        recovering.update([observed(true, version: 0)])
+        assert((state["apps"] as! [[String: Any]])[0]["foreground"] as? Bool == false)
+        let version = recovering.observationVersion
+        recovering.update([observed(true, version: version)])
+        assert((state["apps"] as! [[String: Any]])[0]["foreground"] as? Bool == false)
+        recovering.update([observed(true, version: version)])
+        assert((state["apps"] as! [[String: Any]])[0]["foreground"] as? Bool == true)
+        events[0].onClose?(503)
+        recovering.update([app()]); assert(events.count == 1)
+        now = now.addingTimeInterval(1)
+        recovering.update([app()]); assert(events.count == 2, "Transient HTTP failure must retry")
+        events[1].onClose?(503)
+        now = now.addingTimeInterval(1)
+        recovering.update([app()]); assert(events.count == 2, "Backoff grows after repeated failures")
+        now = now.addingTimeInterval(1)
+        recovering.update([app()]); assert(events.count == 3)
+        events[2].onClose?(404)
+        now = now.addingTimeInterval(60)
+        recovering.update([app()]); assert(events.count == 3, "404 remains terminal for this process")
+        recovering.stop()
+        // Inventory changes use a separate revision, even if app states are unchanged.
+        let inventoryHub = TargetStateBroadcaster()
+        inventoryHub.update(["epoch": "inventory", "revision": 1, "apps": [], "upstreamCount": 0])
+        inventoryHub.accept(head: HTTPRequestHead(), leftover: Data(), connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp))
+        let inventoryViewer = WebSocketConnection.sockets.last!
+        inventoryViewer.drain()
+        inventoryHub.updateInventory(["devices": [["id": "phone"]], "simulators": [], "history": [:]])
+        assert(inventoryViewer.messages.last!["inventory"] != nil)
+        assert(inventoryViewer.messages.last!["revision"] as? Int == 1)
+        inventoryViewer.drain()
+        let inventoryCount = inventoryViewer.messages.count
+        inventoryHub.updateInventory(["devices": [["id": "phone"]], "simulators": [], "history": [:]])
+        assert(inventoryViewer.messages.count == inventoryCount, "Unchanged inventory does not broadcast")
         print("PASS native shared subscriptions, realtime state, scan races, restart, 404, reconnect, latest-only delivery and cleanup")
     }
 }

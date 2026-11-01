@@ -17,7 +17,7 @@ class Classes {
   contains(value) { return this.values.has(value); }
 }
 class Element {
-  classList = new Classes(); children = []; events = {}; hidden = false; textContent = '';
+  classList = new Classes(); children = []; events = {}; dataset = {}; hidden = false; textContent = '';
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
   addEventListener(event, action) { this.events[event] = action; }
@@ -145,7 +145,8 @@ console.log('PASS device selection and shared offline states/actions across 2D, 
   const status = {value: 'online', connected: false};
   const timers = new Map(); let timerID = 0;
   const ctx = vm.createContext({
-    targets: selection, appState: status, state: {mode: 'live'}, WebSocket: Socket, URL,
+    targets: selection, appState: status, state: {mode: 'live'}, WebSocket: Socket, URL, pageActivity: {ready: false},
+    replaceTargetHistory: () => {}, netCaptureHistoryChanged: () => {}, settleSimPending: () => {},
     location: {href: 'http://127.0.0.1:9523/'},
     logTargetKey: () => selection.deviceId + '|' + selection.bundleId,
     renderTargetMenu: () => renders++, setAppState: value => { status.value = value; transitions.push(value); },
@@ -187,5 +188,63 @@ console.log('PASS device selection and shared offline states/actions across 2D, 
   assert.equal(selection.devices[0].apps[0].instanceId, 'a2', 'New Mac session accepts revision reset');
   selection.bundleId = 'b'; ctx.watchApp();
   assert.equal(sockets.length, 2, 'Target switch reuses shared connection');
+  // Device topology can change without changing the App-state revision.
+  push(1, [], {epoch: 'new-process', replace: true, inventoryRevision: 1,
+    inventory: {devices: [{id: 'new-device', apps: []}], simulators: []}});
+  assert.equal(selection.devices[0].id, 'new-device');
+  push(1, [], {epoch: 'new-process', replace: true, inventoryRevision: 0,
+    inventory: {devices: [{id: 'old-device', apps: []}], simulators: []}});
+  assert.equal(selection.devices[0].id, 'new-device', 'Old inventory revision ignored');
   console.log('PASS shared state socket, realtime push, device isolation, late scans, removal and reconnect snapshots');
 }
+
+{
+  const states = vm.createContext({});
+  vm.runInContext(section('function appInBackground(app)', '// 自动选择时优先前台的 App'), states);
+  assert.equal(states.appInBackground({suspended: true, foreground: true}), false);
+  assert.equal(states.appInForeground({suspended: true, foreground: true}), true);
+  assert.equal(states.appInBackground({suspended: true}), false);
+  assert.equal(states.appInBackground({foreground: false}), true);
+  console.log('PASS scan timeouts do not imply background');
+}
+
+// Closed menus do no DOM rebuilding; opening renders once, unchanged data is skipped.
+{
+  const menu = new Element(); menu.hidden = true;
+  let builds = 0, labels = 0;
+  menu.replaceChildren = () => builds++;
+  const status = {value: 'online', connected: true};
+  const ctx = vm.createContext({
+    $: () => menu, targets: {devices: [], simulators: []}, targetHistory: {}, appState: status,
+    targetMenuUi: {offlineOpen: false, signature: ''}, simPending: new Map(), pendingSwitch: null, LANG: 'zh',
+    recordTargetHistory: () => {}, renderTargetLabel: () => labels++, settleBootLaunch: () => {}, syncOfflineView: () => {},
+    el: () => new Element(), t: text => text,
+    compareTargetDevices: () => 0,
+  });
+  vm.runInContext(section('function renderTargetMenu()', '// 已启动的设备及其上运行的 App'), ctx);
+  ctx.renderTargetMenu(); assert.equal(builds, 0); assert.equal(labels, 1);
+  menu.hidden = false; ctx.renderTargetMenu(); assert.equal(builds, 1);
+  ctx.renderTargetMenu(); assert.equal(builds, 1);
+  status.value = 'background'; ctx.renderTargetMenu(); assert.equal(builds, 2);
+  menu.hidden = true; ctx.renderTargetMenu(); menu.hidden = false; ctx.renderTargetMenu();
+  assert.equal(builds, 3, 'Opening a previously hidden menu refreshes it');
+  console.log('PASS closed menu avoids DOM rebuilds, visible unchanged menu stays stable');
+}
+
+// A late HTTP response cannot undo a newer device notification; concurrent loads are coalesced.
+(async () => {
+  let reply, requests = 0, applied = '';
+  const hub = {epoch: 'one', inventoryRevision: 1};
+  const ctx = vm.createContext({targetStateHub: hub,
+    fetch: () => { requests++; return new Promise(resolve => { reply = resolve; }); },
+    applyTargetInventory: data => { applied = data.name; }, ensureTargetStateSocket: () => {}, syncSelectedTargetState: () => {},
+  });
+  vm.runInContext(section('let targetLoad = null;', '// 模拟器启动 / 关闭:'), ctx);
+  const first = ctx.loadTargets(), second = ctx.loadTargets(); assert.equal(requests, 1);
+  hub.inventoryRevision = 2;
+  reply({ok: true, json: async () => ({name: 'stale'})});
+  await Promise.all([first, second]); assert.equal(applied, '');
+  const next = ctx.loadTargets(); reply({ok: true, json: async () => ({name: 'fresh'})});
+  await next; assert.equal(applied, 'fresh');
+  console.log('PASS coalesced list requests and stale HTTP inventory rejection');
+})().catch(error => { console.error(error); process.exitCode = 1; });

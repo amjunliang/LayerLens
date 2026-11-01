@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AB680FEC14FD4489A1F01305 /* PTYInputWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */; };
+		AB680FEC14FD4489A1F01303 /* BoundedStreamWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */; };
+		AB680FEC14FD4489A1F01301 /* DurableFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01302 /* DurableFile.swift */; };
+		AB680FEC14FD4489A1F01205 /* RecorderCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01206 /* RecorderCache.swift */; };
+		AB680FEC14FD4489A1F01203 /* BoundedProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01204 /* BoundedProcess.swift */; };
 		AB680FEC14FD4489A1F01201 /* TargetStateHub.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01202 /* TargetStateHub.swift */; };
 		0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */; };
 		0CF3043E815BAAE049E0039C /* LaunchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 082002D9233689FB1F30EDAA /* LaunchStore.swift */; };
@@ -40,6 +45,11 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYInputWriter.swift; sourceTree = "<group>"; };
+		AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedStreamWriter.swift; sourceTree = "<group>"; };
+		AB680FEC14FD4489A1F01302 /* DurableFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DurableFile.swift; sourceTree = "<group>"; };
+		AB680FEC14FD4489A1F01206 /* RecorderCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecorderCache.swift; sourceTree = "<group>"; };
+		AB680FEC14FD4489A1F01204 /* BoundedProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedProcess.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01202 /* TargetStateHub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetStateHub.swift; sourceTree = "<group>"; };
 		018BD14CAF3AA5013A6E67EA /* Usbmux.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Usbmux.swift; sourceTree = "<group>"; };
 		082002D9233689FB1F30EDAA /* LaunchStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchStore.swift; sourceTree = "<group>"; };
@@ -124,6 +134,11 @@
 				835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */,
 				C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */,
 				AB680FEC14FD4489A1F01202 /* TargetStateHub.swift */,
+				AB680FEC14FD4489A1F01204 /* BoundedProcess.swift */,
+				AB680FEC14FD4489A1F01206 /* RecorderCache.swift */,
+				AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */,
+				AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */,
+				AB680FEC14FD4489A1F01302 /* DurableFile.swift */,
 				BD29B7F3FDD57668D8ABCD5E /* TerminalController.swift */,
 				018BD14CAF3AA5013A6E67EA /* Usbmux.swift */,
 				A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */,
@@ -259,6 +274,11 @@
 				89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */,
 				8CCD018F71C87A6C6F8B962C /* TargetRegistry.swift in Sources */,
 				AB680FEC14FD4489A1F01201 /* TargetStateHub.swift in Sources */,
+				AB680FEC14FD4489A1F01203 /* BoundedProcess.swift in Sources */,
+				AB680FEC14FD4489A1F01205 /* RecorderCache.swift in Sources */,
+				AB680FEC14FD4489A1F01305 /* PTYInputWriter.swift in Sources */,
+				AB680FEC14FD4489A1F01303 /* BoundedStreamWriter.swift in Sources */,
+				AB680FEC14FD4489A1F01301 /* DurableFile.swift in Sources */,
 				86B305117D922CBB7EE92B8B /* TerminalController.swift in Sources */,
 				5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */,
 				0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */,

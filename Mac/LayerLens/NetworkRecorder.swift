@@ -8,6 +8,7 @@
 
 import Foundation
 import Network
+import CryptoKit
 
 /// 抓包: 开关按设备 + Bundle ID 记在目标历史中, 默认关闭, Mac 是唯一的依据, 每次扫描与 App 上报的状态不一致时同步给 App.
 /// 开启时每个运行中的 App 保持一条到 /api/network 的事件流, 请求结束后取回详情和内容,
@@ -15,6 +16,12 @@ import Network
 /// 网页的抓包接口都由这里回答, App 被挂起(如息屏)或退出后仍可查看, 也可查看以前的启动. 不设上限, 由用户在缓存管理中清理.
 /// 所有状态只在 queue 上读写
 final class NetworkRecorder {
+    private struct ClearBoundary: Codable {
+        let deviceId: String
+        let bundleId: String
+        let instanceId: String
+        let throughId: UInt64
+    }
     static let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LayerLens/Network")
     /// 同步开关后等待 App 生效的时间, 期间不重复发送
     static let captureSyncInterval: TimeInterval = 5
@@ -39,6 +46,10 @@ final class NetworkRecorder {
         /// 本地序号, 网页据此补齐变化
         var seqs: [UInt64: UInt64] = [:]
         var seq: UInt64 = 0
+        /// Sequence numbers are only comparable within this in-memory session generation.
+        var epoch = UUID().uuidString
+        var memoryBytes = 0
+        var recordBytes: [UInt64: Int] = [:]
 
         init(instanceId: String, deviceId: String, bundleId: String, deviceName: String, start: Double, folder: URL) {
             self.instanceId = instanceId
@@ -67,7 +78,8 @@ final class NetworkRecorder {
     }
 
     /// 同一设备上同一 App
-    final class Source {
+    private final class Source {
+        struct FetchRetry { let failures: Int; let after: Date }
         let deviceId: String
         let bundleId: String
         var deviceName = ""
@@ -77,18 +89,26 @@ final class NetworkRecorder {
         var online = false
         var stream: AppEventStream?
         var streamInstance = ""
-        /// App 端的序号, 重连时只补齐之后的变化
-        var podSeq: UInt64 = 0
         var unsupported: Set<String> = []
         var pendingFetch: [UInt64] = []
+        var fetchRetries: [UInt64: FetchRetry] = [:]
         var fetching = false
-        var subscribers: [ObjectIdentifier: NWConnection] = [:]
+        var releasing = false
+        var storageError = ""
+        var subscribers: [ObjectIdentifier: BoundedStreamWriter] = [:]
         /// App 支持开关和释放(新版 Pod 在 /api/app 中带 networkCapture)
         var canRelease = false
         var releasable: [UInt64] = []
         /// App 在 Mac 未连接期间丢弃的请求数
         var dropped = 0
         var captureSync = Date.distantPast
+        var present = false
+        var lastUse = Date()
+        var requestGeneration = 0
+        var requests: [UUID: AppRequestTask] = [:]
+        var clearBoundary: ClearBoundary?
+        var clearBoundaryLoaded = false
+        var clearBoundaryReadFailed = false
 
         init(deviceId: String, bundleId: String) {
             self.deviceId = deviceId
@@ -102,6 +122,7 @@ final class NetworkRecorder {
     private var sources: [String: Source] = [:]
     /// 查看过的以前的启动, 只读
     private var archives: [String: Session] = [:]
+    private var archiveUse: [String: Date] = [:]
     private var searchGenerations: [String: Int] = [:]
     /// 设备 ID, Bundle ID -> 是否开启抓包
     private let isEnabled: (String, String) -> Bool
@@ -112,8 +133,22 @@ final class NetworkRecorder {
         return formatter
     }()
 
-    init(isEnabled: @escaping (String, String) -> Bool) {
-        self.isEnabled = isEnabled
+    private let storageFolder: URL
+    private let now: () -> Date
+    private let emptyEpoch = UUID().uuidString
+    init(folder: URL = NetworkRecorder.folder, now: @escaping () -> Date = Date.init, isEnabled: @escaping (String, String) -> Bool) {
+        self.isEnabled = isEnabled; storageFolder = folder; self.now = now
+    }
+
+    func connectionSummary(completion: @escaping ([String: Int]) -> Void) {
+        queue.async { [self] in
+            completion(["connections": sources.values.filter { $0.stream != nil }.count,
+                        "requests": sources.values.reduce(0) { $0 + $1.requests.count },
+                        "records": sources.values.reduce(0) { $0 + ($1.session?.records.count ?? 0) },
+                        "viewers": sources.values.reduce(0) { $0 + $1.subscribers.count },
+                        "storageErrors": sources.values.filter { !$0.storageError.isEmpty }.count, "cachedSources": sources.count, "archives": archives.count,
+                        "cacheBytes": sources.values.reduce(0) { $0 + ($1.session?.memoryBytes ?? 0) } + archives.values.reduce(0) { $0 + $1.memoryBytes }])
+        }
     }
 
     // MARK: - Settings
@@ -125,10 +160,10 @@ final class NetworkRecorder {
             guard let source = sources[deviceId + "|" + bundleId] else { return }
             source.captureSync = .distantPast
             if !isEnabled(deviceId, bundleId) {
-                source.stream?.cancel()
-                source.stream = nil
+                deactivate(source)
                 source.streamInstance = ""
                 source.pendingFetch = []
+                source.fetchRetries = [:]
                 source.releasable = []
             }
             broadcast(source, "capture", ["enabled": isEnabled(deviceId, bundleId)])
@@ -141,16 +176,19 @@ final class NetworkRecorder {
             return source
         }
         let source = Source(deviceId: deviceId, bundleId: bundleId)
+        source.lastUse = now()
         sources[key] = source
         return source
     }
 
     /// LayerLens 重启后先找回该设备上最近一次启动的记录, App 未运行时也能查看
-    private func loadIfNeeded(_ source: Source) {
-        guard !source.loaded else { return }
+    @discardableResult private func loadIfNeeded(_ source: Source) -> Bool {
+        do { try loadClearBoundary(source) }
+        catch { storageFailed(source, "Could not read cleared request boundary: " + error.localizedDescription); return false }
+        guard !source.loaded else { return true }
         source.loaded = true
-        guard source.session == nil else { return }
-        let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
+        guard source.session == nil else { return true }
+        let folder = storageFolder.appendingPathComponent(Self.sanitize(source.bundleId))
         let folders = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         var latest: (url: URL, info: [String: Any])?
         for url in folders {
@@ -160,16 +198,19 @@ final class NetworkRecorder {
             }
         }
         if let latest {
-            source.session = loadSession(latest.url, info: latest.info)
+            source.session = loadSession(latest.url, info: latest.info, clearedThrough: clearedThrough(source, instanceId: latest.info["instanceId"] as? String ?? ""))
         }
+        return true
     }
 
-    private func loadSession(_ url: URL, info: [String: Any]) -> Session {
+    private func loadSession(_ url: URL, info: [String: Any], clearedThrough: UInt64 = 0) -> Session {
         let session = Session(instanceId: info["instanceId"] as? String ?? "", deviceId: info["deviceId"] as? String ?? "", bundleId: info["bundleId"] as? String ?? "", deviceName: info["deviceName"] as? String ?? "", start: info["start"] as? Double ?? 0, folder: url)
         let files = (try? FileManager.default.contentsOfDirectory(at: url.appendingPathComponent("r"), includingPropertiesForKeys: nil)) ?? []
         for file in files where file.pathExtension == "json" {
-            guard let record = Self.readJSON(file), let id = (record["id"] as? NSNumber)?.uint64Value else { continue }
+            guard let record = Self.readJSON(file), let id = (record["id"] as? NSNumber)?.uint64Value, id > clearedThrough else { continue }
             session.records[id] = record
+            let bytes = ((try? JSONSerialization.data(withJSONObject: record))?.count ?? 0) + 128
+            session.recordBytes[id] = bytes; session.memoryBytes += bytes
         }
         session.order = session.records.keys.sorted()
         for id in session.order {
@@ -180,6 +221,46 @@ final class NetworkRecorder {
     }
 
     // MARK: - Upstream
+
+    // Kept outside session folders so deleting a session cannot delete its suppression boundary.
+    // Cache Manage deliberately excludes hidden folders. One small file per device / App.
+    private func clearBoundaryURL(_ source: Source) -> URL {
+        let key = Data((source.deviceId + "|" + source.bundleId).utf8)
+        let name = SHA256.hash(data: key).map { String(format: "%02x", $0) }.joined()
+        return storageFolder.appendingPathComponent(".cleared/" + name + ".json")
+    }
+
+    private func loadClearBoundary(_ source: Source) throws {
+        guard !source.clearBoundaryLoaded else { return }
+        let url = clearBoundaryURL(source)
+        do {
+            let data: Data?
+            do { data = try Data(contentsOf: url) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { data = nil }
+            if let data {
+                let boundary = try JSONDecoder().decode(ClearBoundary.self, from: data)
+                guard boundary.deviceId == source.deviceId, boundary.bundleId == source.bundleId else { throw CocoaError(.fileReadCorruptFile) }
+                source.clearBoundary = boundary
+            }
+            source.clearBoundaryLoaded = true
+            if source.clearBoundaryReadFailed { source.clearBoundaryReadFailed = false; storageRecovered(source) }
+        } catch {
+            source.clearBoundaryReadFailed = true
+            throw error
+        }
+    }
+
+    private func clearedThrough(_ source: Source, instanceId: String) -> UInt64 {
+        source.clearBoundary?.instanceId == instanceId ? source.clearBoundary!.throughId : 0
+    }
+
+    private func saveClearBoundary(_ source: Source, session: Session) throws {
+        try loadClearBoundary(source)
+        let boundary = ClearBoundary(deviceId: source.deviceId, bundleId: source.bundleId, instanceId: session.instanceId,
+                                     throughId: max(clearedThrough(source, instanceId: session.instanceId), session.order.max() ?? 0))
+        try DurableFile.write(try JSONEncoder().encode(boundary), to: clearBoundaryURL(source))
+        source.clearBoundary = boundary
+    }
 
     /// 每次扫描后调用: App 上报的开关与设置不一致时同步; 为开启了抓包的运行中 App 建立事件流, 失效的重新连接, 并继续拉取未取回的内容
     func update(apps: [AppRecord]) {
@@ -193,10 +274,24 @@ final class NetworkRecorder {
                 guard enabled || sources[key] != nil || reported == true else { continue }
                 let source = source(deviceId: app.deviceId, bundleId: app.bundleId)
                 seen.insert(key)
-                setOnline(source, !app.suspended)
-                guard !app.suspended, let instanceId = app.info["instanceId"] as? String, !instanceId.isEmpty else { continue }
+                source.present = true
+                source.lastUse = now()
+                setOnline(source, app.responding)
+                guard app.responding, let instanceId = app.info["instanceId"] as? String, !instanceId.isEmpty else { continue }
+                // Clean up the previous process before starting any requests for this one.
+                if source.streamInstance != instanceId {
+                    deactivate(source)
+                    source.streamInstance = instanceId
+                    source.pendingFetch = []; source.fetchRetries = [:]; source.releasable = []
+                    source.captureSync = .distantPast
+                } else if let endpoint = source.endpoint, endpoint != app.endpoint {
+                    deactivate(source)
+                    source.captureSync = .distantPast
+                }
                 source.endpoint = app.endpoint
                 source.canRelease = reported != nil
+                do { try loadClearBoundary(source) }
+                catch { deactivate(source); storageFailed(source, "Could not read cleared request boundary: " + error.localizedDescription); continue }
                 if let name = app.info["deviceName"] as? String, !name.isEmpty {
                     source.deviceName = name
                 }
@@ -204,6 +299,7 @@ final class NetworkRecorder {
                     syncCapture(source, endpoint: app.endpoint, enabled: enabled)
                 }
                 guard enabled, !source.unsupported.contains(instanceId) else { continue }
+                releaseSaved(source)
                 if !source.fetching, !source.pendingFetch.isEmpty, source.session?.instanceId == instanceId {
                     fetchNext(source)
                 }
@@ -211,8 +307,55 @@ final class NetworkRecorder {
                 connect(source, endpoint: app.endpoint, instanceId: instanceId)
             }
             for (key, source) in sources where !seen.contains(key) {
+                source.present = false
                 setOnline(source, false)
+                deactivate(source)
+                source.endpoint = nil
             }
+            pruneCaches()
+        }
+    }
+
+    private func deactivate(_ source: Source) {
+        source.stream?.cancel(); source.stream = nil
+        source.requestGeneration += 1
+        source.requests.values.forEach { $0.cancel() }; source.requests = [:]
+        source.fetching = false
+        source.releasing = false
+    }
+
+    private func request(_ source: Source, endpoint: TargetEndpoint, method: String = "GET", path: String, body: Data? = nil, timeout: TimeInterval, completion: @escaping (HTTPClient.Response?) -> Void) {
+        let id = UUID(), generation = source.requestGeneration
+        let task = AppRequest.send(endpoint, method: method, path: path, body: body, timeout: timeout, queue: queue) { response in
+            source.requests[id] = nil
+            guard generation == source.requestGeneration else { return }
+            completion(response)
+        }
+        source.requests[id] = task
+    }
+
+    private func pruneCaches(excluding protected: Source? = nil) {
+        var items = sources.map { key, source in
+            RecorderCache.Item(id: "s:" + key, bytes: source.session?.memoryBytes ?? 0, lastUse: source.lastUse,
+                               pinned: source === protected || source.present || !source.subscribers.isEmpty || source.fetching)
+        }
+        items += archives.map { key, session in
+            RecorderCache.Item(id: "a:" + key, bytes: session.memoryBytes, lastUse: archiveUse[key] ?? .distantPast, pinned: false)
+        }
+        for id in RecorderCache.evictions(items, now: now()) {
+            let key = String(id.dropFirst(2))
+            if id.hasPrefix("a:") { archives[key] = nil; archiveUse[key] = nil }
+            else if let source = sources[key] {
+                source.session = nil; source.loaded = false
+                if !source.present && source.subscribers.isEmpty { sources[key] = nil }
+            }
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            for source in sources.values { deactivate(source); source.subscribers.values.forEach { $0.cancel() } }
+            sources = [:]; archives = [:]; archiveUse = [:]
         }
     }
 
@@ -221,21 +364,18 @@ final class NetworkRecorder {
         guard Date().timeIntervalSince(source.captureSync) > Self.captureSyncInterval else { return }
         source.captureSync = Date()
         let body = (try? JSONSerialization.data(withJSONObject: ["enabled": enabled])) ?? Data()
-        AppRequest.send(endpoint, method: "POST", path: "/api/network/capture", body: body, timeout: 5, queue: queue) { _ in }
+        request(source, endpoint: endpoint, method: "POST", path: "/api/network/capture", body: body, timeout: 5) { _ in }
     }
 
     private func setOnline(_ source: Source, _ online: Bool) {
         guard source.online != online else { return }
         source.online = online
-        broadcast(source, "source", ["online": online, "dropped": source.dropped])
+        broadcast(source, "source", ["online": online, "dropped": source.dropped, "storageError": source.storageError])
     }
 
     private func connect(_ source: Source, endpoint: TargetEndpoint, instanceId: String) {
         source.stream?.cancel()
-        loadIfNeeded(source)
-        if source.session?.instanceId != instanceId {
-            source.podSeq = 0
-        }
+        guard loadIfNeeded(source) else { return }
         source.streamInstance = instanceId
         let stream = AppEventStream(queue: queue)
         stream.onEvent = { [weak self, weak stream] name, payload in
@@ -252,41 +392,55 @@ final class NetworkRecorder {
             }
         }
         source.stream = stream
-        stream.start(endpoint: endpoint, path: "/api/network?since=\(source.podSeq)")
+        // Existing Pods replay in request ID order, which need not match update sequence.
+        // Reconcile the retained summaries on every reconnect; receive() deduplicates them
+        // and reuses complete local bodies, without requiring a Pod protocol upgrade.
+        stream.start(endpoint: endpoint, path: "/api/network?since=0")
     }
 
     private func receive(_ json: [String: Any], source: Source) {
         // 只有连接后的第一条带 instanceId, 之后的变化属于同一次启动
         let instanceId = (json["instanceId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? source.streamInstance
         guard !instanceId.isEmpty else { return }
+        // A process can restart between discovery and opening the stream. Wait for a fresh scan.
+        guard instanceId == source.streamInstance else { deactivate(source); source.streamInstance = ""; return }
         if let dropped = (json["dropped"] as? NSNumber)?.intValue, dropped != source.dropped {
             source.dropped = dropped
-            broadcast(source, "source", ["online": source.online, "dropped": dropped])
+            broadcast(source, "source", ["online": source.online, "dropped": dropped, "storageError": source.storageError])
         }
         let switched = source.session?.instanceId != instanceId
         if switched {
             // App 重新启动, 打开着的面板改为显示这一次的请求
-            if source.session != nil {
-                broadcast(source, "clear", [:])
-            }
+            let hadSession = source.session != nil
             source.session = newSession(source, instanceId: instanceId)
             source.pendingFetch = []
+            source.fetchRetries = [:]
             source.releasable = []
+            if hadSession { broadcast(source, "clear", [:]) }
         }
         guard let session = source.session else { return }
+        let throughId = clearedThrough(source, instanceId: instanceId)
         var changed: [UInt64] = []
         for item in json["records"] as? [[String: Any]] ?? [] {
             guard let id = (item["id"] as? NSNumber)?.uint64Value else { continue }
-            if let seq = (item["s"] as? NSNumber)?.uint64Value {
-                source.podSeq = max(source.podSeq, seq)
+            if id <= throughId {
+                // User explicitly discarded this record. Release only that ID when finished;
+                // never run a delayed whole-process clear that could delete newer requests.
+                if item["state"] as? String != "pending", source.canRelease, !source.releasable.contains(id) { source.releasable.append(id) }
+                continue
             }
             var record = session.records[id] ?? [:]
             let old = record
             for key in Self.summaryKeys {
                 record[key] = item[key]
             }
+            // The device still has this saved record: retry its idempotent release, including
+            // after a Mac restart that lost an in-memory acknowledgement queue.
+            if record["_f"] as? Bool == true, source.canRelease, !source.releasable.contains(id) {
+                source.releasable.append(id)
+            }
             // LayerLens 重启后 App 会重发全部请求, 没有变化的不再推送, 但未取回内容的仍需补取
-            if record["state"] as? String != "pending", record["_f"] == nil, !source.pendingFetch.contains(id) {
+            if record["state"] as? String != "pending", record["_f"] == nil, record["_missing"] == nil, !source.pendingFetch.contains(id) {
                 source.pendingFetch.append(id)
             }
             if session.records[id] == nil {
@@ -312,11 +466,11 @@ final class NetworkRecorder {
 
     /// 同一次启动在 LayerLens 重启后继续使用原文件夹
     private func newSession(_ source: Source, instanceId: String) -> Session {
-        let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
+        let folder = storageFolder.appendingPathComponent(Self.sanitize(source.bundleId))
         let folders = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         for url in folders {
-            if let info = Self.readJSON(url.appendingPathComponent(Self.sessionFile)), info["instanceId"] as? String == instanceId {
-                return loadSession(url, info: info)
+            if let info = Self.readJSON(url.appendingPathComponent(Self.sessionFile)), info["instanceId"] as? String == instanceId, info["deviceId"] as? String == source.deviceId {
+                return loadSession(url, info: info, clearedThrough: clearedThrough(source, instanceId: instanceId))
             }
         }
         let name = source.deviceName.isEmpty ? source.deviceId : source.deviceName
@@ -326,106 +480,122 @@ final class NetworkRecorder {
 
     // MARK: - Fetch
 
-    /// 逐个取回已结束请求的详情和内容; App 不响应时停下, 下次扫描到 App 在线再继续
+    private enum BodyResult { case complete, unavailable([String]), retry }
+
+    /// Never acknowledge a request until its metadata and every available body are durably saved.
     private func fetchNext(_ source: Source) {
-        guard let session = source.session, source.online, let endpoint = source.endpoint, !source.pendingFetch.isEmpty else {
-            source.fetching = false
-            releaseSaved(source)
-            return
+        guard let session = source.session, session.instanceId == source.streamInstance, source.online, let endpoint = source.endpoint,
+              let id = source.pendingFetch.first(where: { (source.fetchRetries[$0]?.after ?? .distantPast) <= now() }) else {
+            source.fetching = false; releaseSaved(source); return
         }
         source.fetching = true
-        let id = source.pendingFetch[0]
-        let retryLater = {
+        let retryLater = { [weak self] in
+            guard let self, source.session === session else { return }
+            let failures = min((source.fetchRetries[id]?.failures ?? 0) + 1, 6)
+            source.fetchRetries[id] = .init(failures: failures, after: self.now().addingTimeInterval(min(pow(2, Double(failures - 1)), 30)))
             source.fetching = false
-        }
-        let done = { [weak self] (detail: [String: Any]?) in
-            guard let self, source.session === session else {
-                source.fetching = false
-                return
-            }
-            if var record = session.records[id] {
-                for (key, value) in detail ?? [:] where key != "s" && !Self.summaryKeys.contains(key) {
-                    record[key] = value
-                }
-                record["_f"] = true
-                let reqMime = Self.header("Content-Type", in: record["requestHeaders"] as? [String: String] ?? [:])
-                let mimeChanged = reqMime != nil && record["reqMime"] as? String != reqMime
-                if mimeChanged {
-                    record["reqMime"] = reqMime
-                    session.seq += 1
-                    session.seqs[id] = session.seq
-                }
-                session.records[id] = record
-                self.save(session, id: id)
-                if mimeChanged {
-                    self.broadcast(source, "network", ["instanceId": session.instanceId, "records": [session.summary(id)]])
-                }
-            }
-            source.pendingFetch.removeAll { $0 == id }
-            if source.canRelease {
-                source.releasable.append(id)
-                if source.releasable.count >= Self.releaseBatch {
-                    self.releaseSaved(source)
-                }
-            }
+            // Keep this request for a later scan; other eligible requests can progress now.
             self.fetchNext(source)
         }
-        AppRequest.send(endpoint, path: "/api/network/detail?id=\(id)", timeout: 10, queue: queue) { [weak self] response in
-            guard let self else { return }
-            guard let response else {
-                retryLater()
-                return
+        let done = { [weak self] (detail: [String: Any], complete: Bool) in
+            guard let self, source.session === session, var record = session.records[id] else { source.fetching = false; return }
+            for (key, value) in detail where key != "s" && !Self.summaryKeys.contains(key) { record[key] = value }
+            record["_f"] = complete ? true : nil
+            record["_missing"] = complete ? nil : true
+            if let mime = Self.header("Content-Type", in: record["requestHeaders"] as? [String: String] ?? [:]) { record["reqMime"] = mime }
+            let previous = session.records[id]
+            session.records[id] = record
+            guard self.save(session, id: id, durable: true) else {
+                session.records[id] = previous
+                self.storageFailed(source, "Could not save request metadata")
+                retryLater(); return
             }
-            guard response.status == 200, let detail = response.json else {
-                done(nil)
-                return
+            self.storageRecovered(source)
+            source.pendingFetch.removeAll { $0 == id }
+            source.fetchRetries[id] = nil
+            session.seq += 1; session.seqs[id] = session.seq
+            self.broadcast(source, "network", ["instanceId": session.instanceId, "records": [session.summary(id)]])
+            if complete && source.canRelease && !source.releasable.contains(id) { source.releasable.append(id) }
+            if source.releasable.count >= Self.releaseBatch { self.releaseSaved(source) }
+            self.fetchNext(source)
+        }
+        request(source, endpoint: endpoint, path: "/api/network/detail?id=\(id)", timeout: 10) { [weak self] response in
+            guard let self, source.session === session, let response else { retryLater(); return }
+            if response.status == 404 || response.status == 410 {
+                done(["reqBody": "evicted", "resBody": "evicted"], false); return
             }
+            guard response.status == 200, let detail = response.json,
+                  (detail["id"] as? NSNumber)?.uint64Value == id else { retryLater(); return }
             let sides = ["req", "res"].filter { detail[$0 == "req" ? "reqBody" : "resBody"] as? String == "stored" && !FileManager.default.fileExists(atPath: session.bodyURL(id, side: $0).path) }
-            self.fetchBodies(sides, id: id, session: session, endpoint: endpoint) { ok in
-                ok ? done(detail) : retryLater()
+            self.fetchBodies(sides, missing: [], id: id, session: session, endpoint: endpoint, source: source) { result in
+                switch result {
+                case .complete: done(detail, true)
+                case .retry: retryLater()
+                case .unavailable(let sides):
+                    var partial = detail
+                    for side in sides { partial[side == "req" ? "reqBody" : "resBody"] = "evicted" }
+                    done(partial, false)
+                }
             }
         }
     }
 
-    /// 已保存的请求通知 App 释放内存和缓存文件; 失败时 App 达到上限后会自行丢弃最旧的
+    private func storageFailed(_ source: Source, _ message: String) {
+        guard source.storageError != message else { return }
+        source.storageError = message
+        broadcast(source, "source", ["online": source.online, "dropped": source.dropped, "storageError": message])
+    }
+    private func storageRecovered(_ source: Source) {
+        guard !source.storageError.isEmpty else { return }
+        source.storageError = ""
+        broadcast(source, "source", ["online": source.online, "dropped": source.dropped, "storageError": ""])
+    }
+
     private func releaseSaved(_ source: Source) {
-        guard !source.releasable.isEmpty, source.online, let endpoint = source.endpoint else { return }
-        let body = (try? JSONSerialization.data(withJSONObject: ["ids": source.releasable])) ?? Data()
-        source.releasable = []
-        AppRequest.send(endpoint, method: "POST", path: "/api/network/release", body: body, timeout: 5, queue: queue) { _ in }
+        guard source.canRelease, source.session?.instanceId == source.streamInstance,
+              !source.releasing, !source.releasable.isEmpty, source.online, let endpoint = source.endpoint else { return }
+        let ids = Array(source.releasable.prefix(Self.releaseBatch))
+        guard let body = try? JSONSerialization.data(withJSONObject: ["ids": ids]) else { return }
+        source.releasing = true
+        request(source, endpoint: endpoint, method: "POST", path: "/api/network/release", body: body, timeout: 5) { [weak self] response in
+            source.releasing = false
+            guard response?.status == 200, response?.json?["ok"] as? Bool == true else { return }
+            source.releasable.removeAll { ids.contains($0) }
+            if source.releasable.count >= Self.releaseBatch || source.pendingFetch.isEmpty { self?.releaseSaved(source) }
+        }
     }
 
-    private func fetchBodies(_ sides: [String], id: UInt64, session: Session, endpoint: TargetEndpoint, completion: @escaping (Bool) -> Void) {
-        guard let side = sides.first else {
-            completion(true)
-            return
-        }
-        AppRequest.send(endpoint, path: "/api/network/body?id=\(id)&side=\(side)", timeout: 60, queue: queue) { [weak self] response in
-            guard let self, let response else {
-                completion(false)
-                return
+    private func fetchBodies(_ sides: [String], missing: [String], id: UInt64, session: Session, endpoint: TargetEndpoint, source: Source, completion: @escaping (BodyResult) -> Void) {
+        guard let side = sides.first else { completion(missing.isEmpty ? .complete : .unavailable(missing)); return }
+        request(source, endpoint: endpoint, path: "/api/network/body?id=\(id)&side=\(side)", timeout: 60) { [weak self] response in
+            guard let self, source.session === session, let response else { completion(.retry); return }
+            var missing = missing
+            if response.status == 404 || response.status == 410 { missing.append(side) }
+            else {
+                guard response.status == 200 else { completion(.retry); return }
+                do { try DurableFile.write(response.body, to: session.bodyURL(id, side: side)) }
+                catch { self.storageFailed(source, error.localizedDescription); completion(.retry); return }
             }
-            // App 端已清理的内容不再重试
-            if response.status == 200 {
-                let url = session.bodyURL(id, side: side)
-                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? response.body.write(to: url)
-            }
-            self.fetchBodies(Array(sides.dropFirst()), id: id, session: session, endpoint: endpoint, completion: completion)
+            self.fetchBodies(Array(sides.dropFirst()), missing: missing, id: id, session: session, endpoint: endpoint, source: source, completion: completion)
         }
     }
 
     // MARK: - File
 
-    private func save(_ session: Session, id: UInt64) {
-        let folder = session.folder.appendingPathComponent("r")
-        if !FileManager.default.fileExists(atPath: folder.path) {
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let info: [String: Any] = ["instanceId": session.instanceId, "deviceId": session.deviceId, "bundleId": session.bundleId, "deviceName": session.deviceName, "start": session.start]
-            try? JSONSerialization.data(withJSONObject: info).write(to: session.folder.appendingPathComponent(Self.sessionFile))
-        }
-        guard let record = session.records[id], let data = try? JSONSerialization.data(withJSONObject: record) else { return }
-        try? data.write(to: folder.appendingPathComponent("\(id).json"))
+    @discardableResult
+    private func save(_ session: Session, id: UInt64, durable: Bool = false) -> Bool {
+        let info: [String: Any] = ["instanceId": session.instanceId, "deviceId": session.deviceId, "bundleId": session.bundleId, "deviceName": session.deviceName, "start": session.start]
+        guard let record = session.records[id], let data = try? JSONSerialization.data(withJSONObject: record) else { return false }
+        session.memoryBytes += data.count + 128 - (session.recordBytes[id] ?? 0)
+        session.recordBytes[id] = data.count + 128
+        do {
+            let metadata = session.folder.appendingPathComponent(Self.sessionFile)
+            if durable || !FileManager.default.fileExists(atPath: metadata.path) {
+                try DurableFile.write(try JSONSerialization.data(withJSONObject: info), to: metadata, synchronize: durable)
+            }
+            try DurableFile.write(data, to: session.folder.appendingPathComponent("r/\(id).json"), synchronize: durable)
+            return true
+        } catch { return false }
     }
 
     /// 本机保存的抓包所属的设备 ID -> Bundle ID
@@ -459,16 +629,22 @@ final class NetworkRecorder {
                 guard let session = source.session else { continue }
                 let path = session.folder.standardizedFileURL.path
                 guard paths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) else { continue }
+                do { try saveClearBoundary(source, session: session) }
+                catch { storageFailed(source, "Could not save cache deletion boundary: " + error.localizedDescription); deactivate(source); continue }
                 reset(source, session)
             }
         }
     }
 
     private func reset(_ source: Source, _ session: Session) {
+        deactivate(source)
         session.records = [:]
+        session.recordBytes = [:]; session.memoryBytes = 0
         session.order = []
         session.seqs = [:]
+        session.seq = 0; session.epoch = UUID().uuidString
         source.pendingFetch = []
+        source.fetchRetries = [:]
         source.releasable = []
         broadcast(source, "clear", [:])
     }
@@ -483,7 +659,9 @@ final class NetworkRecorder {
         let enabled = isEnabled(deviceId, bundleId)
         queue.async { [self] in
             let source = source(deviceId: deviceId, bundleId: bundleId)
-            loadIfNeeded(source)
+            source.lastUse = now()
+            pruneCaches(excluding: source)
+            guard loadIfNeeded(source) else { connection.respond(.error(503, source.storageError)); return }
             // 未开启抓包时最近一次启动也按以前的启动只读查看
             if let name = head.query["session"], !name.isEmpty, name != source.session?.folder.lastPathComponent || !enabled {
                 guard let session = archive(name, source: source) else {
@@ -510,16 +688,21 @@ final class NetworkRecorder {
     /// source 为空表示查看以前的启动: 只读, 没有实时更新, 也不转发给 App
     private func serve(_ head: HTTPRequestHead, path: String, session: Session?, source: Source?, enabled: Bool, connection: HubConnection, fallback: @escaping () -> Void) {
         let online = source?.online ?? false
+        if path == "/api/network/detail" || path == "/api/network/body", let source,
+           let id = UInt64(head.query["id"] ?? ""), id > 0,
+           id <= clearedThrough(source, instanceId: session?.instanceId ?? source.streamInstance) {
+            connection.respond(.error(404, "Request was cleared")); return
+        }
         switch (head.method, path) {
         case ("GET", "/api/network/status"):
             var result = source.map { status($0, enabled: enabled) } ?? ["ok": true, "search": true, "searchScope": true, "cached": true, "capture": enabled]
             result["archived"] = source == nil
             connection.respond(.json(result))
         case ("GET", "/api/network"):
-            subscribe(source, session: session, since: UInt64(head.query["since"] ?? "") ?? 0, connection: connection.detach())
+            subscribe(source, session: session, since: UInt64(head.query["since"] ?? "") ?? 0, epoch: head.query["epoch"], connection: connection.detach())
         case ("GET", "/api/network/detail"):
             let id = UInt64(head.query["id"] ?? "") ?? 0
-            guard let session, var record = session.records[id], record["_f"] != nil else {
+            guard let session, var record = session.records[id], (record["_f"] != nil || record["_missing"] != nil) else {
                 online ? fallback() : connection.respond(.error(404, "Request not found"))
                 return
             }
@@ -538,11 +721,19 @@ final class NetworkRecorder {
                 return
             }
             if let session {
-                try? FileManager.default.removeItem(at: session.folder)
+                // Persist the boundary before touching data, so a crash or remote failure
+                // cannot resurrect cleared records. A failed marker write leaves data intact.
+                do { try saveClearBoundary(source, session: session) }
+                catch { storageFailed(source, error.localizedDescription); connection.respond(.error(500, "Could not save clear state")); return }
+                let discarded = session.order.filter { session.records[$0]?["state"] as? String != "pending" }
+                archives[session.folder.path] = nil; archiveUse[session.folder.path] = nil
                 reset(source, session)
-            }
-            if source.online, let endpoint = source.endpoint {
-                AppRequest.send(endpoint, method: "POST", path: "/api/network/clear", body: Data("{}".utf8), timeout: 5, queue: queue) { _ in }
+                do {
+                    if FileManager.default.fileExists(atPath: session.folder.path) { try FileManager.default.removeItem(at: session.folder) }
+                } catch { storageFailed(source, error.localizedDescription); connection.respond(.error(500, "Could not delete saved requests")); return }
+                storageRecovered(source)
+                source.releasable = discarded
+                releaseSaved(source)
             }
             connection.respond(.json(["ok": true]))
         default:
@@ -551,22 +742,22 @@ final class NetworkRecorder {
     }
 
     private func status(_ source: Source, enabled: Bool) -> [String: Any] {
-        ["ok": true, "search": true, "searchScope": true, "cached": true, "capture": enabled, "online": source.online, "dropped": source.dropped, "session": source.session?.folder.lastPathComponent ?? ""]
+        ["ok": true, "search": true, "searchScope": true, "cached": true, "capture": enabled, "storageError": source.storageError, "online": source.online, "dropped": source.dropped, "session": source.session?.folder.lastPathComponent ?? ""]
     }
 
     /// 以前的某次启动, 只接受该 App 文件夹下属于同一设备的
     private func archive(_ name: String, source: Source) -> Session? {
         guard !name.contains("/"), name != ".", name != ".." else { return nil }
-        let url = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId)).appendingPathComponent(name)
+        let url = storageFolder.appendingPathComponent(Self.sanitize(source.bundleId)).appendingPathComponent(name)
         if let session = archives[url.path] {
+            archiveUse[url.path] = now()
             return session
         }
         guard let info = Self.readJSON(url.appendingPathComponent(Self.sessionFile)), info["deviceId"] as? String == source.deviceId else { return nil }
-        if archives.count >= 4 {
-            archives.removeAll()
-        }
-        let session = loadSession(url, info: info)
+        let session = loadSession(url, info: info, clearedThrough: clearedThrough(source, instanceId: info["instanceId"] as? String ?? ""))
         archives[url.path] = session
+        archiveUse[url.path] = now()
+        pruneCaches()
         return session
     }
 
@@ -578,19 +769,39 @@ final class NetworkRecorder {
         }
     }
 
-    private func subscribe(_ source: Source?, session: Session?, since: UInt64, connection: NWConnection) {
+    private func subscribe(_ source: Source?, session: Session?, since: UInt64, epoch requestedEpoch: String?, connection: NWConnection) {
         let id = ObjectIdentifier(connection)
-        source?.subscribers[id] = connection
-        var data = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n".utf8)
-        data.append(Self.event("source", ["online": source?.online ?? false, "dropped": source?.dropped ?? 0, "archived": source == nil]))
-        // 序号比当前还大说明对方记录的是另一份内容, 全部给出
-        let start = since > (session?.seq ?? 0) ? 0 : since
-        let ids = session?.order.filter { (session?.seqs[$0] ?? 0) > start } ?? []
-        data.append(Self.event("network", ["instanceId": session?.instanceId ?? "", "records": ids.map { session!.summary($0) }]))
-        connection.send(content: data, completion: .contentProcessed { _ in })
-        watchClose(connection) { [weak self] in
+        let writer = BoundedStreamWriter(queue: queue, send: { data, done in
+            connection.send(content: data, completion: .contentProcessed { done($0 == nil) })
+        }, close: { connection.cancel() })
+        source?.subscribers[id] = writer
+        let epoch = session?.epoch ?? emptyEpoch
+        let instance = session?.instanceId ?? ""
+        let replace = requestedEpoch != epoch || since > (session?.seq ?? 0)
+        var initial = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n".utf8) + Self.event("source", ["online": source?.online ?? false, "dropped": source?.dropped ?? 0, "archived": source == nil, "storageError": source?.storageError ?? ""])
+        // Clear is also understood by older web clients. A missed clear, Mac restart or
+        // cache reload must rebuild the view rather than reuse an unrelated sequence cursor.
+        if replace { initial.append(Self.event("clear", ["epoch": epoch, "instanceId": instance])) }
+        let start = replace ? 0 : since
+        // Resume uses max(s): page in update order rather than request ID order.
+        let ids = (session?.order.filter { (session?.seqs[$0] ?? 0) > start } ?? []).sorted {
+            (session?.seqs[$0] ?? 0) < (session?.seqs[$1] ?? 0)
+        }
+        let records = ids.map { session!.summary($0) }
+        var index = 0, started = false, sentEmpty = false
+        writer.startReplay {
+            if !started { started = true; return initial }
+            if records.isEmpty && !sentEmpty { sentEmpty = true; return Self.event("network", ["instanceId": instance, "epoch": epoch, "records": []]) }
+            guard index < records.count else { return nil }
+            let end = min(index + 128, records.count); defer { index = end }
+            return Self.event("network", ["instanceId": instance, "epoch": epoch, "records": Array(records[index..<end])])
+        }
+        // Archived streams are not in Source, so the close watcher must retain their writer as well.
+        watchClose(connection) { [weak self, writer] in
             self?.queue.async {
-                source?.subscribers[id] = nil
+                writer.cancel(); source?.subscribers[id] = nil
+                source?.lastUse = self?.now() ?? Date()
+                self?.pruneCaches()
             }
         }
     }
@@ -608,14 +819,13 @@ final class NetworkRecorder {
 
     private func broadcast(_ source: Source, _ name: String, _ object: [String: Any]) {
         guard !source.subscribers.isEmpty else { return }
-        let data = Self.event(name, object)
-        for connection in source.subscribers.values {
-            connection.send(content: data, completion: .contentProcessed { error in
-                if error != nil {
-                    connection.cancel()
-                }
-            })
+        var object = object
+        if name == "network" || name == "clear" {
+            object["epoch"] = source.session?.epoch ?? emptyEpoch
+            object["instanceId"] = source.session?.instanceId ?? ""
         }
+        let data = Self.event(name, object)
+        for writer in Array(source.subscribers.values) { writer.enqueue(data) }
     }
 
     private static func event(_ name: String, _ object: [String: Any]) -> Data {
@@ -637,6 +847,7 @@ final class NetworkRecorder {
             return
         }
         let state = record[side == "req" ? "reqBody" : "resBody"] as? String
+        if record["_missing"] != nil && state == "evicted" { connection.respond(.error(404, "Removed by cache cleanup")); return }
         if record["_f"] == nil || state == "stored" {
             online ? fallback() : connection.respond(.error(404, "App is not running, content is not saved yet"))
             return

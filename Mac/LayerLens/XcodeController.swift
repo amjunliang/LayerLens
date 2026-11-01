@@ -20,6 +20,7 @@ final class XcodeController {
             /// 尚未询问过用户, 点击运行时会弹出系统授权窗口
             case permissionRequired = "permission_required"
             case scriptFailed = "script_failed"
+            case busy = "xcode_busy"
         }
 
         let code: Code
@@ -40,14 +41,17 @@ final class XcodeController {
     }
 
     private static let xcodeBundleId = "com.apple.dt.Xcode"
+    private let operationLock = NSLock()
 
     /// - Parameters:
     ///   - sourceFile: App 编译时的源文件路径, 用于找到对应的工作区
     ///   - deviceId: 页面上正在查看的设备 UDID, 运行前把 Xcode 的运行目标切到它; 为空时不切换
     /// - Returns: 是否切换到了该设备; 找不到对应的运行目标(如 Scheme 不支持该设备)时沿用 Xcode 当前的运行目标
     func run(sourceFile: String, deviceId: String) -> Result<Bool, Failure> {
+        guard operationLock.try() else { return .failure(Failure(code: .busy)) }
+        defer { operationLock.unlock() }
         // 由用户点击触发, 需要时弹出系统授权窗口并等待选择
-        checkPermission(ask: true).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
+        return checkPermission(ask: true).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
             // 运行目标的 device identifier 即模拟器 / 真机的 UDID; Apple 芯片上同一模拟器还有 Rosetta(x86_64) 目标, 优先选原生架构.
             // Xcode 26 读取 active run destination 会返回 missing value, 但设置有效, 所以不回读确认
             let script = """
@@ -68,12 +72,14 @@ final class XcodeController {
             if picked is missing value then return "unchanged"
             return "switched"
             """
-            return execute(script, xcode: xcode).map { $0 == "switched" }
+            return execute(script, xcode: xcode, timeout: 20).map { $0 == "switched" }
         }
     }
 
     func status(sourceFile: String) -> Result<RunStatus, Failure> {
-        checkPermission(ask: false).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
+        guard operationLock.try() else { return .failure(Failure(code: .busy)) }
+        defer { operationLock.unlock() }
+        return checkPermission(ask: false).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
             let script = """
             set doc to first workspace document whose path is \(quoted(path))
             set actionResult to last scheme action result of doc
@@ -175,7 +181,7 @@ final class XcodeController {
 
     /// body 需以 return 返回文本, 列表转文本时以换行连接. 用 osascript 子进程执行, 不阻塞主线程(首次运行等待权限弹窗时也不卡窗口);
     /// 子进程的"自动化"权限仍归属 LayerLens. xcode 为应用路径, 指定发送给哪个 Xcode
-    private func execute(_ body: String, xcode: String) -> Result<String, Failure> {
+    private func execute(_ body: String, xcode: String, timeout: TimeInterval = 3) -> Result<String, Failure> {
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: Self.xcodeBundleId).isEmpty else {
             return .failure(.xcodeNotRunning)
         }
@@ -185,22 +191,14 @@ final class XcodeController {
         \(body)
         end tell
         """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        do {
-            try process.run()
-        } catch {
+        guard let result = BoundedProcess.capture("/usr/bin/osascript", ["-e", source], timeout: timeout) else {
             return .failure(.scriptFailed)
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        let message = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        if result.timedOut {
+            return .failure(Failure(code: .scriptFailed, message: "Xcode did not respond within \(Int(timeout)) seconds"))
+        }
+        let message = String(decoding: result.data, as: UTF8.self)
+        guard result.status == 0 else {
             // -1743: 未获得自动化权限; -1719 / -1728: 找不到对应的工作区
             if message.contains("-1743") {
                 return .failure(.permissionDenied)
@@ -210,7 +208,7 @@ final class XcodeController {
             }
             return .failure(Failure(code: .scriptFailed, message: message.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
-        let text = String(data: data, encoding: .utf8) ?? ""
+        let text = message
         return .success(text.hasSuffix("\n") ? String(text.dropLast()) : text)
     }
 

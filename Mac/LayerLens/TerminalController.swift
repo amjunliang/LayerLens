@@ -22,22 +22,25 @@ final class TerminalController {
         let app: String
         let pid: pid_t
         let master: Int32
+        let input: PTYInputWriter
         let created = Date()
         var replay = Data()
         var sockets: [ObjectIdentifier: WebSocketConnection] = [:]
+        var output: [ObjectIdentifier: BoundedStreamWriter] = [:]
         var readSource: DispatchSourceRead?
         var exitSource: DispatchSourceProcess?
         var command = ""
         var exited = false
         var exitStatus: Int32 = 0
 
-        init(id: String, root: String, name: String, app: String, pid: pid_t, master: Int32) {
+        init(id: String, root: String, name: String, app: String, pid: pid_t, master: Int32, queue: DispatchQueue) {
             self.id = id
             self.root = root
             self.name = name
             self.app = app
             self.pid = pid
             self.master = master
+            input = PTYInputWriter(fd: master, queue: queue)
         }
 
         var busy: Bool { !exited && !command.isEmpty }
@@ -60,7 +63,7 @@ final class TerminalController {
             counter += 1
             let id = "t\(counter)"
             guard let (pid, master) = Self.spawnShell(root: root) else { return nil }
-            let session = Session(id: id, root: root, name: (root as NSString).lastPathComponent, app: app, pid: pid, master: master)
+            let session = Session(id: id, root: root, name: (root as NSString).lastPathComponent, app: app, pid: pid, master: master, queue: queue)
             let read = DispatchSource.makeReadSource(fileDescriptor: master, queue: queue)
             read.setEventHandler { [weak self, weak session] in
                 guard let self, let session else { return }
@@ -106,6 +109,7 @@ final class TerminalController {
                 kill(-$0.pid, SIGKILL)
                 kill($0.pid, SIGKILL)
             }
+            (sessions + closing).forEach { $0.input.cancel(); $0.output.values.forEach { $0.cancel() } }
             sessions.removeAll()
             closing.removeAll()
         }
@@ -120,6 +124,8 @@ final class TerminalController {
     }
 
     private func terminate(_ session: Session) {
+        session.input.cancel()
+        session.output.values.forEach { $0.cancel() }; session.output = [:]
         session.sockets.values.forEach { $0.close() }
         session.sockets.removeAll()
         guard !session.exited else {
@@ -142,6 +148,7 @@ final class TerminalController {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         let count = read(session.master, &buffer, buffer.count)
         guard count > 0 else {
+            if count < 0 && (errno == EAGAIN || errno == EINTR) { return }
             // shell 退出后主端读到 EOF 或 EIO, 停止读取, 退出状态由进程监听处理
             session.readSource?.cancel()
             session.readSource = nil
@@ -152,12 +159,13 @@ final class TerminalController {
         if session.replay.count > Self.maxReplayBytes {
             session.replay = Data(session.replay.suffix(Self.maxReplayBytes))
         }
-        session.sockets.values.forEach { $0.sendBinary(data) { _ in } }
+        for output in Array(session.output.values) { output.enqueue(data) }
     }
 
     private func finish(_ session: Session) {
         var status: Int32 = 0
         waitpid(session.pid, &status, WNOHANG)
+        session.input.cancel()
         session.exited = true
         session.exitStatus = (status >> 8) & 0xff
         session.command = ""
@@ -184,7 +192,9 @@ final class TerminalController {
         if environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
         environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
         // 以 - 开头的 argv[0] 表示登录 shell, 会读取用户的 profile
-        let argv = ["-" + (shell as NSString).lastPathComponent].map { strdup($0) } + [nil]
+        let argv: [UnsafeMutablePointer<CChar>?] = ["-" + (shell as NSString).lastPathComponent].map { value in
+            value.withCString { strdup($0) }
+        } + [nil]
         let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
         let path = strdup(shell)
         let directory = strdup(root)
@@ -237,7 +247,9 @@ final class TerminalController {
             }
             let key = ObjectIdentifier(socket)
             session.sockets[key] = socket
-            if !session.replay.isEmpty { socket.sendBinary(session.replay) { _ in } }
+            let output = BoundedStreamWriter(queue: queue, limit: 1024 * 1024, send: { data, done in socket.sendBinary(data, completion: done) }, close: { socket.close() })
+            session.output[key] = output
+            if !session.replay.isEmpty { output.enqueue(session.replay) }
             socket.onText = { [weak self, weak session] text in
                 self?.queue.async {
                     guard let session else { return }
@@ -245,7 +257,7 @@ final class TerminalController {
                 }
             }
             socket.onClose = { [weak self, weak session] in
-                self?.queue.async { session?.sockets[key] = nil }
+                self?.queue.async { session?.sockets[key] = nil; session?.output[key]?.cancel(); session?.output[key] = nil }
             }
         }
     }
@@ -257,12 +269,10 @@ final class TerminalController {
             guard let input = json["d"] as? String else { return }
             // 输入带着该窗口的尺寸: 多个窗口连着同一会话时, 以正在输入的窗口为准
             resize(session, cols: json["c"] as? Int, rows: json["r"] as? Int)
-            var bytes = Array(input.utf8)
-            var offset = 0
-            while offset < bytes.count {
-                let written = bytes.withUnsafeMutableBufferPointer { write(session.master, $0.baseAddress! + offset, $0.count - offset) }
-                if written <= 0 { break }
-                offset += written
+            if !session.input.enqueue(Data(input.utf8)) {
+                let error = "Terminal input queue is full or unavailable; this input was not sent"
+                let message = String(decoding: (try? JSONSerialization.data(withJSONObject: ["error": error])) ?? Data(), as: UTF8.self)
+                session.sockets.values.forEach { $0.sendText(message) }
             }
         case "r":
             resize(session, cols: json["c"] as? Int, rows: json["r"] as? Int)

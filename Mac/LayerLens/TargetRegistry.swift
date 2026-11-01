@@ -56,6 +56,7 @@ struct AppRecord {
     /// 连续扫描无法响应, 疑似挂起; 不代表系统确认的前后台状态
     var suspended = false
     var responding = true
+    var scanVersion: UInt64 = 0
 }
 
 /// 定时发现模拟器和集成了 LayerLens 的 App, 所有状态只在 queue 上读写
@@ -68,6 +69,12 @@ final class TargetRegistry {
     private let session: URLSession
     private var timer: DispatchSourceTimer?
     private var simulators: [DeviceRecord] = []
+    private var refreshingSimulators = false
+    private var refreshSimulatorsAgain = false
+    private var simulatorWaiters: [() -> Void] = []
+    private var nextSimulatorRefresh = Date.distantPast
+    private var inventoryFingerprint = Data()
+    var onInventoryChanged: (([String: Any]) -> Void)?
     /// 未启动(或正在启动 / 关闭)的模拟器, 网页列出后可以启动
     private var offlineSimulators: [(record: DeviceRecord, state: String)] = []
     private var usbDevices: [Usbmux.Device] = []
@@ -76,6 +83,7 @@ final class TargetRegistry {
     private var detailsLoading: Set<String> = []
     private var apps: [AppRecord] = []
     private var scanning = false
+    private var stopped = false
     /// 短暂通信超时不能立即当作挂起; 成功响应或端口移除时重置。
     private var scanMisses: [String: Int] = [:]
     private var scanWaiters: [() -> Void] = []
@@ -99,7 +107,7 @@ final class TargetRegistry {
     var onAppsChanged: (([AppRecord]) -> Void)?
     var onStatesChanged: (([String: Any]) -> Void)?
     private lazy var stateMonitor: TargetStateMonitor = {
-        let monitor = TargetStateMonitor { [queue] in AppEventStream(queue: queue) }
+        let monitor = TargetStateMonitor { [queue] in AppEventStream(queue: queue, handshakeTimeout: 5) }
         monitor.onChange = { [weak self] states, snapshot in
             guard let self else { return }
             self.appStates = states
@@ -109,7 +117,10 @@ final class TargetRegistry {
     }()
     private var appStates: [[String: Any]] = []
 
-    func stop() { queue.sync { timer?.cancel(); stateMonitor.stop() } }
+    func stop() {
+        queue.sync { stopped = true; timer?.cancel(); stateMonitor.stop() }
+        BoundedProcess.stopAll()
+    }
 
     init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -211,13 +222,29 @@ final class TargetRegistry {
 
     /// 立即重新获取模拟器列表, 用于启动或关闭模拟器之后
     func refreshSimulatorsNow(completion: @escaping () -> Void) {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let list = Self.listSimulators()
-            self?.queue.async {
-                self?.simulators = list.booted
-                self?.offlineSimulators = list.offline
-                completion()
+        queue.async { [self] in
+            simulatorWaiters.append(completion)
+            if refreshingSimulators { refreshSimulatorsAgain = true; return }
+            refreshSimulators(force: true)
+        }
+    }
+
+    private func publishInventory() {
+        guard ready else { return }
+        snapshot { [weak self] devices, simulators, history in
+            guard let self else { return }
+            let value: [String: Any] = ["devices": devices, "simulators": simulators, "history": history]
+            var topology = value
+            topology["devices"] = devices.map { device -> [String: Any] in
+                var device = device
+                device["apps"] = (device["apps"] as? [[String: Any]] ?? []).map { app in
+                    app.filter { !["foreground", "suspended", "stateConnected", "stateReachable", "stateConnection", "foregroundSource"].contains($0.key) }
+                }
+                return device
             }
+            guard let encoded = try? JSONSerialization.data(withJSONObject: topology, options: [.sortedKeys]), encoded != self.inventoryFingerprint else { return }
+            self.inventoryFingerprint = encoded
+            self.onInventoryChanged?(value)
         }
     }
 
@@ -328,6 +355,7 @@ final class TargetRegistry {
     private func saveHistory() {
         UserDefaults.standard.set(history, forKey: Self.historyKey)
         updateCaptures()
+        queue.async { [weak self] in self?.publishInventory() }
     }
 
     // MARK: - Capture
@@ -367,22 +395,35 @@ final class TargetRegistry {
 
     // MARK: - Simulators
 
-    private func refreshSimulators() {
+    private func refreshSimulators(force: Bool = false) {
+        guard !stopped, !refreshingSimulators, force || Date() >= nextSimulatorRefresh else { return }
+        refreshingSimulators = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let list = Self.listSimulators()
-            self?.queue.async {
-                self?.simulators = list.booted
-                self?.offlineSimulators = list.offline
+            self?.queue.async { [weak self] in
+                guard let self, !self.stopped else { return }
+                if let list { self.simulators = list.booted; self.offlineSimulators = list.offline }
+                self.refreshingSimulators = false
+                self.nextSimulatorRefresh = Date().addingTimeInterval(5)
+                if self.refreshSimulatorsAgain {
+                    self.refreshSimulatorsAgain = false
+                    self.refreshSimulators(force: true)
+                    return
+                }
+                let waiters = self.simulatorWaiters
+                self.simulatorWaiters = []
+                waiters.forEach { $0() }
+                self.publishInventory()
             }
         }
     }
 
     /// 解析 `simctl list devices available -j`, 运行时标识形如 com.apple.CoreSimulator.SimRuntime.iOS-26-5
-    private static func listSimulators() -> (booted: [DeviceRecord], offline: [(record: DeviceRecord, state: String)]) {
-        guard let data = run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "-j"]),
+    private static func listSimulators() -> (booted: [DeviceRecord], offline: [(record: DeviceRecord, state: String)])? {
+        guard let data = BoundedProcess.run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "-j"], timeout: 5),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let runtimes = json["devices"] as? [String: [[String: Any]]] else {
-            return ([], [])
+            return nil
         }
         var booted: [DeviceRecord] = []
         var offline: [(record: DeviceRecord, state: String)] = []
@@ -482,6 +523,7 @@ final class TargetRegistry {
 
     /// 并发请求端口范围内每个端口的 /api/app; 扫描进行中时合并到同一次扫描
     private func scanApps(completion: (() -> Void)?) {
+        guard !stopped else { completion?(); return }
         if let completion {
             scanWaiters.append(completion)
         }
@@ -493,6 +535,7 @@ final class TargetRegistry {
         // 连接成功但没有响应的端口, 即挂起的 App; 明确拒绝表示 App 已退出
         var transientPorts: Set<String> = []
         let devices = usbDevices
+        let scanVersion = stateMonitor.observationVersion
         let complete = usbListed
         for device in devices {
             for port in Self.appPorts {
@@ -534,7 +577,8 @@ final class TargetRegistry {
             }.resume()
         }
         group.notify(queue: queue) { [self] in
-            found = Self.uniqueInstances(found)
+            guard !stopped else { scanning = false; scanWaiters = []; return }
+            found = Self.uniqueInstances(found).map { app in var value = app; value.scanVersion = scanVersion; return value }
             scanMisses = scanMisses.filter { transientPorts.contains($0.key) }
             apps = found + suspendedApps(found: found, devices: devices, transientPorts: transientPorts)
             stateMonitor.update(apps)
@@ -545,6 +589,7 @@ final class TargetRegistry {
             scanWaiters = []
             waiters.forEach { $0() }
             if complete { markReady() }
+            publishInventory()
         }
     }
 
@@ -621,20 +666,7 @@ final class TargetRegistry {
     // MARK: - Helpers
 
     static func run(_ path: String, _ arguments: [String]) -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? data : nil
+        BoundedProcess.run(path, arguments, timeout: 10)
     }
 
     /// 与 run 相同, 但失败时返回错误输出, 用于向网页说明原因

@@ -33,7 +33,7 @@
     <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
-    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="17" y="3" width="4" height="4" rx="1"/><rect x="3" y="10" width="4" height="4" rx="1"/><rect x="10" y="10" width="4" height="4" rx="1"/><rect x="17" y="10" width="4" height="4" rx="1"/><rect x="3" y="17" width="4" height="4" rx="1"/><rect x="10" y="17" width="4" height="4" rx="1"/><rect x="17" y="17" width="4" height="4" rx="1"/></symbol>
     <symbol id="i-switcher" viewBox="0 0 24 24"><rect x="8" y="5" width="9" height="14" rx="2"/><path d="M5 7.5v9M20 7.5v9"/></symbol>
     <symbol id="i-rotate" viewBox="0 0 24 24"><rect x="9" y="8" width="11" height="13" rx="2"/><path d="M4 11V8a4 4 0 0 1 4-4h3"/><path d="M9 2l2 2-2 2"/></symbol>
     <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/></symbol>
@@ -125,7 +125,6 @@
     <div class="canvas-float">
       <div class="float-group live-only">
         <button class="icon-btn toggle" id="liveInspect" title="选择元素 (按住 ⌥ 点击)" aria-label="选择元素" aria-pressed="false"><svg class="icon"><use href="#i-inspect"/></svg></button>
-        <button class="icon-btn" id="liveHome" title="Home" aria-label="Home"><svg class="icon"><use href="#i-home"/></svg></button>
         <button class="icon-btn" id="liveSwitcher" title="多任务" aria-label="多任务"><svg class="icon"><use href="#i-switcher"/></svg></button>
         <button class="icon-btn" id="liveRotate" title="向左旋转" aria-label="向左旋转"><svg class="icon"><use href="#i-rotate"/></svg></button>
       </div>
@@ -179,6 +178,9 @@
         <div class="live-note live-error" id="liveError" hidden></div>
         <div class="live-waiting" id="liveWaiting">正在等待连接…</div>
         <button class="empty-action" id="liveRetry" hidden>重试</button>
+      </div>
+      <div class="live-home-dock">
+        <button class="icon-btn" id="liveHome" title="返回主屏幕" aria-label="返回主屏幕"><svg class="icon"><use href="#i-home"/></svg></button>
       </div>
     </div>
   </section>

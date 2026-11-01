@@ -95,6 +95,9 @@ final class GitController {
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GIT_EDITOR"] = "true"
+        // UI selections are literal filenames, including [] * ? and pathspec-looking prefixes.
+        environment["GIT_LITERAL_PATHSPECS"] = "1"
+        environment["GIT_GLOB_PATHSPECS"] = nil; environment["GIT_NOGLOB_PATHSPECS"] = nil; environment["GIT_ICASE_PATHSPECS"] = nil
         // 图形界面启动时 PATH 很短, 补上 Homebrew 目录, git-lfs 等钩子依赖的工具才能找到
         environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
         // 读操作不刷新索引, 不和 Xcode 或命令行的 git 抢锁
