@@ -570,12 +570,17 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 /* 实时: 模拟器画面 (H.264 流) */
 .mode-live .stage-wrap, .mode-live .hover-tip { display: none; }
 .live-wrap { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-user-select: none; user-select: none; }
-/* 平面画面共用固定留白, 不按高度再缩小; 底部 40px 包含 8px 间隔、24px 按钮和 8px 边距。 */
+/* 2D/实时共用留白: 8px 间隔、24px 控件、8px 底部边距。 */
 body:not(.mode-3d) .stage-wrap, .live-wrap { padding: 8px 12px 40px; }
-.live-home-dock { display: flex; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 2; }
-.live-home-dock .icon-btn { width: 56px; height: 24px; border-radius: 999px; background: var(--float-bg); border-color: var(--float-line); color: var(--stage-text); }
+.live-home-dock { display: flex; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 41; width: 112px; height: 24px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); color: var(--stage-text); }
+/* 控件在底部渐变(40)之上, 最大化面板(30)时隐藏, 避免穿透到面板上。 */
+body.log-max .live-home-dock { visibility: hidden; }
+.live-home-dock::after { content: ''; position: absolute; left: 50%; top: 5px; bottom: 5px; width: 1px; background: var(--float-line); pointer-events: none; }
+.live-home-dock .icon-btn { flex: 1; min-width: 0; width: auto; height: 100%; border: 0; border-radius: 0; background: transparent; color: inherit; }
 .live-home-dock .icon-btn .icon { width: 16px; height: 16px; }
-.live-home-dock .icon-btn:hover { background: var(--stage-fill-strong); }
+.live-home-dock .icon-btn:hover { background: transparent; color: inherit; }
+.live-home-dock .icon-btn:focus { outline: none; }
+.live-home-dock .icon-btn.click-feedback { background: color-mix(in srgb, var(--stage-text) 8%, transparent); }
 /* 细线勾出设备边缘 */
 .live-canvas { flex: none; display: block; background: #000; cursor: default; outline: none; box-shadow: var(--screen-shadow); }
 .live-wrap.inspecting .live-canvas { cursor: crosshair; }
@@ -1070,7 +1075,7 @@ body.log-open .log-pane { display: flex; }
 .git-btn.icon-btn { width: 22px; height: 22px; font-size: 15px; line-height: 1; }
 .git-clean, .git-note { padding: 14px 12px; color: var(--text-2); font-size: 12px; }
 .git-clean { padding: 28px 12px; text-align: center; }
-.git-section-empty { padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--text-2); font-size: 12px; }
+.git-section-empty { display: flex; align-items: center; gap: 5px; padding: 8px 12px 8px 25px; border-bottom: 1px solid var(--border); color: var(--text-2); font-size: 12px; }
 /* 提交记录: 左侧时间列固定, 右侧哈希与标题可左右滚动 */
 .git-log { display: flex; font-size: 12px; }
 .git-log-dates { flex: none; }
@@ -1480,5 +1485,7 @@ body.log-open .log-pane { display: flex; }
 .target-pin[hidden] { display: none; }
 .target-pin .icon { width: 12px; height: 12px; fill: currentColor; stroke: none; }
 
-.git-tree-action { width: 22px; height: 22px; padding: 4px; flex: none; }
-.git-tree-action .icon { width: 14px; height: 14px; }
+
+.git-section-empty > .icon { flex: none; width: 16px; height: 16px; }
+.git-empty-stage > .icon { color: var(--accent); }
+.git-empty-clean > .icon { color: #30b87a; }

@@ -48,6 +48,7 @@ swift_test() {
 
 swift_test home-button Mac/LayerLens/SimulatorBridge.swift Mac/Tests/SimHomeButtonTests.swift
 swift_test live-video Mac/LayerLens/LiveVideo.swift Mac/Tests/LiveVideoTests.swift
+swift_test target-history Mac/LayerLens/TargetHistory.swift Mac/Tests/TargetHistoryTests.swift
 swift_test target-state Mac/LayerLens/TargetStateHub.swift Mac/Tests/TargetStateHubTests.swift
 swift_test git-paths Mac/LayerLens/GitController.swift Mac/Tests/GitPathTests.swift
 swift_test streams-pty Mac/LayerLens/BoundedStreamWriter.swift Mac/LayerLens/PTYInputWriter.swift Mac/Tests/StreamAndPTYTests.swift
@@ -66,7 +67,7 @@ swift_test network-replay "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swif
 swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift Mac/Tests/NetworkViewerEpochTests.swift
 
 for file in \
-  GitViewStateTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs AutoFollowTests.cjs LiveVideoDecoderTests.cjs NetworkAsyncStateTests.cjs \
+  GitViewStateTests.cjs GitInteractionTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs AutoFollowTests.cjs LiveVideoDecoderTests.cjs NetworkAsyncStateTests.cjs \
   NetworkCaptureActionTests.cjs NetworkViewerWebTests.cjs XcodeRunTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"

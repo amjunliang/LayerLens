@@ -195,6 +195,12 @@ private final class DeviceLiveSession {
         guard !stopping else { return }
         if kind == 254 { LiveLog.write(String(decoding: data, as: UTF8.self)); return }
         if kind == 255 { fail(String(decoding: data, as: UTF8.self)); return }
+        if kind == 8, let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           info["type"] as? String == "rotation-result" {
+            if let orientation = info["orientation"] as? Int, (1...4).contains(orientation) { geometry?["orientation"] = orientation }
+            for socket in viewers.values { message(info, to: socket) }
+            return
+        }
         if kind == 9, var info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             info["type"] = "geometry"; geometry = info
             for socket in viewers.values { message(info, to: socket) }
@@ -247,6 +253,10 @@ private final class DeviceLiveSession {
                   width.doubleValue > 0, height.doubleValue > 0 else { return }
         }
         if type == "button" { guard let button = item["button"] as? String, ["swipe-to-home", "app-switcher"].contains(button) else { return } }
+        if type == "rotate" {
+            guard let direction = item["direction"] as? String, ["left", "right"].contains(direction),
+                  let requestID = item["requestId"] as? String, !requestID.isEmpty, requestID.count <= 128 else { return }
+        }
         if type == "key" {
             guard let code = item["code"] as? String, code.count <= 64,
                   item["modifiers"] == nil || item["modifiers"] is [String] else { return }
@@ -264,7 +274,7 @@ private final class DeviceLiveSession {
         if type == "touch1-down" { guard owner == nil || owner == id else { return }; owner = id }
         if type.hasPrefix("touch1-") { guard owner == id else { return }; if type == "touch1-up" { owner = nil } }
         if type == "release" { guard owner == nil || owner == id else { return }; owner = nil }
-        guard ["touch1-down", "touch1-move", "touch1-up", "button", "key", "paste", "release"].contains(type) else { return }
+        guard ["touch1-down", "touch1-move", "touch1-up", "button", "key", "paste", "release", "rotate"].contains(type) else { return }
         write(text)
     }
     private func remove(_ id: ObjectIdentifier) {

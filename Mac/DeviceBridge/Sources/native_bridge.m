@@ -98,6 +98,7 @@ extern int layerlens_native_service_ids(xrc_t,uint64_t *,uint64_t *);
 @interface LLNativeSession : NSObject {
 @public
     _Atomic bool stopped;
+    _Atomic bool rotating;
     xrc_t media, input, buttons, digitizer;
     int mediaFD, rtpFD, inputFD, buttonFD, digitizerFD;
     uint64_t touchService, keyboardService;
@@ -425,6 +426,31 @@ static void installNativeSink(void){
 }
 - (void)handle:(NSDictionary *)message {
     if(atomic_load(&stopped)) return;
+    if([message[@"type"] isEqual:@"rotate"]){
+        NSString *direction=message[@"direction"], *requestID=message[@"requestId"];
+        if(![@[@"left",@"right"] containsObject:direction] || ![requestID isKindOfClass:NSString.class] || requestID.length>128) return;
+        if(atomic_exchange(&rotating,true)){
+            NSDictionary *result=@{@"type":@"rotation-result",@"requestId":requestID,@"ok":@NO,@"detail":@"Rotation is already in progress"};
+            [self emit:8 data:[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]];
+            return;
+        }
+        // 方向控制走独立 CoreDevice 命令, 不阻塞触摸/键盘队列。
+        dispatch_async(nativeWork(),^{ @autoreleasepool {
+            if(atomic_load(&self->stopped)){ atomic_store(&self->rotating,false);return; }
+            NSString *error=nil;
+            NSDictionary *reply=ipbDeviceControl(self.arguments[0],@[@"device",@"orientation",@"rotate",direction],&error);
+            NSMutableDictionary *result=[@{@"type":@"rotation-result",@"requestId":requestID,@"ok":@(reply!=nil),@"detail":error?:@""} mutableCopy];
+            int q=ipbDeviceQuarter(reply[@"deviceOrientation"]);
+            if(q<0) q=ipbDeviceQuarter(reply[@"deviceOrientationNonFlat"]);
+            if(reply && q>=0){
+                @synchronized(self){ self->display.deviceQuarter=q; }
+                result[@"orientation"]=@[@1,@3,@2,@4][q];
+            }
+            atomic_store(&self->rotating,false);
+            if(!atomic_load(&self->stopped)) [self emit:8 data:[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]];
+        }});
+        return;
+    }
     dispatch_async(_inputWork,^{ @autoreleasepool {
         if(atomic_load(&self->stopped) || !self->input) return;
         NSString *type=message[@"type"];

@@ -114,6 +114,9 @@ function gitShowDirMenu(e, key, section, dir, files) {
     ...gitPathItems([dir.path]),
     null,
     ...gitChangeItems(section, items),
+    null,
+    [t('全部展开'), () => gitSetDirExpanded(section, dir, true)],
+    [t('全部折叠'), () => gitSetDirExpanded(section, dir, false)],
   ]);
 }
 

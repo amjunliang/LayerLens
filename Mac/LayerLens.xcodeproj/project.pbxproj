@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AB680FEC14FD4489A1F01401 /* TargetHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01402 /* TargetHistory.swift */; };
 		AB680FEC14FD4489A1F01305 /* PTYInputWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */; };
 		AB680FEC14FD4489A1F01303 /* BoundedStreamWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */; };
 		AB680FEC14FD4489A1F01301 /* DurableFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01302 /* DurableFile.swift */; };
@@ -45,6 +46,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AB680FEC14FD4489A1F01402 /* TargetHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetHistory.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYInputWriter.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedStreamWriter.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01302 /* DurableFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DurableFile.swift; sourceTree = "<group>"; };
@@ -132,6 +134,7 @@
 				5B2DE65FF83D4A67CE192A92 /* SimulatorKeyboard.swift */,
 				D32AF026DCB7951E7B0A7CA6 /* SimulatorLive.swift */,
 				835CFE5F13F3127AD1704B2B /* SimulatorStream.swift */,
+				AB680FEC14FD4489A1F01402 /* TargetHistory.swift */,
 				C49EEB6F578CEBB6672B56CD /* TargetRegistry.swift */,
 				AB680FEC14FD4489A1F01202 /* TargetStateHub.swift */,
 				AB680FEC14FD4489A1F01204 /* BoundedProcess.swift */,
@@ -272,6 +275,7 @@
 				C3328F67A77FE0E4F668B64C /* SimulatorKeyboard.swift in Sources */,
 				13C2DFB707C403522AA26E32 /* SimulatorLive.swift in Sources */,
 				89FFB8F592C924371F6EA619 /* SimulatorStream.swift in Sources */,
+				AB680FEC14FD4489A1F01401 /* TargetHistory.swift in Sources */,
 				8CCD018F71C87A6C6F8B962C /* TargetRegistry.swift in Sources */,
 				AB680FEC14FD4489A1F01201 /* TargetStateHub.swift in Sources */,
 				AB680FEC14FD4489A1F01203 /* BoundedProcess.swift in Sources */,

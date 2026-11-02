@@ -32,10 +32,12 @@ bash Mac/Tests/run.sh
 | 日志写盘、HTTP 截断、抓包保存及释放确认 | `DataIntegrityTests.swift` |
 | 旧 Pod 的无序回放和正文复用 | `LegacyNetworkReconnectTests.swift` |
 | 逐条退避、释放确认恢复、设备及进程隔离 | `NetworkRecorderRecoveryTests.swift` |
+| 目标历史无效标识清理、有效记录保留 | `TargetHistoryTests.swift`、`AutoFollowTests.cjs` |
 | 日志当前启动隔离、真实流重置、重连续接与历史保存 | `LogLaunchTests.swift` |
 | 日志持久清空、重连边界、设备与启动隔离、写盘失败保护 | `LogClearTests.swift` |
 | 日志/网络统一确认、历史只读与迟到响应保护 | `RecordClearTests.cjs` |
-| 改动面板冷启动恢复、仓库隔离、批量展开/折叠 | `GitViewStateTests.cjs` |
+| 折叠时保留选中行、局部插入和提交高亮 | `GitInteractionTests.cjs` |
+| 改动面板完整移组继承、部分暂存独立、已有目标优先、路径稳定与冷启动迁移 | `GitViewStateTests.cjs` |
 | 离线清空、清空边界持久化与新请求保护 | `NetworkClearTests.swift` |
 | 分页续接、窗口版本、清空、重启和网页同步 | `NetworkReplayTests.swift`、`NetworkViewerEpochTests.swift`、`NetworkViewerWebTests.cjs` |
 | 异步状态查询、暂停缓冲和抓包开关 | `NetworkAsyncStateTests.cjs`、`NetworkCaptureActionTests.cjs` |

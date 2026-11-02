@@ -1664,9 +1664,9 @@ function setupCanvasEvents() {
 
 const LIVE_RETRY_MS = 2000;
 const LIVE_CORNER = 55;
-// 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向左旋转的下一个方向, 与 Simulator.app 的 ⌘← 一致
+// 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向右旋转的下一个方向, 与顺时针图标一致
 const LIVE_ROTATION = { 1: 0, 3: -90, 2: 180, 4: 90 };
-const LIVE_ROTATE_LEFT = { 1: 3, 3: 2, 2: 4, 4: 1 };
+const LIVE_ROTATE_RIGHT = { 1: 4, 4: 2, 2: 3, 3: 1 };
 const LIVE_KEY_CODE = /^(Key[A-Z]|Digit\d|Enter|Backspace|Tab|Space|Arrow(Up|Down|Left|Right)|Minus|Equal|Bracket(Left|Right)|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash)$/;
 const live = {
   udid: '',
@@ -1707,7 +1707,8 @@ async function syncLive() {
   $('liveModeBtn').hidden = false;
   $('liveModeBtn').classList.remove('unavailable');
   $('liveModeBtn').title = physical ? '真机实时画面（实验性）' : t('模拟器实时画面');
-  $('liveRotate').disabled = physical;
+  $('liveRotate').hidden = false;
+  $('liveRotate').disabled = !device || !!live.rotatePending;
   document.body.classList.toggle('has-live', !!udid);
   if (udid !== live.udid) {
     liveStop();
@@ -1726,7 +1727,6 @@ async function syncLive() {
     }
   }
   live.real = physical;
-  $('liveRotate').disabled = !device || physical;
   $('liveCanvas').hidden = !device;
   if (state.mode !== 'live') return;
   if (udid) {
@@ -1788,6 +1788,7 @@ function liveStart() {
       if (message.type === 'input-error' && message.detail === 'home-unavailable') {
         toast(LANG === 'en' ? 'Home button is unavailable. Please retry.' : 'Home 按键暂不可用，请重试。');
       }
+      if (message.type === 'rotation-result') liveRotationResult(message);
       if (message.type === 'geometry') {
         if (live.real) live.sourceGeometry = message;
         live.screen = [message.width, message.height]; live.orientation = message.orientation; layoutLive();
@@ -1834,6 +1835,8 @@ function liveResume() {
 }
 
 function liveStop() {
+  clearTimeout(live.rotateTimer);
+  live.rotatePending = null;
   liveSuspend();
   live.pendingFrame?.close?.();
   live.pendingFrame = null;
@@ -2015,7 +2018,7 @@ function layoutLive() {
   const cornerScale = live.real ? (live.sourceGeometry?.pointScale || 1) : 1;
   canvas.style.borderRadius = LIVE_CORNER * cornerScale * scale + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
-  // 主页键浮在设备底部 8px; 两个模式共用的底部留白保证适配时不会贴住画面。
+  // 胶囊距设备底部和画布底部各至少 8px; 自身位于渐变上方, 不额外缩小画面。
   const dock = $('liveHome').parentElement;
   const screenRect = canvas.getBoundingClientRect();
   const wrapRect = wrap.getBoundingClientRect();
@@ -2109,7 +2112,30 @@ function livePoint(e) {
 }
 
 function liveRotate() {
-  liveSend({ type: 'orientation', value: LIVE_ROTATE_LEFT[live.orientation] || 1 });
+  if (live.rotatePending) return;
+  if (!live.real) {
+    liveSend({ type: 'orientation', value: LIVE_ROTATE_RIGHT[live.orientation] || 1 });
+    return;
+  }
+  if (!live.ws || live.ws.readyState !== WebSocket.OPEN) return;
+  const requestId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+  live.rotatePending = requestId;
+  $('liveRotate').disabled = true;
+  live.rotateTimer = setTimeout(() => liveRotationResult({ requestId, ok: false, detail: t('旋转操作超时') }), 12000);
+  liveSend({ type: 'rotate', direction: 'right', requestId });
+}
+
+function liveRotationResult(message) {
+  // 使用设备回报的实际方向, 多窗口保持一致。
+  if (message.ok && LIVE_ROTATION[message.orientation] !== undefined) {
+    live.orientation = message.orientation;
+    layoutLive();
+  }
+  if (!live.rotatePending || live.rotatePending !== message.requestId) return;
+  clearTimeout(live.rotateTimer);
+  live.rotatePending = null;
+  $('liveRotate').disabled = !live.udid;
+  if (!message.ok) toast(t('旋转失败: {0}', message.detail || t('设备未完成旋转')), true);
 }
 
 // 画面黑屏或卡住(如锁屏、休眠后)时手动恢复: 让 LayerLens 重建采集与编码, 收到关键帧即恢复成功;
@@ -2222,7 +2248,7 @@ function migrateTargetHistory() {
 
 // 扫描到的设备和 App 由 Mac App 自动记录; 当前目标尚未扫描到时(如带地址参数打开、设备未连接)补一条占位记录
 function recordTargetHistory() {
-  if (!targets.deviceId) return;
+  if (!targets.deviceId || (targets.bundleId && !targetBundleId(targets.bundleId))) return;
   const existing = targetHistory[targets.deviceId];
   if (existing && (!targets.bundleId || existing.apps?.[targets.bundleId])) return;
   // 未启动的模拟器从模拟器列表取名称
@@ -2458,11 +2484,18 @@ function simPowerButton(id, booted) {
   return button;
 }
 
+function targetBundleId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/.test(value) ? value : '';
+}
+
 function savedTarget() {
   const params = new URLSearchParams(location.search);
-  if (params.get('device')) return { deviceId: params.get('device'), bundleId: params.get('app') || '', pinned: params.get('pin') === '1', explicit: true };
+  if (params.get('device')) return { deviceId: params.get('device'), bundleId: targetBundleId(params.get('app')), pinned: params.get('pin') === '1', explicit: true };
   try {
-    return JSON.parse(localStorage.getItem(TARGET_KEY)) || {};
+    const saved = JSON.parse(localStorage.getItem(TARGET_KEY)) || {};
+    saved.bundleId = targetBundleId(saved.bundleId);
+    saved.pinned = !!saved.pinned && !!saved.bundleId;
+    return saved;
   } catch (e) {
     return {};
   }
@@ -3693,6 +3726,19 @@ function setupLiveEvents() {
   // 多任务: 从底部上滑并停顿, 与真机手势一致
   $('liveSwitcher').addEventListener('click', () => liveSend({ type: 'button', button: 'app-switcher' }));
   $('liveRotate').addEventListener('click', liveRotate);
+  // 鼠标点击动作按钮不抢走画布焦点; Tab/键盘仍可正常聚焦操作。
+  for (const id of ['liveHome', 'liveRotate']) {
+    const button = $(id);
+    let feedbackTimer;
+    button.addEventListener('pointerdown', e => {
+      if (e.button === 0) e.preventDefault();
+    });
+    button.addEventListener('click', () => {
+      clearTimeout(feedbackTimer);
+      button.classList.add('click-feedback');
+      feedbackTimer = setTimeout(() => button.classList.remove('click-feedback'), 700);
+    });
+  }
   $('liveRetry').addEventListener('click', () => { liveStop(); live.error = ''; showLiveGuide(); liveStart(); });
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
@@ -6189,7 +6235,7 @@ function listenLogDock() {
 function setupLogsWindow() {
   const params = new URLSearchParams(location.search);
   targets.deviceId = params.get('device') || '';
-  targets.bundleId = params.get('app') || '';
+  targets.bundleId = targetBundleId(params.get('app'));
   logs.window = true;
   document.body.classList.add('logs-window');
   applyI18n();

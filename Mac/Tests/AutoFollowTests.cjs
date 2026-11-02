@@ -36,7 +36,7 @@ function create(bundleId = '') {
     section('function currentAppAway()', 'function switchTargetInPlace(') +
     section('async function probeForeground()', '// 只有 App 明确返回的前后台状态') +
     section('const foregroundCheck = ', '// 定时刷新设备列表') +
-    section('function savedTarget()', '// 地址参数指定的'), ctx);
+    section('function targetBundleId(', '// 地址参数指定的'), ctx);
   return {ctx, targets, appState, a,b, states, follows, fallback,
     stored: () => JSON.parse(stored), url: () => url,
     settle: () => new Promise(resolve => setImmediate(resolve)),
@@ -87,5 +87,17 @@ function create(bundleId = '') {
   const probe = changed.ctx.probeForeground(); changed.ctx.targetStateHub.revision++;
   respond({json: async () => ({foreground: true})});
   assert.equal(await probe, null, 'New native state invalidates late HTTP foreground results');
+  const malformed = create();
+  for (const value of ['com.bjyueyou.dramapro/', '../app', 'app\\path', ' app', 'com..app', '.', 'app?x=1', 'app\n']) {
+    malformed.ctx.location.search = '?device=phone&app=' + encodeURIComponent(value) + '&pin=1';
+    const target = malformed.ctx.savedTarget();
+    assert.equal(target.bundleId, '', 'Malformed URL must fall back to device-only: ' + value);
+  }
+  malformed.ctx.location.search = '';
+  malformed.ctx.localStorage.getItem = () => JSON.stringify({deviceId:'phone', bundleId:'com.app/', pinned:true});
+  assert.equal(malformed.ctx.savedTarget().bundleId, '');
+  assert.equal(malformed.ctx.savedTarget().pinned, false);
+  malformed.ctx.localStorage.getItem = () => JSON.stringify({deviceId:'phone', bundleId:'com.valid-app_1', pinned:true});
+  assert.equal(malformed.ctx.savedTarget().bundleId, 'com.valid-app_1');
   console.log('PASS auto-follow: device association, pin persistence/resume, desktop grace, device isolation, unknown states and stale probes');
 })().catch(error => { console.error(error); process.exitCode = 1; });

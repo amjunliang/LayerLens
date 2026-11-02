@@ -128,8 +128,9 @@ final class TargetRegistry {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: configuration)
         sourceFiles = UserDefaults.standard.dictionary(forKey: Self.sourceFilesKey) as? [String: String] ?? [:]
-        history = UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:]
+        history = TargetHistory.sanitized(UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:])
         backfillHistory()
+        UserDefaults.standard.set(history, forKey: Self.historyKey)
         updateCaptures()
     }
 
@@ -144,7 +145,7 @@ final class TargetRegistry {
         for (deviceId, bundleIds) in saved {
             guard var entry = history[deviceId] else { continue }
             var apps = entry["apps"] as? [String: Any] ?? [:]
-            for bundleId in bundleIds where apps[bundleId] == nil {
+            for bundleId in bundleIds where TargetHistory.validBundleId(bundleId) && apps[bundleId] == nil {
                 apps[bundleId] = ["bundleId": bundleId, "appName": "", "version": ""]
                 changed = true
             }
@@ -327,7 +328,7 @@ final class TargetRegistry {
             guard let id = entry["id"] as? String, !id.isEmpty else { return }
             var current = history[id] ?? entry.filter { $0.key != "apps" }
             var apps = current["apps"] as? [String: Any] ?? [:]
-            for (bundleId, app) in entry["apps"] as? [String: Any] ?? [:] where apps[bundleId] == nil {
+            for (bundleId, app) in TargetHistory.sanitizedApps(entry["apps"] as? [String: Any] ?? [:]) where apps[bundleId] == nil {
                 apps[bundleId] = app
             }
             current["apps"] = apps
@@ -544,7 +545,7 @@ final class TargetRegistry {
                     defer { group.leave() }
                     lock.lock()
                     defer { lock.unlock() }
-                    guard let info, let bundleId = info["bundleId"] as? String else {
+                    guard let info, let bundleId = info["bundleId"] as? String, TargetHistory.validBundleId(bundleId) else {
                         if !refused {
                             transientPorts.insert("\(device.udid)|\(port)")
                         }
@@ -567,7 +568,7 @@ final class TargetRegistry {
                 }
                 guard (response as? HTTPURLResponse)?.statusCode == 200,
                       let data, let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let bundleId = info["bundleId"] as? String,
+                      let bundleId = info["bundleId"] as? String, TargetHistory.validBundleId(bundleId),
                       let udid = info["simulatorUDID"] as? String, !udid.isEmpty else {
                     return
                 }
