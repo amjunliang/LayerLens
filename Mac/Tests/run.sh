@@ -13,6 +13,7 @@ if ! mkdir "$lock_dir" 2>/dev/null; then
 fi
 run_dir=""
 owned_paths=(
+  "$build_root/run-plan-tests" "$build_root/log-clear" "$build_root/log-launch"
   "$build_root/git-path-tests" "$build_root/lifecycle-tests"
   "$build_root/integrity-tests" "$build_root/network-recovery"
   "$build_root/network-clear" "$build_root/legacy-network"
@@ -51,8 +52,11 @@ swift_test target-state Mac/LayerLens/TargetStateHub.swift Mac/Tests/TargetState
 swift_test git-paths Mac/LayerLens/GitController.swift Mac/Tests/GitPathTests.swift
 swift_test streams-pty Mac/LayerLens/BoundedStreamWriter.swift Mac/LayerLens/PTYInputWriter.swift Mac/Tests/StreamAndPTYTests.swift
 swift_test proxy Mac/LayerLens/HTTPMessage.swift Mac/LayerLens/ProxyTunnel.swift Mac/Tests/ProxyTunnelTests.swift
+swift_test run-plan Mac/LayerLens/XcodeController.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/XcodeRunPlanTests.swift
 swift_test process-capture Mac/LayerLens/BoundedProcess.swift Mac/Tests/ProcessCaptureTests.swift
 swift_test lifecycle "${common[@]}" Mac/LayerLens/AppLogRecorder.swift Mac/Tests/ConnectionLifecycleTests.swift
+swift_test log-launch "${common[@]}" Mac/LayerLens/AppLogRecorder.swift Mac/Tests/LogLaunchTests.swift
+swift_test log-clear "${common[@]}" Mac/LayerLens/AppLogRecorder.swift Mac/Tests/LogClearTests.swift
 swift_test integrity "${common[@]}" Mac/LayerLens/AppLogRecorder.swift Mac/Tests/DataIntegrityTests.swift
 swift_test legacy-reconnect "${common[@]}" Mac/Tests/LegacyNetworkReconnectTests.swift
 swift_test network-recovery "${common[@]}" Mac/Tests/NetworkRecorderRecoveryTests.swift
@@ -62,7 +66,7 @@ swift_test network-replay "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swif
 swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift Mac/Tests/NetworkViewerEpochTests.swift
 
 for file in \
-  TargetSelectionTests.cjs LiveVideoDecoderTests.cjs NetworkAsyncStateTests.cjs \
+  GitViewStateTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs AutoFollowTests.cjs LiveVideoDecoderTests.cjs NetworkAsyncStateTests.cjs \
   NetworkCaptureActionTests.cjs NetworkViewerWebTests.cjs XcodeRunTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"

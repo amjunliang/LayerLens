@@ -237,9 +237,9 @@ final class HubServer {
             // 日志面板的事件流, 连接交给日志记录持有, 网页断开时释放
             appLogs.subscribe(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "", connection: connection.detach())
         case "/api/hub/run-status":
-            let sourceFile = registry.sourceFile(bundleId: head.query["app"] ?? "")
+            let runId = head.query["run"] ?? ""
             workQueue.async { [self] in
-                switch xcode.status(sourceFile: sourceFile) {
+                switch xcode.status(runId: runId) {
                 case .success(let status):
                     connection.respond(.json(["status": status.status, "detail": status.detail]))
                 case .failure(let failure):
@@ -314,13 +314,21 @@ final class HubServer {
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
         switch head.path {
         case "/api/hub/run":
-            let sourceFile = registry.sourceFile(bundleId: json["app"] as? String ?? "")
-            workQueue.async { [self] in
-                switch xcode.run(sourceFile: sourceFile, deviceId: json["device"] as? String ?? "") {
-                case .success(let switched):
-                    connection.respond(.json(["ok": true, "switched": switched]))
-                case .failure(let failure):
-                    connection.respond(.json(["error": failure.code.rawValue, "message": failure.message], status: 400))
+            let bundleId = json["app"] as? String ?? ""
+            let deviceId = json["device"] as? String ?? ""
+            let sourceFile = registry.sourceFile(bundleId: bundleId)
+            registry.deviceKind(deviceId: deviceId) { [self] kind in
+                guard let kind else {
+                    connection.respond(.json(["error": "xcode_destination_unavailable"], status: 400))
+                    return
+                }
+                workQueue.async { [self] in
+                    switch xcode.run(sourceFile: sourceFile, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator) {
+                    case .success(let runId):
+                        connection.respond(.json(["ok": true, "switched": true, "runId": runId]))
+                    case .failure(let failure):
+                        connection.respond(.json(["error": failure.code.rawValue, "message": failure.message], status: 400))
+                    }
                 }
             }
         case "/api/hub/simulator":
@@ -347,8 +355,19 @@ final class HubServer {
                 connection.respond(ok ? .json(["ok": true]) : .error(500, "Open failed"))
             }
         case "/api/hub/app-logs/clear":
-            appLogs.clear(deviceId: json["device"] as? String ?? "", bundleId: json["app"] as? String ?? "")
-            connection.respond(.json(["ok": true]))
+            let device = json["device"] as? String ?? "", app = json["app"] as? String ?? ""
+            let instance = json["instanceId"] as? String ?? ""
+            guard !device.isEmpty, !app.isEmpty, !instance.isEmpty else {
+                connection.respond(.error(400, "Missing log launch")); return
+            }
+            appLogs.clear(deviceId: device, bundleId: app, expectedInstance: instance) { result in
+                switch result {
+                case .success: connection.respond(.json(["ok": true]))
+                case .failure(let error):
+                    let nsError = error as NSError
+                    connection.respond(.error(nsError.domain == "LayerLens.LogClear" ? 409 : 500, error.localizedDescription))
+                }
+            }
         case "/api/hub/app-logs/export":
             appLogs.export(deviceId: json["device"] as? String ?? "", bundleId: json["app"] as? String ?? "", text: json["text"] as? String) { url in
                 connection.respond(url.map { .json(["ok": true, "path": $0.path]) } ?? .error(500, "Export failed"))

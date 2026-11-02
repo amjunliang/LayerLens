@@ -14,6 +14,7 @@ const GIT_DIFF_SIZE_KEY = 'layerlens_git_diff_size';
 const GIT_DIFF_SIZE = { min: 10, max: 20, value: 13 };
 const GIT_SIDE_WIDTH_KEY = 'layerlens_git_side_width';
 const GIT_TREE_KEY = 'layerlens_git_tree';
+const GIT_COLLAPSED_KEY = 'layerlens_git_collapsed:';
 const GIT_TREE_INDENT = 14;
 // 分组顺序与标题; 冲突最需要处理, 排在最前
 const GIT_GROUPS = [
@@ -64,6 +65,43 @@ const git = {
   // 文件按目录树显示, 关闭时为平铺列表
   tree: gitLoadTreeMode(),
 };
+
+// 按仓库保存, 不随设备或 App 切换串用; 存储不可用时仍可正常折叠。
+function gitLoadCollapsed(root) {
+  try {
+    const keys = JSON.parse(localStorage.getItem(GIT_COLLAPSED_KEY + root) || '[]');
+    return new Set(Array.isArray(keys) ? keys.filter(key => typeof key === 'string') : []);
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function gitSaveCollapsed() {
+  if (!git.repo?.root) return;
+  try {
+    localStorage.setItem(GIT_COLLAPSED_KEY + git.repo.root, JSON.stringify([...git.collapsed]));
+  } catch (e) {
+    // 存储不可用或已满时只保留当前窗口状态。
+  }
+}
+
+// 保持分组展开, 仅展开/折叠其中所有目录; 不改变文件的暂存与选择状态。
+function gitSetSectionExpanded(section, files, expanded) {
+  git.collapsed.delete('group:' + section);
+  const prefix = 'dir:' + section + ':';
+  for (const key of git.collapsed) if (key.startsWith(prefix)) git.collapsed.delete(key);
+  if (!expanded) {
+    const visit = node => {
+      for (const dir of node.dirs.values()) {
+        git.collapsed.add(prefix + dir.path);
+        visit(dir);
+      }
+    };
+    visit(gitFileTree(files));
+  }
+  gitSaveCollapsed();
+  gitRenderFiles();
+}
 
 function gitLoadTreeMode() {
   try {
@@ -201,6 +239,7 @@ async function gitConnect() {
     return;
   }
   git.repo = repo;
+  git.collapsed = gitLoadCollapsed(repo.root);
   gitRender();
   gitSubscribe(key);
 }
@@ -595,6 +634,7 @@ function gitFormatTime(seconds) {
 function gitToggle(key, render) {
   if (git.collapsed.has(key)) git.collapsed.delete(key);
   else git.collapsed.add(key);
+  gitSaveCollapsed();
   render();
 }
 
@@ -604,7 +644,23 @@ function gitSectionHead(key, title, files, collapsed) {
   const paths = files.map(({ file }) => file.path);
   const check = gitCheckbox(key === 'staged' && files.length > 0, key === 'staged' ? t('全部取消暂存') : t('全部暂存'), () => gitStage(key === 'staged' ? 'unstage' : 'stage', paths, 'group:' + key), 'group:' + key);
   check.disabled = !files.length;
-  head.append(icon('chevron'), check, el('span', 'git-group-title', t(title)), el('span', 'git-group-count', String(files.length)));
+  head.append(icon('chevron'), check, el('span', 'git-group-title', t(title)));
+  if (git.tree) {
+    for (const [expanded, label, name] of [[true, '全部展开', 'expand-all'], [false, '全部折叠', 'collapse-all']]) {
+      const button = el('button', 'icon-btn git-tree-action');
+      button.type = 'button';
+      button.title = t(label);
+      button.setAttribute('aria-label', t(label));
+      button.append(icon(name));
+      button.addEventListener('click', e => {
+        e.stopPropagation();
+        gitSetSectionExpanded(key, files, expanded);
+      });
+      button.addEventListener('dblclick', e => e.stopPropagation());
+      head.append(button);
+    }
+  }
+  head.append(el('span', 'git-group-count', String(files.length)));
   head.addEventListener('click', () => gitToggle('group:' + key, gitRenderFiles));
   return head;
 }
@@ -862,6 +918,7 @@ function gitDiffSection(parent, kind, title, key, badge) {
     section.classList.toggle('collapsed');
     if (section.classList.contains('collapsed')) git.collapsed.add(key);
     else git.collapsed.delete(key);
+    gitSaveCollapsed();
   });
   const body = el('div', 'git-sec-body');
   section.append(head, body);

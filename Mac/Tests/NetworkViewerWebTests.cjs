@@ -26,7 +26,7 @@ function create() {
   vm.runInContext(slice('function updateNetResume(', 'function receiveNetRecords(') +
     slice('function receiveNetRecords(', '// MARK: Filter') +
     slice("  es.addEventListener('network', (e) => {", '  // 断开后由浏览器自动重连', code.indexOf('async function netConnect()')) +
-    slice('async function clearNet()', 'function setNetDetailWidth('), context);
+    slice('async function clearNet(', 'function setNetDetailWidth('), context);
   const emit = frames => frames.forEach(frame => handlers.get(frame.name)?.({ data: JSON.stringify(frame.data) }));
   return { context, net, es, counts, emit, ids: () => Array.from(net.records.keys()).sort((a, b) => a - b) };
 }

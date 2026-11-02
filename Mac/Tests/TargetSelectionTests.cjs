@@ -23,7 +23,7 @@ class Element {
   addEventListener(event, action) { this.events[event] = action; }
   get childElementCount() { return this.children.length; }
 }
-const phone = {id: 'phone', kind: 'device', name: 'Phone', apps: [{bundleId: 'com.example.app'}]};
+const phone = {id: 'phone', kind: 'device', name: 'Phone', apps: [{bundleId: 'com.example.app', foreground: true}]};
 const targets = {devices: [phone], simulators: [], deviceId: 'phone', bundleId: '', deviceOnly: true, hadDevice: true, idle: false};
 const targetHistory = {phone: {name: 'Phone', kind: 'device', apps: {'com.example.app': {appName: 'Example'}}}};
 const nodes = {}, state = {mode: 'live'}, appState = {value: 'offline', blank: true};
@@ -34,7 +34,7 @@ const context = vm.createContext({
   savedTarget: () => saved, currentDevice: () => targets.devices.find(d => d.id === targets.deviceId),
   currentDeviceGone: () => !!targets.deviceId && !targets.devices.some(d => d.id === targets.deviceId),
   targetAppName: (device, app) => targetHistory[device]?.apps?.[app]?.appName || app,
-  defaultDevice: () => targets.devices[0], firstAppId: d => d?.apps[0]?.bundleId || '',
+  defaultDevice: () => targets.devices[0],
   liveAvailable: () => targets.devices.some(d => d.id === targets.deviceId), liveSupported: () => true,
   simPending: new Map(), LANG: 'zh', t: (text, ...args) => text.replace(/\{(\d+)\}/g, (_, n) => args[n]),
   $: id => nodes[id] ||= new Element(), document: {body: {classList: new Classes()}},
@@ -43,12 +43,13 @@ const context = vm.createContext({
   logVisible: () => false, showPaneTab: tab => {pane = tab;},
 });
 vm.runInContext(offlineSource + '\n' +
+                section('function appInBackground(app)', '// 选择在后台的 App') +
                 section('function nextTarget()', '// 定时刷新设备列表') +
                 section('function pickTarget()', '// 优先有运行中 App 的设备') +
                 section('function showLiveGuide(title)', '// Both sources:') +
                 section('function showEmptyState(title, body)', '// 没有任何设备时的默认页') +
                 section('function requestMode(mode)', '// 画布视图快捷键'), context);
-assert.equal(context.nextTarget(), null, 'Scan must not replace device-only choice');
+assert.equal(context.nextTarget()[1], 'com.example.app', 'Device selection associates the known foreground app');
 targets.devices = []; targets.hadDevice = false;
 assert.equal(context.nextTarget(), null, 'Disconnected device choice must remain');
 context.showLiveGuide(); context.requestMode('live');
@@ -76,7 +77,7 @@ targets.devices = [phone]; state.mode = 'live'; appState.blank = true;
 assert.equal(context.syncOfflineView(), false, 'App offline must not cover an online device live stream');
 assert.equal(nodes.emptyState.hidden, true);
 targets.bundleId = '';
-assert.equal(context.nextTarget(), null, 'Reconnect must remain device-only');
+assert.equal(context.nextTarget()[1], 'com.example.app', 'Reconnect follows the same device foreground app');
 context.showLiveGuide();
 assert.equal(nodes.liveLoading.hidden, true, 'Capture error retains retry state');
 context.live.error = ''; context.showLiveGuide();

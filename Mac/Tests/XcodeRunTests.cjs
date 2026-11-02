@@ -8,9 +8,9 @@ function create(ignoreAbort = false) {
   const timers = new Map(), requests = [], states = [], notices = [];
   let serial = 0;
   const ctx = {
-    AbortController, TypeError, targets: { deviceId: 'phone-a', bundleId: 'app-a' }, appState: { connected: true },
+    AbortController, TypeError, targets: { deviceId: 'phone-a', bundleId: 'app-a' }, appState: { connected: true }, currentApp: () => ({foreground: true}), appInBackground: app => app.foreground === false,
     $: () => ({ classList: { toggle() {} } }), t: text => text,
-    setAppState: state => states.push(state), toast: text => notices.push(text),
+    setAppState: state => { states.push(state); ctx.appState.value = state; }, toast: text => notices.push(text),
     setTimeout: (callback, delay) => { timers.set(++serial, { callback, delay }); return serial; },
     clearTimeout: id => timers.delete(id),
     fetch: (url, options) => new Promise((resolve, reject) => {
@@ -40,12 +40,12 @@ function create(ignoreAbort = false) {
   assert.deepEqual(stale.states, []); assert.deepEqual(stale.notices, []);
   assert.deepEqual(JSON.parse(stale.requests[0].options.body), { app: 'app-a', device: 'phone-a' });
   assert.deepEqual(JSON.parse(stale.requests[1].options.body), { app: 'app-b', device: 'phone-b' });
-  stale.reply(1, { switched: true }); await second;
-  assert.deepEqual(stale.states, ['restarting']); stale.stop();
+  stale.reply(1, { runId: 'run-a' }); await second;
+  assert.deepEqual(stale.states, []); stale.stop();
 
   const cancelled = create(true), cancelledRun = cancelled.run();
   await cancelled.run(); // Second click stops tracking while the first response is pending.
-  cancelled.reply(0, { switched: true }); await cancelledRun;
+  cancelled.reply(0, { runId: 'run-a' }); await cancelledRun;
   assert.equal(cancelled.running(), false); assert(!cancelled.states.includes('restarting'));
   assert.equal(cancelled.timers.size, 0);
 
@@ -69,13 +69,35 @@ function create(ignoreAbort = false) {
   assert.equal(busy.running(), false); assert(busy.notices.includes('Xcode 正忙, 请稍后再试'));
 
   const poll = create(true), started = poll.run();
-  poll.reply(0, { switched: true }); await started;
+  poll.reply(0, { runId: 'run-a' }); await started;
   const status = poll.fire(1000);
-  assert(poll.requests[1].url.includes('app=app-a'));
+  assert(poll.requests[1].url.includes('run=run-a'));
   poll.stop(); poll.ctx.targets.bundleId = 'app-b';
-  const next = poll.run(); poll.reply(2, { switched: true }); await next;
+  const next = poll.run(); poll.reply(2, { runId: 'run-a' }); await next;
   poll.reply(1, { status: 'failed', detail: 'old failure' }); await status;
-  assert.equal(poll.running(), true); assert.deepEqual(poll.states, ['restarting', 'restarting']);
+  assert.equal(poll.running(), true); assert.deepEqual(poll.states, []);
   assert.deepEqual(poll.notices, []); poll.stop();
+  const background = create(), backgroundRun = background.run();
+  background.ctx.appState.value = 'online';
+  background.ctx.state = {mode: 'live'};
+  let follows = 0;
+  background.ctx.checkForeground = () => follows++;
+  vm.runInContext(source.slice(source.indexOf('function receiveTargetForeground('), source.indexOf('function mergeTargetStates()')), background.ctx);
+  background.ctx.receiveTargetForeground('phone-a', 'app-a', false);
+  assert.equal(follows, 1, 'Foreground following still runs during compile');
+  background.ctx.appState.value = 'offline';
+  background.ctx.receiveTargetForeground('phone-a', 'app-a', false);
+  assert.equal(background.ctx.appState.value, 'background', 'Explicit background must recover offline tracking');
+  assert.equal(follows, 2);
+  background.ctx.currentApp = () => ({foreground: false});
+  background.reply(0, {runId: 'run-a'}); await backgroundRun;
+  assert.deepEqual(background.states, ['background', 'background'], 'Run acknowledgement must not hide background changes');
+  background.ctx.appState.connected = false; // Background SDK may already be suspended.
+  const failure = background.fire(1000);
+  background.reply(1, {status: 'failed', detail: 'build failed'}); await failure;
+  assert.equal(background.states.at(-1), 'background', 'Failed run must not mark background app online');
+  const missing = create(), missingRun = missing.run();
+  missing.reply(0, {switched: false}); await missingRun;
+  assert.equal(missing.running(), false, 'Unverified run must never enter status polling');
   console.log('PASS Xcode run: target isolation, cancellation, request timeout and stale status replies');
 })().catch(error => { console.error(error); process.exitCode = 1; });

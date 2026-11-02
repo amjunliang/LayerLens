@@ -2156,7 +2156,7 @@ const TARGETS_POLL_MS = 10000;
 const API_VERSION = 1;
 // hadDevice: 页面加载时选中的设备是否存在
 // idle: 正在显示没有设备的默认页
-const targets = { hub: null, devices: [], deviceId: '', bundleId: '', deviceOnly: false, hadDevice: false, idle: false };
+const targets = { hub: null, devices: [], deviceId: '', bundleId: '', deviceOnly: false, pinned: false, followRevision: 0, hadDevice: false, idle: false };
 
 // 连接过的设备和 App: 断开后仍显示在菜单中, 选中项不随设备断开跳动, 连回来后自动恢复.
 // 由 Mac App 记录和保存(扫描到的设备和 App 自动记录), 随设备列表返回; 网页和 App 窗口共用一份, 重启后保留, 用户可从菜单中移除
@@ -2184,6 +2184,7 @@ function renderSelectedAppName(hint = '') {
   $('appName').textContent = name;
   $('appName').title = targets.bundleId;
   $('targetBtn').title = name === targets.bundleId ? targets.bundleId : `${name}\n${targets.bundleId}`;
+  $('targetBtn').title += '\n' + t(targets.pinned ? '已固定此 App' : '自动跟随前台 App');
   appInfo.name = name;
   document.title = `${name} - LayerLens`;
 }
@@ -2293,7 +2294,7 @@ const targetStateKey = (device, app) => JSON.stringify([device, app]);
 function receiveTargetForeground(deviceId, bundleId, foreground) {
   if (deviceId !== targets.deviceId || bundleId !== targets.bundleId) return;
   appState.stateRevision = (appState.stateRevision || 0) + 1;
-  if (!foreground && appState.value === 'online') {
+  if (!foreground && appState.value !== 'background') {
     setAppState('background');
     checkForeground();
   } else if (foreground && appState.value === 'background') {
@@ -2459,7 +2460,7 @@ function simPowerButton(id, booted) {
 
 function savedTarget() {
   const params = new URLSearchParams(location.search);
-  if (params.get('device')) return { deviceId: params.get('device'), bundleId: params.get('app') || '', explicit: true };
+  if (params.get('device')) return { deviceId: params.get('device'), bundleId: params.get('app') || '', pinned: params.get('pin') === '1', explicit: true };
   try {
     return JSON.parse(localStorage.getItem(TARGET_KEY)) || {};
   } catch (e) {
@@ -2476,12 +2477,14 @@ function pickTarget() {
     targets.deviceId = saved.deviceId || '';
     targets.bundleId = saved.bundleId || '';
     targets.deviceOnly = !!targets.deviceId && !targets.bundleId;
+    targets.pinned = !!saved.pinned && !!targets.bundleId;
     return;
   }
   const first = defaultDevice();
   targets.deviceId = first ? first.id : '';
   targets.bundleId = firstAppId(first);
-  targets.deviceOnly = false;
+  targets.deviceOnly = !targets.bundleId;
+  targets.pinned = false;
 }
 
 // 优先有运行中 App 的设备; 都没有时选第一台已启动的模拟器, 以便直接显示实时画面
@@ -2500,7 +2503,8 @@ function appInForeground(app) {
 
 // 自动选择时优先前台的 App, 挂起的 App 现在也会留在列表里
 function firstAppId(device) {
-  return (device?.apps.find((a) => a.stateReachable !== false && !appInBackground(a)) || device?.apps[0])?.bundleId || '';
+  const foreground = device?.apps.filter((app) => app.stateReachable !== false && appInForeground(app)) || [];
+  return foreground.length === 1 ? foreground[0].bundleId : '';
 }
 
 // 选择在后台的 App 时先把它切到前台, 否则层级和实时画面都不是它
@@ -2624,6 +2628,8 @@ function showPendingToast() {
 }
 
 function switchTarget(deviceId, bundleId) {
+  targets.pinned = false;
+  targets.followRevision = (targets.followRevision || 0) + 1;
   if (deviceId !== targets.deviceId || bundleId !== targets.bundleId) setRunning(false);
   saveViewState();
   liveSuspend();
@@ -2667,6 +2673,13 @@ function compareTargetApps(a, b) {
 function renderTargetLabel() {
   renderSelectedAppName();
   // 未启动的模拟器在模拟器列表中, 历史里可能只有占位记录
+  const pin = $('targetPin'), pinned = !!targets.pinned && !!targets.bundleId;
+  const pinLabel = t(pinned ? '恢复自动跟随' : '固定此 App');
+  pin.hidden = !targets.bundleId;
+  pin.title = pinLabel;
+  pin.classList.toggle('on', pinned);
+  pin.setAttribute('aria-label', pinLabel);
+  pin.setAttribute('aria-pressed', String(pinned));
   const device = currentDevice() || (targets.simulators || []).find((sim) => sim.id === targets.deviceId);
   const entry = targetHistory[targets.deviceId];
   const name = device?.name || entry?.name || '';
@@ -2687,7 +2700,7 @@ function renderTargetMenu() {
   settleBootLaunch();
   syncOfflineView();
   if (menu.hidden || menu.classList.contains('closing')) { targetMenuUi.signature = ''; return; }
-  const signature = JSON.stringify([targets.devices, targets.simulators, targetHistory, targets.deviceId, targets.bundleId, appState.value, appState.connected, pendingSwitch && [pendingSwitch.deviceId, pendingSwitch.bundleId, pendingSwitch.action], [...simPending], targetMenuUi.offlineOpen, LANG]);
+  const signature = JSON.stringify([targets.devices, targets.simulators, targetHistory, targets.deviceId, targets.bundleId, targets.pinned, appState.value, appState.connected, pendingSwitch && [pendingSwitch.deviceId, pendingSwitch.bundleId, pendingSwitch.action], [...simPending], targetMenuUi.offlineOpen, LANG]);
   if (signature === targetMenuUi.signature) return;
   targetMenuUi.signature = signature;
   const children = [];
@@ -2748,11 +2761,11 @@ function targetDeviceRows(device, background) {
   head.append(el('span', 'status-dot ok'), el('span', 'target-device-name', device.name), el('span', 'target-device-os', [model, device.os].filter(Boolean).join(' · ')));
   if (selectable) {
     head.classList.toggle('current', device.id === targets.deviceId && !targets.bundleId);
-    head.title = t('只使用实时画面');
+    head.title = t('自动跟随此设备的前台 App');
     head.addEventListener('click', () => {
       hidePopovers();
       cancelSwitch();
-      if (device.id !== targets.deviceId || targets.bundleId) switchTarget(device.id, '');
+      switchTarget(device.id, '');
     });
     const row = el('div', 'target-device-row');
     row.append(head);
@@ -2776,11 +2789,11 @@ function goneDeviceRows(entry) {
   const model = entry.model && entry.model !== entry.name ? entry.model : '';
   head.append(el('span', 'status-dot'), el('span', 'target-device-name', entry.name), el('span', 'target-device-os', [model, entry.os].filter(Boolean).join(' · ') || t('已断开')));
   head.classList.toggle('current', entry.id === targets.deviceId && !targets.bundleId);
-  head.title = t('只使用实时画面');
+  head.title = t('自动跟随此设备的前台 App');
   head.addEventListener('click', () => {
     hidePopovers();
     cancelSwitch();
-    if (entry.id !== targets.deviceId || targets.bundleId) switchTarget(entry.id, '');
+    switchTarget(entry.id, '');
   });
   if (entry.id !== targets.deviceId) head.appendChild(historyRemoveButton(entry.id, ''));
   const group = el('div', 'target-apps');
@@ -2890,8 +2903,8 @@ function offlineSimulatorRow(sim) {
   return [row, group];
 }
 
-// 跟随模拟器前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
-// 前台是未集成的 App(如设置)时保持不动. 旧版 Pod 不上报 foreground, 不参与跟随.
+// 跟随当前设备前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
+// 没有可关联的前台 App 时短暂等待再退回设备模式。旧版 Pod 不上报 foreground, 不参与跟随。
 // 事件流连着时以 App 实时推送的状态为准; Mac App 的列表每 2s 扫描一次, 刚切换后可能还是旧状态
 const STAY_OFFLINE_KEY = 'layerlens_stay_offline';
 
@@ -2945,16 +2958,18 @@ function resumePendingLaunch() {
 }
 
 function currentAppAway() {
-  if (!currentDevice() || !targets.bundleId || stayingOffline()) return false;
+  if (!currentDevice() || targets.pinned || stayingOffline()) return false;
+  if (!targets.bundleId) return true;
   // 正在把当前选择拉到前台时不要自动跟随仍在前台的旧 App
   if (pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId) return false;
   if (appState.value === 'background') return true;
   const app = currentApp();
-  if (appState.value === 'offline') return !app;
+  if (appState.value === 'offline') return !app || appInBackground(app);
   return !appState.connected && !!app && appInBackground(app);
 }
 
 function followForeground(next) {
+  if (targets.pinned || next[0] !== targets.deviceId) return;
   const app = targets.devices.find((d) => d.id === next[0])?.apps.find((a) => a.bundleId === next[1]);
   switchTargetInPlace(next[1]);
   toast(t('已切换到前台 App {0}', app?.appName || next[1]));
@@ -2962,15 +2977,33 @@ function followForeground(next) {
 
 // 同一设备上换 App: 只替换目标、事件流、App 信息和层级, 不重新加载页面, 实时画面不中断
 function rememberTarget(deviceId, bundleId) {
+  const pinned = !!targets.pinned && !!bundleId;
   try {
-    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId }));
+    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId, pinned }));
   } catch (e) {
     // 不可用时只依赖地址参数
   }
-  history.replaceState(null, '', '?' + new URLSearchParams({ device: deviceId, app: bundleId }).toString());
+  const params = new URLSearchParams({ device: deviceId, app: bundleId });
+  if (pinned) params.set('pin', '1');
+  history.replaceState(null, '', '?' + params.toString());
+}
+
+function setTargetPinned(on) {
+  targets.pinned = !!on && !!targets.bundleId;
+  targets.followRevision = (targets.followRevision || 0) + 1;
+  if (!targets.pinned) {
+    try { sessionStorage.removeItem(STAY_OFFLINE_KEY); } catch (e) {}
+  }
+  rememberTarget(targets.deviceId, targets.bundleId);
+  renderTargetMenu();
+  if (!targets.pinned) checkForeground();
 }
 
 function switchTargetInPlace(bundleId, activating = false, appName = '') {
+  if (bundleId !== targets.bundleId) {
+    targets.pinned = false;
+    targets.followRevision = (targets.followRevision || 0) + 1;
+  }
   if (bundleId !== targets.bundleId) setRunning(false);
   if (bundleId) {
     $('emptyState').hidden = true;
@@ -3045,6 +3078,7 @@ function showDeviceOnly() {
   setAppState(device ? 'online' : 'offline', device ? t('只使用实时画面') : '');
   setMode('live');
   if (state.mode === 'live') syncLive();
+  checkForeground();
 }
 
 // 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
@@ -3066,6 +3100,7 @@ async function probeForeground() {
   const device = currentDevice();
   if (!device) return null;
   const others = device.apps.filter((a) => a.bundleId !== targets.bundleId);
+  const epoch = targetStateHub.epoch, revision = targetStateHub.revision;
   const found = await Promise.all(others.map(async (a) => {
     const entry = targetStateHub.ready && targetStateHub.states.get(targetStateKey(device.id, a.bundleId));
     if (entry && entry.stateReachable === false) return null;
@@ -3082,8 +3117,9 @@ async function probeForeground() {
       clearTimeout(timer);
     }
   }));
-  const bundleId = found.find(Boolean);
-  return bundleId ? [device.id, bundleId] : null;
+  if (targetStateHub.epoch !== epoch || targetStateHub.revision !== revision) return null;
+  const foreground = [...new Set(found.filter(Boolean))];
+  return foreground.length === 1 ? [device.id, foreground[0]] : null;
 }
 
 // 只有 App 明确返回的前后台状态才用于切换提示。通信超时表示未知。
@@ -3115,19 +3151,32 @@ async function probeCurrentBackground() {
 const foregroundCheck = { running: false };
 
 async function checkForeground() {
-  if (!pageActivity.active || foregroundCheck.running) return;
+  if (!pageActivity.active || foregroundCheck.running || !currentAppAway()) return;
   foregroundCheck.running = true;
+  const initialRevision = targets.followRevision || 0;
+  let missingKey = '', missingSince = 0;
   try {
     for (let attempt = 0; attempt < 15 && pageActivity.active && currentAppAway(); attempt++) {
       try {
-        const deviceId = targets.deviceId, key = logTargetKey();
+        const deviceId = targets.deviceId, key = logTargetKey(), revision = targets.followRevision || 0;
         if (!targetStateHub.ready) await loadTargets();
-        // 汇总订阅已包含实时状态; 不再每 400ms 重拉完整列表。
         const next = await probeForeground();
-        if (next && targets.deviceId === deviceId && logTargetKey() === key && pageActivity.active && currentAppAway()) {
+        if (targets.deviceId !== deviceId || logTargetKey() !== key || (targets.followRevision || 0) !== revision || !pageActivity.active || !currentAppAway()) continue;
+        if (next) {
           followForeground(next);
           return;
         }
+        // 只有明确后台/已退出才退回设备; 通信超时仍是未知状态。
+        const app = currentApp();
+        const absent = targets.bundleId && (app ? appInBackground(app) : appState.value === 'offline');
+        if (absent) {
+          if (missingKey !== key) { missingKey = key; missingSince = Date.now(); }
+          if (Date.now() - missingSince >= 1000) {
+            // 同设备切换保留视频 WebSocket、解码器和当前帧。
+            switchTarget(deviceId, '');
+            return;
+          }
+        } else { missingKey = ''; missingSince = 0; }
       } catch (e) {
         // 下次再试
       }
@@ -3135,13 +3184,14 @@ async function checkForeground() {
     }
   } finally {
     foregroundCheck.running = false;
+    // 在途查询遇到新的选择/固定操作时, 只为新的意图重新检查。
+    if ((targets.followRevision || 0) !== initialRevision && pageActivity.active && currentAppAway()) checkForeground();
   }
 }
 
 // 需要自动切换时返回 [设备 ID, Bundle ID]: 选中的设备启动了, 选中的设备上出现 App, 或未选设备时出现设备
 function nextTarget() {
-  // Explicit device-only selection must survive scans and device reconnection.
-  if (targets.deviceOnly && targets.deviceId) return null;
+  if (targets.pinned && targets.deviceId) return null;
   if (targets.idle) {
     if (!targets.devices.length) return null;
     const back = currentDevice();
@@ -3152,7 +3202,8 @@ function nextTarget() {
   const device = currentDevice();
   if (device) {
     if (!targets.hadDevice) return [device.id, targets.bundleId || firstAppId(device)];
-    if (!targets.bundleId && device.apps.length) return [device.id, firstAppId(device)];
+    const foreground = firstAppId(device);
+    if (!targets.bundleId && foreground) return [device.id, foreground];
     return null;
   }
   if (targets.deviceId || !targets.devices.length) return null;
@@ -3371,10 +3422,10 @@ async function callXcode(command, job) {
   if (job.controller.signal.aborted) controller.abort();
   const timer = setTimeout(cancel, command === 'run' ? 30000 : 5000);
   try {
-    const app = encodeURIComponent(job.bundleId);
+    const run = encodeURIComponent(job.runId || '');
     const res = command === 'run'
       ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: job.bundleId, device: job.deviceId }), signal: controller.signal })
-      : await fetch(`/api/hub/run-status?app=${app}`, { cache: 'no-store', signal: controller.signal });
+      : await fetch(`/api/hub/run-status?run=${run}`, { cache: 'no-store', signal: controller.signal });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
@@ -3392,6 +3443,8 @@ function runErrorText(e) {
     permission_denied: t('没有控制 Xcode 的权限, 请在 系统设置 › 隐私与安全性 › 自动化 中允许'),
     permission_required: t('需要允许 LayerLens 控制 Xcode'),
     xcode_busy: t('Xcode 正忙, 请稍后再试'),
+    xcode_scheme_unverified: t('无法确认选中 App 对应的运行 Scheme，请在 Xcode 中检查 Scheme 和 Run 配置'),
+    xcode_destination_unavailable: t('当前 Scheme 不支持选中的设备，请在 Xcode 中检查运行目标'),
   };
   if (e.name === 'AbortError') return t('等待超时, 请在 Xcode 查看');
   if (e instanceof TypeError) return t('无法连接 LayerLens');
@@ -3414,11 +3467,14 @@ function setRunning(on) {
 function endRun(message, job = xcode.job) {
   if (job && !currentRun(job)) return;
   setRunning(false);
-  if (!appState.connected) {
+  if (appInBackground(currentApp() || {}) || appState.value === 'background') {
+    setAppState('background');
+  } else if (!appState.connected) {
     setAppState('offline', message);
     return;
+  } else {
+    setAppState('online');
   }
-  setAppState('online');
   if (message) toast(message, true);
 }
 
@@ -3434,10 +3490,10 @@ async function xcodeRun() {
     // 首次运行会弹出系统授权窗口, 请求会等待用户选择
     job.hint = setTimeout(() => { if (currentRun(job)) toast(t('请在系统弹窗中允许 LayerLens 控制 Xcode')); }, 1500);
     try {
-      const { switched } = await callXcode('run', job);
+      const { runId } = await callXcode('run', job);
       if (!currentRun(job)) return;
-      // Xcode 会先切到正在查看的设备; 没有对应的运行目标时沿用 Xcode 当前选择, App 可能运行在别的设备上
-      if (!switched && targets.deviceId) toast(t('Xcode 中没有当前设备的运行目标, 将运行到 Xcode 当前选择的设备'));
+      if (!runId) throw new Error('xcode_scheme_unverified');
+      job.runId = runId;
     } finally {
       clearTimeout(job.hint);
     }
@@ -3446,7 +3502,7 @@ async function xcodeRun() {
     return;
   }
   if (!currentRun(job)) return;
-  setAppState('restarting');
+  // 编译跟踪只控制运行按钮, 设备的前后台状态继续驱动自动跟随。
   const deadline = Date.now() + RUN_TIMEOUT_MS;
   const check = async () => {
     if (!currentRun(job)) return;
@@ -5268,6 +5324,8 @@ const logs = {
   timer: null,
   source: 'live',
   file: null,
+  instanceId: '',
+  clearing: null,
   unsupported: false,
   storageError: '',
   loading: false,
@@ -5364,20 +5422,29 @@ function logConnect() {
   };
   // 连接或重连时 Hub 先发 reset 再补发内存中的日志
   es.addEventListener('reset', (e) => {
-    logs.unsupported = !!parse(e).unsupported;
-    recorderStorageError('日志', parse(e).storageError || '', logs);
+    if (logs.es !== es) return;
+    const data = parse(e);
+    logs.instanceId = data.instanceId || '';
+    logs.unsupported = !!data.unsupported;
+    recorderStorageError('日志', data.storageError || '', logs);
     logs.loading = false;
     resetLogLines();
     // App 重新启动后以前的启动多了一次
     loadLaunches();
   });
   es.addEventListener('status', (e) => {
-    logs.unsupported = !!parse(e).unsupported;
-    recorderStorageError('日志', parse(e).storageError || '', logs);
+    if (logs.es !== es) return;
+    const data = parse(e);
+    if (data.instanceId) logs.instanceId = data.instanceId;
+    logs.unsupported = !!data.unsupported;
+    recorderStorageError('日志', data.storageError || '', logs);
     scheduleLogRender();
   });
   es.addEventListener('logs', (e) => {
-    const entries = parse(e).entries || [];
+    if (logs.es !== es) return;
+    const data = parse(e);
+    if (data.instanceId) logs.instanceId = data.instanceId;
+    const entries = data.entries || [];
     appendLogLines(entries.map((entry) => ({ id: logs.nextId++, t: entry.t, m: entry.k ? '' : String(entry.m ?? ''), k: entry.k })));
   });
   logs.es = es;
@@ -5386,6 +5453,7 @@ function logConnect() {
 function logDisconnect() {
   logs.es?.close();
   logs.es = null;
+  logs.instanceId = '';
   logs.key = '';
   logs.loading = false;
 }
@@ -5694,6 +5762,9 @@ function measureLogRows(start, end, top) {
 }
 
 function renderLogStatus() {
+  const readonly = logs.source !== 'live';
+  $('logClear').disabled = readonly || !logs.key || !logs.instanceId || logs.loading || (logs.clearing?.key === logTargetKey() && logs.clearing.instanceId === logs.instanceId);
+  $('logClear').title = t(readonly ? '历史记录只读，请在缓存管理中删除' : '清空本次启动的日志记录 (同时删除本机保存的记录)');
   const total = logs.lines.length;
   const count = $('logCount');
   count.title = logs.storageError ? t('日志保存失败: {0}', logs.storageError) : '';
@@ -5994,13 +6065,50 @@ function exportLogs(lines) {
   logAction('export', body).then((data) => toast(t('已导出到 {0}', data.path))).catch((e) => toast(t('导出失败: {0}', e.message), true));
 }
 
-function clearLogs() {
-  if (logs.source === 'live') {
-    // Hub 清空后通过 reset 事件通知所有打开的面板
-    logAction('clear').catch((e) => toast(e.message, true));
-  } else {
-    logs.file = null;
-    resetLogLines();
+// 日志和抓包共用确认流程, 目标和启动在打开确认框时固定下来。
+function recordClearContext(kind) {
+  const log = kind === 'log';
+  if (log ? logs.source !== 'live' || logs.loading || logs.unsupported : net.session || net.archive) return null;
+  const instanceId = log ? logs.instanceId : net.instanceId;
+  const key = logTargetKey();
+  if (!key || !instanceId) return null;
+  return { kind, key, device: targets.deviceId, app: targets.bundleId, instanceId,
+    launch: launchState.selected, epoch: log ? '' : net.epoch, base: targetBase() };
+}
+
+function recordClearCurrent(job) {
+  const current = recordClearContext(job.kind);
+  return !!current && ['key', 'instanceId', 'launch', 'epoch'].every(field => current[field] === job[field]);
+}
+
+function confirmRecordClear(kind) {
+  const job = recordClearContext(kind);
+  if (!job || (kind === 'log' && logs.clearing?.key === job.key && logs.clearing.instanceId === job.instanceId)) return;
+  showConfirm($(kind === 'log' ? 'logClear' : 'netClear'), {
+    title: t(kind === 'log' ? '清空本次启动的日志记录?' : '清空本次启动的抓包记录?'),
+    detail: t('本机保存的记录将一并删除，无法恢复。以前的启动不受影响。'),
+    action: t('清空'),
+    onConfirm: () => {
+      if (!recordClearCurrent(job)) { toast(t('记录所属的启动已变化，请重新确认'), true); return; }
+      if (kind === 'log') clearLogs(job);
+      else clearNet(job);
+    },
+  });
+}
+
+async function clearLogs(job) {
+  if (!job || !recordClearCurrent(job)) return;
+  logs.clearing = job;
+  scheduleLogRender();
+  try {
+    await logAction('clear', { device: job.device, app: job.app, instanceId: job.instanceId });
+    // reset 事件负责清空显示; 不让迟到的 HTTP 响应抹掉清空之后的新日志。
+    if (recordClearCurrent(job)) loadLaunches();
+  } catch (e) {
+    if (recordClearCurrent(job)) toast(t('清空失败: {0}', t(e.message)), true);
+  } finally {
+    if (logs.clearing === job) logs.clearing = null;
+    scheduleLogRender();
   }
 }
 
@@ -6143,7 +6251,7 @@ function setupLogs() {
   $('logTop').addEventListener('click', () => scrollLogEdge(false));
   $('logBottom').addEventListener('click', () => scrollLogEdge(true));
   $('logNew').addEventListener('click', () => scrollLogEdge(true));
-  $('logClear').addEventListener('click', clearLogs);
+  $('logClear').addEventListener('click', () => confirmRecordClear('log'));
   $('logMore').addEventListener('click', () => {
     fillLogFontMenu();
     $('logFont').value = logs.font.family;
@@ -7485,10 +7593,11 @@ function exportNetHar() {
   toast(t('正在下载…'));
 }
 
-async function clearNet() {
+async function clearNet(job) {
   const token = net.token;
   try {
-    const res = await fetch(targetBase() + '/api/network/clear', { method: 'POST' });
+    const query = job ? '?' + new URLSearchParams({ instanceId: job.instanceId, epoch: job.epoch }) : '';
+    const res = await fetch((job?.base || targetBase()) + '/api/network/clear' + query, { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
   } catch (e) {
     if (token === net.token) toast(t('清空失败: {0}', e.message), true);
@@ -7540,14 +7649,7 @@ function setupNetwork() {
   $('netPause').addEventListener('click', () => setNetPaused(!net.paused));
   setupNetCapture();
   setupLaunches();
-  // 清空会删除本机保存的文件, 有记录时先确认
-  $('netClear').addEventListener('click', () => {
-    if (!net.list.length) {
-      clearNet();
-      return;
-    }
-    showConfirm($('netClear'), { title: t('清空本次启动的抓包记录?'), detail: t('将删除 {0} 个请求, 本机保存的文件一并删除, 无法恢复. 以前的启动不受影响', net.list.length), action: t('清空'), onConfirm: clearNet });
-  });
+  $('netClear').addEventListener('click', () => confirmRecordClear('net'));
   $('netHar').addEventListener('click', exportNetHar);
   const list = $('netList');
   list.addEventListener('scroll', () => {
@@ -7887,6 +7989,10 @@ function setup() {
 
   applyTheme(loadTheme(), false);
   $('targetBtn').addEventListener('click', () => togglePopover('targetMenu'));
+  $('targetPin').addEventListener('click', () => {
+    hidePopovers();
+    setTargetPinned(!targets.pinned);
+  });
   setupPanels();
   setupInputMemory();
   start();

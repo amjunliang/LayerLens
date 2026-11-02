@@ -71,7 +71,7 @@ final class AppServer {
                 let target = request.components(separatedBy: " ")[1]
                 let since = Int(URLComponents(string: "http://localhost" + target)?.queryItems?.first(where: { $0.name == "since" })?.value ?? "0") ?? 0
                 let entries: [[String: Any]] = (1...logSeq).filter { $0 > since }.map { ["s": $0, "t": Date().timeIntervalSince1970 * 1000, "m": "preserved-log-\($0)"] }
-                let value: [String: Any] = ["instanceId": instance, "entries": entries]
+                let value: [String: Any] = ["instanceId": instance, "entries": mode == "logs-empty" ? [] : entries]
                 stream(connection, event: "logs", value: value)
             } else if request.hasPrefix("GET /api/network?") {
                 let since = UInt64(head.query["since"] ?? "") ?? 0

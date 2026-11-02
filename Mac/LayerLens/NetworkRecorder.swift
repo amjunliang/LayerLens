@@ -720,6 +720,12 @@ final class NetworkRecorder {
                 connection.respond(.error(409, "Delete saved sessions in Cache Manage"))
                 return
             }
+            if let expected = head.query["instanceId"], (expected != session?.instanceId || (!source.streamInstance.isEmpty && expected != source.streamInstance)) {
+                connection.respond(.error(409, "Record launch changed; please confirm again")); return
+            }
+            if let expected = head.query["epoch"], expected != session?.epoch {
+                connection.respond(.error(409, "Record launch changed; please confirm again")); return
+            }
             if let session {
                 // Persist the boundary before touching data, so a crash or remote failure
                 // cannot resurrect cleared records. A failed marker write leaves data intact.

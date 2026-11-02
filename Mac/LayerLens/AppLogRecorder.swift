@@ -38,7 +38,7 @@ final class AppLogRecorder {
         }
     }
 
-    /// 同一设备上同一 App 的日志, App 重启后继续使用, 中间插入一条标记
+    /// 同一设备上同一 App 当前启动的日志; 历史启动仅保存在各自文件中
     final class Source {
         let deviceId: String
         let bundleId: String
@@ -277,24 +277,23 @@ final class AppLogRecorder {
         }
         guard name == "logs", let json = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] else { return }
         if let instanceId = json["instanceId"] as? String, instanceId != source.instanceId {
-            let restarted = !source.instanceId.isEmpty
             source.instanceId = instanceId
             source.lastSeq = 0
             source.fileSeq = 0
             source.file?.closeFile()
             source.file = nil
-            if !restarted {
-                do { try resumeFile(source) }
-                catch {
-                    source.storageError = error.localizedDescription
-                    broadcast(source, "status", ["unsupported": source.isUnsupported, "storageError": source.storageError])
-                    if let connection = source.upstream { disconnect(connection, source: source) }
-                    return
-                }
-            }
-            if restarted {
-                append([Entry(id: source.nextId, time: Date().timeIntervalSince1970 * 1000, text: "", kind: "restart")], to: source)
-                source.nextId += 1
+            source.fileURL = nil
+            source.entries = []
+            source.memoryBytes = 0
+            source.storageError = ""
+            // 新启动替换实时列表; 断线重连的 instanceId 不变, 不会走这里。
+            // 仍恢复该实例的持久断点, 防止重放已保存或已清空的日志。
+            do { try resumeFile(source) }
+            catch { source.storageError = error.localizedDescription }
+            broadcast(source, "reset", ["unsupported": source.isUnsupported, "storageError": source.storageError])
+            if !source.storageError.isEmpty {
+                if let connection = source.upstream { disconnect(connection, source: source) }
+                return
             }
         }
         var added: [Entry] = []
@@ -524,7 +523,7 @@ final class AppLogRecorder {
             source.subscribers[id] = writer
             let entries = source.entries
             var index = 0, started = false
-            let initial = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n".utf8) + Self.event("reset", ["unsupported": source.isUnsupported, "storageError": source.storageError])
+            let initial = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n".utf8) + Self.event("reset", ["unsupported": source.isUnsupported, "storageError": source.storageError, "instanceId": source.instanceId])
             writer.startReplay {
                 if !started { started = true; return initial }
                 guard index < entries.count else { return nil }
@@ -558,6 +557,8 @@ final class AppLogRecorder {
 
     private func broadcast(_ source: Source, _ name: String, _ object: [String: Any]) {
         guard !source.subscribers.isEmpty else { return }
+        var object = object
+        object["instanceId"] = source.instanceId
         let data = Self.event(name, object)
         for writer in Array(source.subscribers.values) { writer.enqueue(data) }
     }
@@ -571,14 +572,56 @@ final class AppLogRecorder {
 
     // MARK: - Actions
 
-    /// 清空内存中的日志(文件保留), 所有打开的面板一起清空
-    func clear(deviceId: String, bundleId: String) {
+    /// 原子清空本次启动的持久化内容, 保留续写序号, 不向 Pod 发送全局清空。
+    /// expectedInstance 将确认框绑定到特定启动, App 重启后拒绝旧操作。
+    func clear(deviceId: String, bundleId: String, expectedInstance: String,
+               completion: @escaping (Result<Void, Error>) -> Void) {
         queue.async { [self] in
             let source = source(deviceId: deviceId, bundleId: bundleId)
-            source.entries = []
-            source.memoryBytes = 0
-            broadcast(source, "reset", ["unsupported": source.isUnsupported])
+            guard !expectedInstance.isEmpty, source.instanceId == expectedInstance,
+                  source.upstreamInstance.isEmpty || source.upstreamInstance == expectedInstance else {
+                completion(.failure(NSError(domain: "LayerLens.LogClear", code: 409,
+                    userInfo: [NSLocalizedDescriptionKey: "Log launch changed; please confirm again"])))
+                return
+            }
+            do {
+                // 在重启后的第一条日志到达前, fileURL 可能仍指向以前的启动。
+                // 先建立/恢复当前实例文件, 绝不清空那个历史文件。
+                if source.file == nil { try write([], sequence: source.fileSeq, source: source) }
+                guard let url = source.fileURL,
+                      Self.attribute(Self.instanceAttribute, of: url) == expectedInstance,
+                      Self.attribute(Self.deviceAttribute, of: url) == deviceId else { throw CocoaError(.fileWriteUnknown) }
+                try replaceWithEmptyLog(url, source: source)
+                source.entries = []
+                source.memoryBytes = 0
+                source.storageError = ""
+                // HTTP 响应不再次清前端列表, reset 后的新日志不会被迟到响应抹掉。
+                broadcast(source, "reset", ["unsupported": source.isUnsupported, "storageError": ""])
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
         }
+    }
+
+    /// 内容和断点在同一个 inode 中提交, 清空中断不会留下“内容已删但断点丢失”的状态。
+    private func replaceWithEmptyLog(_ url: URL, source: Source) throws {
+        let temporary = url.deletingLastPathComponent().appendingPathComponent(".clear-" + UUID().uuidString)
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        let replacement = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var committed = false
+        defer {
+            if !committed { try? replacement.close(); try? FileManager.default.removeItem(at: temporary) }
+        }
+        try Self.setRequiredAttribute(Self.instanceAttribute, source.instanceId, of: temporary)
+        try Self.setRequiredAttribute(Self.deviceAttribute, source.deviceId, of: temporary)
+        try Self.setRequiredAttribute(Self.seqAttribute, String(source.fileSeq), of: temporary)
+        try replacement.synchronize()
+        guard rename(temporary.path, url.path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        committed = true
+        source.file?.closeFile()
+        source.file = replacement
     }
 
     /// 导出到下载文件夹并在访达中选中; text 为空时导出内存中的全部日志

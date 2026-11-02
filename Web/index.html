@@ -19,6 +19,8 @@
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
+    <symbol id="i-expand-all" viewBox="0 0 24 24"><path d="M8 8l4-4 4 4M8 16l4 4 4-4M4 12h16"/></symbol>
+    <symbol id="i-collapse-all" viewBox="0 0 24 24"><path d="M8 4l4 4 4-4M8 20l4-4 4 4M4 12h16"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
     <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
     <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
@@ -26,6 +28,7 @@
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></symbol>
     <symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></symbol>
     <symbol id="i-tree" viewBox="0 0 24 24"><path d="M5 4v14h5M5 9h5"/><rect x="12" y="6" width="8" height="5" rx="1"/><rect x="12" y="15" width="8" height="5" rx="1"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 1025 1024"><path d="M320 839.68l-238.592 174.08c-8.704 6.656-19.456 9.728-29.696 9.728-12.8 0-26.112-5.12-35.84-14.848-17.92-17.92-20.48-46.08-5.12-66.56l212.992-288.256L56.32 487.424C39.936 471.04 36.864 445.44 48.128 425.472c8.192-12.8 76.8-112.64 229.376-75.264 2.56 0.512 5.12 0.512 8.192 1.024 6.144 0.512 13.312 1.024 20.992 2.56 32.256 5.12 89.6-20.48 139.264-62.976 47.616-40.448 78.336-87.552 78.336-120.32 0-7.68 0-15.872-0.512-23.552-1.024-30.72-3.072-77.824 31.744-112.64 41.472-41.472 107.52-45.056 153.088-7.68 1.024 0.512 1.536 1.536 2.56 2.56 24.576 24.064 276.48 275.968 279.04 278.528 21.504 21.504 33.792 50.688 33.792 81.408s-11.776 59.392-33.792 80.896c-34.816 34.816-82.432 33.28-113.664 31.744-7.168 0-15.36-0.512-23.04-0.512-30.72 0-67.584 21.504-103.936 60.928-50.688 55.296-81.92 126.464-79.36 158.72 1.024 10.24 3.072 28.16 3.584 30.72 36.864 149.504-62.976 217.6-74.752 225.28-20.48 12.288-46.592 9.216-62.976-7.168l-165.376-165.376-50.688 35.328z"/></symbol>
     <symbol id="i-device" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
@@ -75,6 +78,7 @@
       <button class="target-btn" id="targetBtn" title="切换设备 / App"><span class="status-dot" id="statusDot" title="未连接"></span><span class="app-name" id="appName">LayerLens</span><span class="target-label" id="targetLabel" hidden><svg class="icon"><use href="#i-device"/></svg><span class="target-label-name" id="targetLabelName"></span><span class="target-label-kind" id="targetLabelKind"></span></span><svg class="icon target-caret"><use href="#i-chevron"/></svg></button>
       <div class="popover menu target-menu" id="targetMenu" hidden></div>
     </div>
+    <button class="icon-btn toggle target-pin" id="targetPin" title="固定此 App" aria-label="固定此 App" aria-pressed="false" hidden><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg></button>
     <span class="app-meta" id="appMeta"></span>
   </div>
   <div class="toolbar-center">
