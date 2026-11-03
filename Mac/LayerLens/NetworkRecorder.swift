@@ -412,6 +412,11 @@ final class NetworkRecorder {
         if switched {
             // App 重新启动, 打开着的面板改为显示这一次的请求
             let hadSession = source.session != nil
+            if let previous = source.session, !interruptPending(previous) {
+                storageFailed(source, "Could not save interrupted requests")
+                deactivate(source)
+                return
+            }
             source.session = newSession(source, instanceId: instanceId)
             source.pendingFetch = []
             source.fetchRetries = [:]
@@ -462,6 +467,28 @@ final class NetworkRecorder {
         if !source.fetching {
             fetchNext(source)
         }
+    }
+
+    /// Only a confirmed process replacement ends pending records. Disconnects and
+    /// slow/streaming requests must remain pending so a reconnect can recover them.
+    private func interruptPending(_ session: Session) -> Bool {
+        var saved = true
+        for id in session.order {
+            guard var record = session.records[id] else { continue }
+            let message = "Capture interrupted: app process restarted; result unavailable"
+            guard record["state"] as? String == "pending" || record["error"] as? String == message else { continue }
+            record["state"] = "failed"
+            record["error"] = message
+            record["_missing"] = ["req", "res"]
+            session.records[id] = record
+            session.seq += 1
+            session.seqs[id] = session.seq
+            if !save(session, id: id) { saved = false }
+        }
+        // Readers may already have opened this launch as an archive.
+        archives[session.folder.path] = nil
+        archiveUse[session.folder.path] = nil
+        return saved
     }
 
     /// 同一次启动在 LayerLens 重启后继续使用原文件夹

@@ -86,6 +86,61 @@ import Network
         enabled.update(apps: [app(replacement, capture: false)])
         wait { replacement.queue.sync { replacement.captureRequests == [true] } }
         enabled.stop()
-        print("PASS per-request backoff and fairness, restart ACK recovery, idempotent release, process isolation and immediate capture enable")
+        // Pending requests must not trigger periodic reconnects or detail polling.
+        // An actual disconnect replays the retained summaries and recovers completions.
+        let silent = try AppServer(); defer { silent.stop() }
+        silent.queue.sync { silent.mode = "pending" }
+        let pendingFolder = root.appendingPathComponent("pending")
+        var pendingClock = Date()
+        let recovering = NetworkRecorder(folder: pendingFolder, now: { pendingClock }) { _, _ in true }
+        func records() -> [URL] {
+            ((FileManager.default.enumerator(at: pendingFolder, includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? [])
+                .filter { $0.lastPathComponent == "1.json" }
+        }
+        recovering.update(apps: [app(silent)])
+        wait { records().count == 1 }
+        let original = records()[0]
+        for _ in 0..<3 {
+            _ = summary(recovering)
+            pendingClock = pendingClock.addingTimeInterval(60)
+            recovering.update(apps: [app(silent)])
+            _ = summary(recovering)
+            Thread.sleep(forTimeInterval: 0.1)
+            assert(silent.queue.sync { silent.networkTargets.count == 1 }, "Healthy pending streams must not reconnect on a timer")
+            assert(NetworkRecorder.readJSON(original)?["state"] as? String == "pending")
+            assert(silent.queue.sync { silent.detailRequests.isEmpty && silent.releases == 0 })
+        }
+        silent.queue.sync {
+            silent.mode = "ok"
+            silent.connections.forEach { $0.cancel() }
+        }
+        wait { summary(recovering)["connections"] == 0 }
+        recovering.update(apps: [app(silent)])
+        wait { NetworkRecorder.readJSON(original)?["_f"] as? Bool == true }
+        assert(silent.queue.sync { silent.networkTargets.count == 2 }, "Only a real disconnect should trigger replay")
+        assert(silent.queue.sync { silent.released == [1] })
+        recovering.stop()
+
+        // A disconnect alone does not finish a request; a confirmed new process does,
+        // including when the old pending launch was loaded from disk after a Mac restart.
+        let old = try AppServer(); defer { old.stop() }
+        old.queue.sync { old.mode = "pending" }
+        let first = NetworkRecorder(folder: pendingFolder) { _, _ in true }
+        first.update(apps: [app(old)])
+        wait { records().count == 2 }
+        let oldFile = records().first { $0 != original }!
+        first.update(apps: []); _ = summary(first)
+        assert(NetworkRecorder.readJSON(oldFile)?["state"] as? String == "pending")
+        first.stop()
+        let next = try AppServer(); defer { next.stop() }
+        next.queue.sync { next.mode = "pending" }
+        let restarted = NetworkRecorder(folder: pendingFolder) { _, _ in true }
+        restarted.update(apps: [app(next)])
+        wait { NetworkRecorder.readJSON(oldFile)?["state"] as? String == "failed" }
+        assert((NetworkRecorder.readJSON(oldFile)?["error"] as? String)?.contains("interrupted") == true)
+        assert(NetworkRecorder.readJSON(original)?["_f"] as? Bool == true)
+        assert(next.queue.sync { next.released.isEmpty && next.detailRequests.isEmpty })
+        restarted.stop()
+        print("PASS per-request backoff and fairness, restart ACK recovery, idempotent release, process isolation, immediate capture enable, no pending polling, disconnect replay and restart interruption")
     }
 }

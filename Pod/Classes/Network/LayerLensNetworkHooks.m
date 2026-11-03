@@ -123,9 +123,21 @@ static BOOL LayerLensIsProxyClass(Class cls) {
 + (void)hookTaskCreationOfClass:(Class)cls {
     LayerLensNetworkRecorder *recorder = LayerLensNetworkRecorder.sharedRecorder;
 
+    // Plain delegate tasks can also be created on a session predating installation.
+    for (NSString *name in @[@"dataTaskWithRequest:", @"dataTaskWithURL:", @"downloadTaskWithRequest:", @"downloadTaskWithURL:"]) {
+        SEL sel = NSSelectorFromString(name);
+        LayerLensHookMethod(cls, sel, ^id(IMP original) {
+            return ^NSURLSessionTask *(NSURLSession *session, id target) {
+                if (session.delegate) { [self hookDelegate:session.delegate]; }
+                return ((NSURLSessionTask * (*)(id, SEL, id))original)(session, sel, target);
+            };
+        });
+    }
+
     SEL dataRequest = @selector(dataTaskWithRequest:completionHandler:);
     LayerLensHookMethod(cls, dataRequest, ^id(IMP original) {
         return ^NSURLSessionDataTask *(NSURLSession *session, NSURLRequest *request, LayerLensDataHandler handler) {
+            if (session.delegate) { [self hookDelegate:session.delegate]; }
             if (!handler) {
                 return ((NSURLSessionDataTask * (*)(id, SEL, id, id))original)(session, dataRequest, request, handler);
             }
@@ -142,6 +154,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
     SEL dataURL = @selector(dataTaskWithURL:completionHandler:);
     LayerLensHookMethod(cls, dataURL, ^id(IMP original) {
         return ^NSURLSessionDataTask *(NSURLSession *session, NSURL *url, LayerLensDataHandler handler) {
+            if (session.delegate) { [self hookDelegate:session.delegate]; }
             if (!handler) {
                 return ((NSURLSessionDataTask * (*)(id, SEL, id, id))original)(session, dataURL, url, handler);
             }
@@ -158,6 +171,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
     SEL uploadData = @selector(uploadTaskWithRequest:fromData:);
     LayerLensHookMethod(cls, uploadData, ^id(IMP original) {
         return ^NSURLSessionUploadTask *(NSURLSession *session, NSURLRequest *request, NSData *body) {
+            if (session.delegate) { [self hookDelegate:session.delegate]; }
             NSURLSessionUploadTask *task = ((NSURLSessionUploadTask * (*)(id, SEL, id, id))original)(session, uploadData, request, body);
             [recorder setUploadBody:body forTask:task];
             return task;
@@ -167,6 +181,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
     SEL uploadFile = @selector(uploadTaskWithRequest:fromFile:);
     LayerLensHookMethod(cls, uploadFile, ^id(IMP original) {
         return ^NSURLSessionUploadTask *(NSURLSession *session, NSURLRequest *request, NSURL *file) {
+            if (session.delegate) { [self hookDelegate:session.delegate]; }
             NSURLSessionUploadTask *task = ((NSURLSessionUploadTask * (*)(id, SEL, id, id))original)(session, uploadFile, request, file);
             [recorder setUploadBody:file forTask:task];
             return task;
@@ -176,6 +191,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
     SEL uploadDataHandler = @selector(uploadTaskWithRequest:fromData:completionHandler:);
     LayerLensHookMethod(cls, uploadDataHandler, ^id(IMP original) {
         return ^NSURLSessionUploadTask *(NSURLSession *session, NSURLRequest *request, NSData *body, LayerLensDataHandler handler) {
+            if (session.delegate) { [self hookDelegate:session.delegate]; }
             __block __weak NSURLSessionTask *weakTask = nil;
             NSURLSessionUploadTask *task = ((NSURLSessionUploadTask * (*)(id, SEL, id, id, id))original)(session, uploadDataHandler, request, body, handler ? [self wrapDataHandler:handler task:^NSURLSessionTask *{
                 return weakTask;
@@ -192,6 +208,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
     SEL uploadFileHandler = @selector(uploadTaskWithRequest:fromFile:completionHandler:);
     LayerLensHookMethod(cls, uploadFileHandler, ^id(IMP original) {
         return ^NSURLSessionUploadTask *(NSURLSession *session, NSURLRequest *request, NSURL *file, LayerLensDataHandler handler) {
+            if (session.delegate) { [self hookDelegate:session.delegate]; }
             __block __weak NSURLSessionTask *weakTask = nil;
             NSURLSessionUploadTask *task = ((NSURLSessionUploadTask * (*)(id, SEL, id, id, id))original)(session, uploadFileHandler, request, file, handler ? [self wrapDataHandler:handler task:^NSURLSessionTask *{
                 return weakTask;
@@ -209,6 +226,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
         SEL sel = NSSelectorFromString(name);
         LayerLensHookMethod(cls, sel, ^id(IMP original) {
             return ^NSURLSessionDownloadTask *(NSURLSession *session, id target, LayerLensDownloadHandler handler) {
+                if (session.delegate) { [self hookDelegate:session.delegate]; }
                 if (!handler) {
                     return ((NSURLSessionDownloadTask * (*)(id, SEL, id, id))original)(session, sel, target, handler);
                 }

@@ -46,6 +46,11 @@ swift_test() {
   "$run_dir/$name"
 }
 
+printf '[Objective-C] network-hooks\n'
+xcrun clang -fobjc-arc -fblocks -framework Foundation -I Pod/Classes/Network \
+  Pod/Classes/Network/LayerLensNetworkHooks.m Mac/Tests/NetworkHooksTests.m -o "$run_dir/network-hooks"
+"$run_dir/network-hooks"
+
 swift_test home-button Mac/LayerLens/SimulatorBridge.swift Mac/Tests/SimHomeButtonTests.swift
 swift_test live-video Mac/LayerLens/LiveVideo.swift Mac/Tests/LiveVideoTests.swift
 swift_test target-history Mac/LayerLens/TargetHistory.swift Mac/Tests/TargetHistoryTests.swift

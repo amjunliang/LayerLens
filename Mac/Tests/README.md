@@ -1,7 +1,7 @@
 # Mac 回归测试
 
 这些是维护用的回归测试，不是备份或构建产物，不参与 Mac Release，也不进入 Pod 包。
-本次交付保持 Pod 源码不变，旧 Pod 的兼容行为由 Mac 本地测试服务验证，不需要升级设备端 SDK。
+旧 Pod 的兼容行为由 Mac 本地测试服务验证；首次开启前已有 Session 的代理接入由隔离的 Objective-C 测试验证。
 
 ## 运行
 
@@ -11,7 +11,7 @@
 bash Mac/Tests/run.sh
 ```
 
-脚本依次编译和运行全部 Swift 测试，再运行 Node 测试。遇到失败立即停止。
+脚本先运行 Objective-C 抓包 hook 测试，再依次编译和运行全部 Swift 测试，最后运行 Node 测试。遇到失败立即停止。
 部分测试使用本机回环网络、独立 PTY 和临时 Git 仓库；不操作已连接设备、用户仓库或实际日志/抓包数据。
 视频测试使用本机 VideoToolbox 编码器。
 
@@ -31,7 +31,8 @@ bash Mac/Tests/run.sh
 | 连接取消、文件句柄、缓存回收与进程退出 | `ConnectionLifecycleTests.swift` |
 | 日志写盘、HTTP 截断、抓包保存及释放确认 | `DataIntegrityTests.swift` |
 | 旧 Pod 的无序回放和正文复用 | `LegacyNetworkReconnectTests.swift` |
-| 逐条退避、释放确认恢复、设备及进程隔离 | `NetworkRecorderRecoveryTests.swift` |
+| 首次开启前已有 Session 的代理数据及完成回调 | `NetworkHooksTests.m` |
+| 逐条退避、释放确认恢复、设备及进程隔离、断线回放恢复、无定时补查、长请求保护和重启中断 | `NetworkRecorderRecoveryTests.swift` |
 | 目标历史无效标识清理、有效记录保留 | `TargetHistoryTests.swift`、`AutoFollowTests.cjs` |
 | 日志当前启动隔离、真实流重置、重连续接与历史保存 | `LogLaunchTests.swift` |
 | 日志持久清空、重连边界、设备与启动隔离、写盘失败保护 | `LogClearTests.swift` |
