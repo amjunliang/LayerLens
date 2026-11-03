@@ -445,7 +445,7 @@ function setupPageActivity() {
     }
     if (pageActivity.ready) resumePageActivity();
   };
-  window.addEventListener('pagehide', () => liveStop());
+  window.addEventListener('pagehide', () => { cancelSwitch(); liveStop(); });
   window.addEventListener('focus', update);
   window.addEventListener('blur', update);
   window.addEventListener('layerlens-window-focus', update);
@@ -629,19 +629,13 @@ let refreshSeq = 0;
 async function refresh() {
   if (!pageActivity.active) { pageActivity.pending = true; return; }
   pageActivity.pending = false;
-  pageActivity.controller?.abort();
-  const controller = new AbortController();
-  pageActivity.controller = controller;
-  const seq = ++refreshSeq;
-  try {
-    const roots = await api('/api/hierarchy', { signal: controller.signal });
-    if (seq !== refreshSeq || !pageActivity.active) return;
-    applyHierarchy(roots);
-  } catch (e) {
-    if (seq === refreshSeq && e.name !== 'AbortError') showRefreshError(e);
-  } finally {
-    if (pageActivity.controller === controller) pageActivity.controller = null;
+  // 激活和层级读取属于同一任务; 激活期间刷新只记录需要的新层级。
+  if (pendingSwitch) {
+    pendingSwitch.needsHierarchy = true;
+    return pendingSwitch.promise;
   }
+  const job = targetTask || beginTargetTask(targets.deviceId, targets.bundleId);
+  return readTaskHierarchy(job);
 }
 
 function showRefreshError(e) {
@@ -858,6 +852,7 @@ function scrollToSelected() {
 
 // 选中路径记忆: 父节点 key -> 上次经过的子节点 key, → 时原路返回
 const childTrail = new Map();
+let stageNavigation = false;
 
 function rememberTrail(node) {
   for (let n = node; n && n.parent; n = n.parent) childTrail.set(n.parent.key, n.key);
@@ -929,6 +924,13 @@ function handleTreeKey(key, alt = false) {
   }
   showSelectionTip();
   return true;
+}
+
+// 舞台只交换原有两组方向键, 复用层级树导航的全部行为。
+function handleStageKey(key, alt = false) {
+  if (state.mode === 'live' || (alt && key !== 'ArrowUp')) return false;
+  const mapped = { ArrowUp: 'ArrowLeft', ArrowDown: 'ArrowRight', ArrowLeft: 'ArrowUp', ArrowRight: 'ArrowDown' }[key];
+  return mapped ? handleTreeKey(mapped, alt) : false;
 }
 
 // MARK: - Breadcrumb
@@ -1003,22 +1005,12 @@ let modeSeq = 0;
 
 async function setMode(mode) {
   // 每次调用都作废还在取层级的切换, 如取层级期间又点回实时
-  const seq = ++modeSeq;
+  ++modeSeq;
   if (mode === state.mode) return;
-  const source = appState.source, deviceId = targets.deviceId, bundleId = targets.bundleId;
-  const current = () => seq === modeSeq && appState.source === source && targets.deviceId === deviceId && targets.bundleId === bundleId;
   const fromLive = state.mode === 'live';
-  // 从实时画面切出时层级已过期: 先取到新层级再切换, 只绘制一次, 避免先画旧层级再刷新
-  let roots = null;
-  if (fromLive && targets.bundleId && currentDevice()) {
-    ++refreshSeq;
-    try {
-      roots = await api('/api/hierarchy');
-    } catch (e) {
-      if (current()) showRefreshError(e);
-    }
-    if (!current() || state.mode !== 'live') return;
-  }
+  // 模式立即响应; 是否等待激活、读取层级由当前切换任务决定。
+  const needsHierarchy = fromLive && targets.bundleId && currentDevice();
+  if (mode === 'live') pageActivity.controller?.abort();
   // 2D 与实时画面共用一套视角, 3D 单独一套; 切换时各自保留上次的缩放和平移
   const kind = (m) => (m === '3d' ? 'depth' : 'plan');
   const fromKind = kind(state.mode);
@@ -1045,10 +1037,10 @@ async function setMode(mode) {
     return;
   }
   liveSuspend();
-  if (roots) applyHierarchy(roots);
-  else renderCanvas();
+  renderCanvas();
   if (keepView) applyStageTransform();
   else fitView();
+  if (needsHierarchy) await refresh();
 }
 
 // 小屏用单栏 + 工具栏两端开关切换面板: 触屏窄屏, 或桌面窗口窄到工具栏放不下; 其余按宽度自动收起侧栏
@@ -1120,6 +1112,7 @@ function drawableNodes(win) {
 
 function syncModeUI() {
   syncOfflineView();
+  renderTargetTask();
   document.body.classList.toggle('mode-3d', state.mode === '3d');
   document.body.classList.toggle('mode-live', state.mode === 'live');
   $('liveWrap').hidden = state.mode !== 'live';
@@ -2323,7 +2316,7 @@ function receiveTargetForeground(deviceId, bundleId, foreground) {
   if (!foreground && appState.value !== 'background') {
     setAppState('background');
     checkForeground();
-  } else if (foreground && appState.value === 'background') {
+  } else if (foreground && (appState.value === 'background' || appState.value === 'offline')) {
     setAppState('online');
     if (state.mode !== 'live') refresh();
   }
@@ -2411,8 +2404,10 @@ let targetLoad = null;
 async function loadTargets() {
   if (targetLoad) return targetLoad;
   const epoch = targetStateHub.epoch, version = targetStateHub.inventoryRevision;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
   targetLoad = (async () => {
-    const res = await fetch('/api/targets', { cache: 'no-store' });
+    const res = await fetch('/api/targets', { cache: 'no-store', signal: controller.signal });
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
     // 已有更新的原生通知时, 在途的 HTTP 快照只作为过期结果丢弃。
@@ -2420,7 +2415,7 @@ async function loadTargets() {
     ensureTargetStateSocket();
     syncSelectedTargetState();
   })();
-  try { await targetLoad; } finally { targetLoad = null; }
+  try { await targetLoad; } finally { clearTimeout(timer); targetLoad = null; }
 }
 
 // 模拟器启动 / 关闭: 等列表反映出结果(出现在或离开已启动设备中)再清除进行中状态, 超时也清除
@@ -2559,7 +2554,8 @@ const ACTIVATE_DEBOUNCE_MS = 150;
 
 // failure: 启动失败的原因, 不再切换; hint: 已启动但没有在前台响应, 照常切换并提示可能的原因
 // signal: 用户切到别处时取消, 返回 { cancelled: true }
-async function activateApp(deviceId, bundleId, signal) {
+async function activateApp(deviceId, bundleId, signal, job) {
+  if (signal?.aborted) return { cancelled: true };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ACTIVATE_TIMEOUT_MS);
   const cancel = () => controller.abort();
@@ -2568,7 +2564,7 @@ async function activateApp(deviceId, bundleId, signal) {
     const response = await fetch('/api/hub/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device: deviceId, app: bundleId }),
+      body: JSON.stringify({ device: deviceId, app: bundleId, owner: job ? targetTaskOwner : undefined, task: job?.id, order: job?.order }),
       signal: controller.signal,
     });
     const result = await response.json().catch(() => ({}));
@@ -2582,69 +2578,225 @@ async function activateApp(deviceId, bundleId, signal) {
     if (signal?.aborted) return { cancelled: true };
     if (controller.signal.aborted) return { failure: t(LAUNCH_FAILURES.timeout) };
     // 请求本身失败(如 LayerLens 正在重启)时仍切换, 由页面提示连接状态
-    return {};
+    return job ? {failure: t('切换失败: {0}', e.message)} : {};
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', cancel);
   }
 }
 
-// 进行中的切换 { deviceId, bundleId, controller, timer, action }: 以最后一次点击为准
+// 每次选择拥有独立任务; 任务身份保留到下一次选择, 所有迟到结果必须检查它。
 let pendingSwitch = null;
+let targetTask = null;
+let targetTaskOrder = 0;
+const targetTaskOwner = crypto.randomUUID();
+
+function taskCurrent(job) {
+  return targetTask === job && !job.controller.signal.aborted && targets.deviceId === job.deviceId && targets.bundleId === job.bundleId;
+}
+
+function renderTargetTask() {
+  const status = $('targetTaskStatus');
+  if (!status) return;
+  const job = targetTask;
+  const busy = job && taskCurrent(job) && ['queued', 'activating', 'syncing', 'hierarchy'].includes(job.phase) && (job.phase !== 'hierarchy' || hierarchyAvailable());
+  status.hidden = state.mode === 'live' || !busy;
+  $('targetTaskText').textContent = !busy ? '' : job.phase === 'hierarchy' ? t('正在获取层级…') : t('正在切换到 {0}…', job.appName || job.bundleId);
+}
+
+function setTaskPhase(job, phase) {
+  if (!taskCurrent(job)) return;
+  job.phase = phase;
+  renderTargetTask();
+  renderTargetMenu();
+}
 
 function cancelSwitch() {
-  const job = pendingSwitch;
+  const job = targetTask;
   if (!job) return null;
+  const wasBusy = ['queued', 'activating', 'syncing', 'hierarchy'].includes(job.phase);
+  targetTask = null;
   pendingSwitch = null;
   clearTimeout(job.timer);
   job.controller.abort();
+  pageActivity.controller?.abort();
+  ++refreshSeq;
+  ++appInfoSeq;
+  resetImages();
+  cancelTaskActivation(job);
+  job.phase = 'cancelled';
   hideToast();
+  renderTargetTask();
   renderTargetMenu();
+  return wasBusy ? job : null;
+}
+
+// 网页超时/失败也要撤掉后台排队, 防止提示失败以后才把旧 App 拉到前台。
+function cancelTaskActivation(job) {
+  if (!job.activationSent) return;
+  job.activationSent = false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  fetch('/api/hub/activation/cancel', {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({owner: targetTaskOwner, task: job.id, order: job.order}), signal: controller.signal}).catch(() => {}).finally(() => clearTimeout(timer));
+}
+
+function beginTargetTask(deviceId, bundleId, appName = '') {
+  cancelSwitch();
+  const job = {id: crypto.randomUUID(), order: ++targetTaskOrder, deviceId, bundleId, appName, controller: new AbortController(), timer: 0, phase: 'ready', action: 'connect', promise: null, needsHierarchy: false};
+  targetTask = job;
   return job;
 }
 
-// 页面已先切到目标 App, 激活在短暂去抖后异步完成. 旧任务的结果不会再修改当前页面.
-function activateSelectedAppLater(deviceId, bundleId, appName) {
-  const job = { deviceId, bundleId, controller: new AbortController(), timer: 0, action: 'switch' };
-  pendingSwitch = job;
-  renderTargetMenu();
-  job.timer = setTimeout(async () => {
-    job.timer = 0;
-    const result = await activateApp(deviceId, bundleId, job.controller.signal);
-    if (pendingSwitch !== job) return;
-    const selected = () => targets.deviceId === deviceId && targets.bundleId === bundleId;
-    if (result.failure) {
-      if (selected()) {
-        try {
-          sessionStorage.setItem(STAY_OFFLINE_KEY, deviceId + '|' + bundleId);
-        } catch (e) {
-          // 不可用时照常跟随前台 App
-        }
-        setAppState('offline');
+// 请求同时受任务取消和阶段超时约束; 新任务不会等旧请求释放才能开始。
+async function taskRequest(job, path, timeout = 5000, options = {}) {
+  if (!taskCurrent(job)) throw new DOMException('Cancelled', 'AbortError');
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  job.controller.signal.addEventListener('abort', cancel, {once: true});
+  let expired = false;
+  const timer = setTimeout(() => { expired = true; controller.abort(); }, timeout);
+  try {
+    const response = await fetch(path, {...options, signal: controller.signal});
+    const value = await response.json();
+    if (!taskCurrent(job)) throw new DOMException('Cancelled', 'AbortError');
+    if (!response.ok) throw new Error(value.error || 'HTTP ' + response.status);
+    return value;
+  } catch (error) {
+    if (expired) throw new Error(t('请求超时, 请重试'));
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    job.controller.signal.removeEventListener('abort', cancel);
+  }
+}
+
+function hierarchyAvailable() {
+  return !['background', 'offline', 'restarting'].includes(appState.value);
+}
+
+async function readTaskHierarchy(job) {
+  if (!hierarchyAvailable()) return;
+  if (!taskCurrent(job) || !job.bundleId || state.mode === 'live') return;
+  pageActivity.controller?.abort();
+  const controller = new AbortController();
+  pageActivity.controller = controller;
+  // 一个任务内再次刷新/切模式只保留最后一次层级请求。
+  const cancel = () => controller.abort();
+  job.controller.signal.addEventListener('abort', cancel, {once: true});
+  let expired = false;
+  const timer = setTimeout(() => { expired = true; controller.abort(); }, 5000);
+  const seq = ++refreshSeq;
+  setTaskPhase(job, 'hierarchy');
+  try {
+    const roots = await api(`/api/hierarchy`, {signal: controller.signal});
+    if (!taskCurrent(job) || seq !== refreshSeq || controller.signal.aborted || !hierarchyAvailable() || state.mode === 'live' || !pageActivity.active) return;
+    applyHierarchy(roots);
+    setTaskPhase(job, 'done');
+  } catch (error) {
+    if (!taskCurrent(job) || seq !== refreshSeq) return;
+    if (error.name === 'AbortError' && !expired) return;
+    job.error = expired ? t('请求超时, 请重试') : error.message;
+    setTaskPhase(job, 'failed');
+    showRefreshError(new Error(job.error));
+  } finally {
+    clearTimeout(timer);
+    job.controller.signal.removeEventListener('abort', cancel);
+    if (pageActivity.controller === controller) pageActivity.controller = null;
+    if (taskCurrent(job) && seq === refreshSeq && job.phase === 'hierarchy') setTaskPhase(job, 'ready');
+  }
+}
+
+// 激活命令的结果不等于 App 的前后台状态; 已确认的状态连接优先。
+function observedTargetState(job) {
+  const entry = targetStateHub.ready ? targetStateHub.states.get(targetStateKey(job.deviceId, job.bundleId)) : null;
+  if (entry?.removed) return 'offline';
+  const app = entry || currentApp();
+  if (app && appInBackground(app)) return 'background';
+  if (app?.stateConnected && (app.foreground === true || app.foreground === 1)) return 'online';
+  return null;
+}
+
+async function runTargetTask(job) {
+  try {
+    setTaskPhase(job, 'activating');
+    job.activationSent = true;
+    const result = await activateApp(job.deviceId, job.bundleId, job.controller.signal, job);
+    if (!taskCurrent(job) || result.cancelled) return;
+    const observed = observedTargetState(job);
+    if (result.failure || (result.hint && observed !== 'online')) {
+      if (result.failure) cancelTaskActivation(job);
+      else job.activationSent = false;
+      job.error = result.failure || result.hint;
+      if (result.failure) {
+        try { sessionStorage.setItem(STAY_OFFLINE_KEY, job.deviceId + '|' + job.bundleId); } catch (_) {}
       }
-      toast(t('{0}. 显示的是保存在本机的日志和抓包', result.failure.replace(/[.。]$/, '')), true, true);
-    } else if (result.hint) {
-      if (selected()) setAppState('background');
-      toast(result.hint, true, true);
-    } else if (selected()) {
-      // waitForApp 已确认新端口可用; 更新一次列表后再取层级, 避免连到挂起前的旧端口
-      try {
-        await loadTargets();
-      } catch (e) {
-        // 事件流仍会自动重连
-      }
-      if (pendingSwitch !== job || !selected()) return;
-      appState.instanceId = currentApp()?.instanceId || '';
-      appState.warning = compatibilityWarning(currentApp());
-      setAppState('online');
-      loadAppInfo();
-      if (state.mode !== 'live') refresh();
+      setAppState(observed || 'offline', observed ? undefined : job.error);
+      setTaskPhase(job, 'failed');
+      toast(result.failure ? t('{0}. 显示的是保存在本机的日志和抓包', job.error.replace(/[.。]$/, '')) : job.error, true, true);
+      return;
     }
-    if (pendingSwitch !== job) return;
-    pendingSwitch = null;
-    renderTargetMenu();
-    syncOfflineView();
-  }, ACTIVATE_DEBOUNCE_MS);
+    job.activationSent = false;
+    setTaskPhase(job, 'syncing');
+    const epoch = targetStateHub.epoch, version = targetStateHub.inventoryRevision;
+    try {
+      const inventory = await taskRequest(job, '/api/targets', 3000);
+      if (taskCurrent(job) && epoch === targetStateHub.epoch && version === targetStateHub.inventoryRevision) applyTargetInventory(inventory);
+    } catch (error) { if (!taskCurrent(job)) return; } // 状态推送兜底, 列表失败不阻断任务。
+    if (!taskCurrent(job)) return;
+    const instance = currentApp()?.instanceId || '';
+    if (appState.instanceId && instance && instance !== appState.instanceId) {
+      setRunning(false);
+      clearHierarchy();
+    }
+    if (instance) appState.instanceId = instance;
+    const confirmed = observedTargetState(job);
+    if (confirmed !== 'offline') appState.dropped = false;
+    appState.warning = compatibilityWarning(currentApp());
+    setAppState(confirmed || 'online');
+    if (confirmed !== 'offline') await loadAppInfo(job);
+    if (!taskCurrent(job)) return;
+    if (state.mode !== 'live' && pageActivity.active) {
+      do {
+        job.needsHierarchy = false;
+        await readTaskHierarchy(job);
+      } while (taskCurrent(job) && job.needsHierarchy && state.mode !== 'live' && pageActivity.active);
+    }
+    else { pageActivity.pending = true; setTaskPhase(job, 'done'); }
+  } catch (error) {
+    if (!taskCurrent(job)) return;
+    cancelTaskActivation(job);
+    job.error = error.message;
+    setTaskPhase(job, 'failed');
+    toast(t('切换失败: {0}', job.error), true);
+  } finally {
+    if (pendingSwitch === job) {
+      pendingSwitch = null;
+      if (taskCurrent(job) && !['failed', 'done'].includes(job.phase)) setTaskPhase(job, 'done');
+      renderTargetTask();
+      renderTargetMenu();
+      syncOfflineView();
+    }
+  }
+}
+
+function activateSelectedAppLater(deviceId, bundleId, appName, action = 'switch') {
+  // 选择动作刚创建、尚未发出的任务可直接配置; 重试则创建全新任务。
+  const job = targetTask && taskCurrent(targetTask) && targetTask.action === 'connect' && targetTask.phase === 'ready' ? targetTask : beginTargetTask(deviceId, bundleId, appName);
+  job.appName = appName;
+  job.action = action;
+  if (liveAvailable()) setMode('live');
+  pendingSwitch = job;
+  setTaskPhase(job, 'queued');
+  job.promise = new Promise(resolve => {
+    const cancelled = () => resolve();
+    job.controller.signal.addEventListener('abort', cancelled, {once: true});
+    job.timer = setTimeout(async () => {
+      job.timer = 0;
+      try { if (taskCurrent(job)) await runTargetTask(job); }
+      finally { job.controller.signal.removeEventListener('abort', cancelled); resolve(); }
+    }, ACTIVATE_DEBOUNCE_MS);
+  });
+  return job.promise;
 }
 
 // 兼容旧页面重载时暂存的提示
@@ -2660,7 +2812,8 @@ function showPendingToast() {
   }
 }
 
-function switchTarget(deviceId, bundleId) {
+function switchTarget(deviceId, bundleId, activating = false, appName = '') {
+  cancelSwitch();
   targets.pinned = false;
   targets.followRevision = (targets.followRevision || 0) + 1;
   if (deviceId !== targets.deviceId || bundleId !== targets.bundleId) setRunning(false);
@@ -2678,7 +2831,7 @@ function switchTarget(deviceId, bundleId) {
   rememberTarget(deviceId, bundleId);
   // 先连接设备画面，App 激活与层级请求独立进行，不再整页刷新。
   syncLive();
-  if (bundleId) switchTargetInPlace(bundleId);
+  if (bundleId) switchTargetInPlace(bundleId, activating, appName);
   else {
     ++appInfoSeq;
     clearHierarchy();
@@ -2873,6 +3026,11 @@ function targetAppRow(deviceId, app, background) {
   row.title = !away ? `${app.bundleId} · ${t('端口 {0}', app.port)}` : live ? `${app.bundleId} · ${t('已挂起或退出, 点击启动或切到前台')}` : `${app.bundleId} · ${t('设备未连接, 连上后自动恢复')}`;
   row.addEventListener('click', async () => {
     hidePopovers();
+    // 已选中且在线时没有新目标; 保留正在加载的详情、截图和层级。
+    if (current && !inBackground && !away && !pendingSwitch) {
+      if (!appState.connected) watchApp();
+      return;
+    }
     // 新的点击取代进行中的切换
     const cancelled = cancelSwitch();
     // 未连接的 App 直接切过去显示保存的日志和抓包, 同时尝试启动, 启动后自动连接; 启动失败只提示
@@ -2883,11 +3041,11 @@ function targetAppRow(deviceId, app, background) {
         // 不可用时照常跟随前台 App
       }
       if (deviceId === targets.deviceId) {
-        switchTargetInPlace(app.bundleId);
+        switchTargetInPlace(app.bundleId, live, app.appName);
         if (live) launchAwayApp(deviceId, app.bundleId, app.appName);
         return;
       }
-      switchTarget(deviceId, app.bundleId);
+      switchTarget(deviceId, app.bundleId, live, app.appName);
       if (live) launchAwayApp(deviceId, app.bundleId, app.appName);
       return;
     }
@@ -2899,7 +3057,7 @@ function targetAppRow(deviceId, app, background) {
         activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
         return;
       }
-      switchTarget(deviceId, app.bundleId);
+      switchTarget(deviceId, app.bundleId, true, app.appName);
       activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
       return;
     }
@@ -2907,7 +3065,7 @@ function targetAppRow(deviceId, app, background) {
     if (current) {
       // 切回已连接的当前 App: 取消的切换在同一设备上时, 启动请求已发出, 那个 App 可能已被拉到前台, 把当前 App 切回前台
       if (cancelled && cancelled.deviceId === deviceId && live && !(inBackground || away)) {
-        activateApp(deviceId, app.bundleId);
+        activateSelectedAppLater(deviceId, app.bundleId, app.appName);
       }
       if (cancelled) toast(t('已取消切换'));
       if (!appState.connected) watchApp();
@@ -2959,20 +3117,7 @@ function stayingOffline() {
 const PENDING_LAUNCH_KEY = 'layerlens_pending_launch';
 
 function launchAwayApp(deviceId, bundleId, appName) {
-  const job = { deviceId, bundleId, controller: new AbortController(), timer: 0, action: 'launch' };
-  pendingSwitch = job;
-  renderTargetMenu();
-  syncOfflineView();
-  job.timer = setTimeout(async () => {
-    job.timer = 0;
-    const { failure, hint } = await activateApp(deviceId, bundleId, job.controller.signal);
-    if (pendingSwitch !== job) return;
-    pendingSwitch = null;
-    renderTargetMenu();
-    syncOfflineView();
-    if (failure) toast(t('{0}. 显示的是保存在本机的日志和抓包', failure.replace(/[.。]$/, '')), true, true);
-    else if (hint) toast(hint, true, true);
-  }, ACTIVATE_DEBOUNCE_MS);
+  return activateSelectedAppLater(deviceId, bundleId, appName, 'launch');
 }
 
 function resumePendingLaunch() {
@@ -3033,6 +3178,8 @@ function setTargetPinned(on) {
 }
 
 function switchTargetInPlace(bundleId, activating = false, appName = '') {
+  const changed = bundleId !== targets.bundleId;
+  beginTargetTask(targets.deviceId, bundleId, appName);
   if (bundleId !== targets.bundleId) {
     targets.pinned = false;
     targets.followRevision = (targets.followRevision || 0) + 1;
@@ -3067,6 +3214,8 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
     loadAppInfo();
   }
   clearHierarchy();
+  // 换目标先显示设备实时画面, 用户再进入 2D/3D 时读取新层级。
+  if ((changed || activating) && liveAvailable()) setMode('live');
   if (!activating && state.mode !== 'live') refresh();
 }
 
@@ -3117,6 +3266,7 @@ function showDeviceOnly() {
 // 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
 // 切回 2D / 3D 或选择元素时会重新获取
 function clearHierarchy() {
+  pageActivity.controller?.abort();
   ++refreshSeq;
   resetImages();
   state.roots = [];
@@ -3331,13 +3481,15 @@ function syncSelectedTargetState() {
 // 刚连上时首页还未加载完(实测约 2s 后启动遮罩才移除), 过早拉取的层级会过期.
 // 重启后通常停在首页, 模拟器上先切到实时画面便于操作到目标页, 切回 2D/3D 时会刷新层级
 async function reconnected() {
-  const selection = appState.source;
+  if (pendingSwitch) return;
+  const selection = appState.source, job = targetTask;
+  const current = () => appState.source === selection && targetTask === job && !pendingSwitch;
   try {
     await loadTargets();
   } catch (e) {
     // 取不到时按重启处理
   }
-  if (appState.source !== selection) return;
+  if (!current()) return;
   if (appState.instanceId && currentApp()?.instanceId === appState.instanceId) {
     appState.dropped = false;
     // 等待列表期间事件流可能已推送在后台, 不覆盖
@@ -3346,7 +3498,7 @@ async function reconnected() {
   }
   const toLive = liveAvailable() && state.mode !== 'live';
   if (toLive) await setMode('live');
-  if (appState.source !== selection) return;
+  if (!current()) return;
   // 实时画面一直连着, 不整页重新加载, 原地更新 App 信息; oid 已重新分配, 旧层级作废
   if (state.mode === 'live') {
     appState.dropped = false;
@@ -3361,11 +3513,14 @@ async function reconnected() {
     return;
   }
   setAppState('back');
-  setTimeout(() => location.reload(), 3000);
+  setTimeout(() => { if (current()) location.reload(); }, 3000);
 }
 
 function setAppState(value, message, link) {
   appState.value = value;
+  // 明确进入后台/离线后停止层级读取, 保留最后一份可查看的层级。
+  if (!hierarchyAvailable() && targetTask?.phase === 'hierarchy') pageActivity.controller?.abort();
+  renderTargetTask();
   // 连上过就有层级可看, 之后再离线不再遮住画布
   if (value === 'online') appState.blank = false;
   appState.deviceGone = currentDeviceGone();
@@ -4084,12 +4239,14 @@ async function loadDetail() {
   renderDetail(node);
   if (!node.oid) return;
   try {
-    const detail = await api(`/api/detail?oid=${node.oid}`);
-    if (!pageActivity.active || state.selected !== node.key) return;
+    const job = targetTask;
+    const path = `/api/detail?oid=${node.oid}`;
+    const detail = await (job ? taskRequest(job, targetBase() + path) : api(path));
+    if (!pageActivity.active || state.nodes.get(node.key) !== node || state.selected !== node.key || state.tab !== 'attr') return;
     state.detail = detail;
     renderDetail(node);
   } catch (e) {
-    toast(e.message, true);
+    if (e.name !== 'AbortError' && state.nodes.get(node.key) === node && state.tab === 'attr') toast(e.message, true);
   }
 }
 
@@ -4444,7 +4601,8 @@ async function modify(node, attr, value) {
 
 async function loadClassInfo(node) {
   if (!pageActivity.active) { pageActivity.pending = true; return; }
-  const target = state.classTarget || { oid: node.viewOid || node.oid, name: node.cls };
+  const requestedTarget = state.classTarget;
+  const target = requestedTarget || { oid: node.viewOid || node.oid, name: node.cls };
   const container = $('detail');
   if (!target.oid) {
     container.replaceChildren(el('div', 'empty', t('该节点没有对应的 OC 对象')));
@@ -4452,11 +4610,13 @@ async function loadClassInfo(node) {
   }
   container.replaceChildren(el('div', 'empty', t('加载中...')));
   try {
-    const info = await api(`/api/class?oid=${target.oid}`);
-    if (!pageActivity.active || state.selected !== node.key || state.tab !== 'class') return;
+    const job = targetTask;
+    const path = `/api/class?oid=${target.oid}`;
+    const info = await (job ? taskRequest(job, targetBase() + path) : api(path));
+    if (!pageActivity.active || state.nodes.get(node.key) !== node || state.selected !== node.key || state.tab !== 'class' || state.classTarget !== requestedTarget) return;
     renderClassInfo(info, node);
   } catch (e) {
-    container.replaceChildren(el('div', 'empty', e.message));
+    if (e.name !== 'AbortError' && state.nodes.get(node.key) === node && state.tab === 'class' && state.classTarget === requestedTarget) container.replaceChildren(el('div', 'empty', e.message));
   }
 }
 
@@ -4819,6 +4979,10 @@ const SHORTCUT_GROUPS = [
     [['→'], '展开, 再按进入子节点'],
   ]],
   ['画布', false, [
+    [['↑'], '选中父节点'],
+    [['⌥', '↑'], '收起'],
+    [['↓'], '展开, 再按进入子节点'],
+    [['←', '→'], '上一个 / 下一个节点'],
     [['双指滑动'], '平移画布'],
     [['空格', '拖动'], '平移画布, 也可中键拖动'],
     [['捏合'], '缩放, 也可 ⌘ + 滚轮'],
@@ -7828,6 +7992,9 @@ function setup() {
   showPendingToast();
   resumePendingLaunch();
   window.addEventListener('pagehide', saveViewState);
+  document.addEventListener('pointerdown', (e) => {
+    stageNavigation = e.target instanceof Element && !!e.target.closest('#stageWrap');
+  }, true);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveViewState();
   });
@@ -7994,11 +8161,11 @@ function setup() {
       return;
     }
     if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
-    if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
     if (gitHandleKey(e)) {
       e.preventDefault();
       return;
     }
+    if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
     if (e.code === 'Space' && state.mode !== 'live') {
       // 阻止页面滚动和触发聚焦中的按钮
       e.preventDefault();
@@ -8010,7 +8177,12 @@ function setup() {
       return;
     }
     if (e.key === 'r' && !e.metaKey && !e.ctrlKey) refresh();
-    if (!e.metaKey && !e.ctrlKey && (!e.altKey || e.key === 'ArrowLeft') && handleTreeKey(e.key, e.altKey)) e.preventDefault();
+    if (!e.metaKey && !e.ctrlKey) {
+      const handled = stageNavigation && state.mode !== 'live'
+        ? handleStageKey(e.key, e.altKey)
+        : (!e.altKey || e.key === 'ArrowLeft') && handleTreeKey(e.key, e.altKey);
+      if (handled) e.preventDefault();
+    }
     // 未选中页面文本时, ⌘C 复制选中节点路径
     if (e.key === 'c' && (e.metaKey || e.ctrlKey) && !window.getSelection().toString()) {
       const node = state.nodes.get(state.selected);
@@ -8088,18 +8260,18 @@ async function start() {
 
 let appInfoSeq = 0;
 
-function loadAppInfo() {
+function loadAppInfo(job = targetTask) {
   renderSelectedAppName();
   const seq = ++appInfoSeq;
   const key = logTargetKey();
-  return api('/api/app').then((info) => {
-    if (seq !== appInfoSeq || key !== logTargetKey()) return;
+  return (job ? taskRequest(job, targetBase() + '/api/app', 3000) : api('/api/app')).then((info) => {
+    if (seq !== appInfoSeq || key !== logTargetKey() || (job && !taskCurrent(job))) return;
     renderSelectedAppName(info.appName);
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
     updateAppMeta();
   }).catch((e) => {
-    if (seq !== appInfoSeq || key !== logTargetKey()) return;
+    if (seq !== appInfoSeq || key !== logTargetKey() || (job && !taskCurrent(job))) return;
     // App 刚换端口等情况下取不到, 仍显示名称, 事件流重连后会重新加载
     renderSelectedAppName();
     toast(e.message, true);

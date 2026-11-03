@@ -236,7 +236,7 @@ console.log('PASS device selection and shared offline states/actions across 2D, 
 (async () => {
   let reply, requests = 0, applied = '';
   const hub = {epoch: 'one', inventoryRevision: 1};
-  const ctx = vm.createContext({targetStateHub: hub,
+  const ctx = vm.createContext({targetStateHub: hub, AbortController, setTimeout, clearTimeout,
     fetch: () => { requests++; return new Promise(resolve => { reply = resolve; }); },
     applyTargetInventory: data => { applied = data.name; }, ensureTargetStateSocket: () => {}, syncSelectedTargetState: () => {},
   });

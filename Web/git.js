@@ -1335,10 +1335,34 @@ function gitSetupSplitter() {
   });
 }
 
-// 鼠标最后点在改动面板内且选中了文件时, 空格暂存或取消暂存选中的文件: 已暂存的取消暂存, 其余暂存
+// 只在改动面板处理列表导航; DOM 顺序即当前可见顺序, 自动跳过折叠的子项。
 function gitHandleKey(e) {
-  if (e.code !== 'Space' || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return false;
-  if (!git.focused || !gitVisible() || git.selected?.kind !== 'files') return false;
+  if (!git.focused || !gitVisible() || e.metaKey || e.ctrlKey || e.altKey) return false;
+  if (e.target instanceof Element && e.target.closest('textarea, select, input:not(.git-check), [contenteditable]')) return false;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (git.selected?.kind !== 'files') return false;
+    const row = [...$('gitFiles').querySelectorAll('.git-dir-row')].find(row => row.dataset.gitRowKey === git.selected.dir);
+    if (row && row.classList.contains('collapsed') === (e.key === 'ArrowRight')) {
+      row.querySelector('.git-chevron').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
+    return true;
+  }
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    const rows = [...$('gitFiles').querySelectorAll('.git-file, .git-dir-row')];
+    if (!rows.length || git.selected?.kind === 'commits') return false;
+    const selected = rows.filter(row => row.classList.contains('sel'));
+    const from = e.key === 'ArrowDown' ? selected.at(-1) : selected[0];
+    const index = rows.indexOf(from);
+    const next = index < 0 ? (e.key === 'ArrowDown' ? rows[0] : rows.at(-1)) : rows[index + (e.key === 'ArrowDown' ? 1 : -1)];
+    if (next) {
+      const key = next.dataset.gitRowKey;
+      next.click();
+      [...$('gitFiles').querySelectorAll('.git-file, .git-dir-row')].find(row => row.dataset.gitRowKey === key)?.scrollIntoView({ block: 'nearest' });
+    }
+    return true;
+  }
+  // 空格暂存或取消暂存选中的文件。
+  if (e.code !== 'Space' || e.repeat || git.selected?.kind !== 'files') return false;
   const items = git.selected.items;
   const unstage = items.filter((item) => item.group === 'staged').map((item) => item.path);
   const stage = items.filter((item) => item.group !== 'staged').map((item) => item.path);

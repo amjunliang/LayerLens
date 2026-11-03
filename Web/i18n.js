@@ -259,6 +259,9 @@ const EN = {
   '编译失败, 请在 Xcode 查看': 'Build failed, see Xcode',
   '等待超时, 请在 Xcode 查看': 'Timed out, see Xcode',
   // 设备与 App
+  '请求超时, 请重试': 'Request timed out. Please retry',
+  '正在获取层级…': 'Loading hierarchy…',
+  '切换失败: {0}': 'Switch failed: {0}',
   '固定此 App': 'Pin this app',
   '已固定此 App': 'App pinned',
   '恢复自动跟随': 'Resume automatic following',

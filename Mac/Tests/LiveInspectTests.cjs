@@ -81,15 +81,43 @@ function create(real, scale = 3, deferred = false) {
   geometry.ctx.live.sourceGeometry = null; geometry.finish(); await paused;
   assert.deepEqual(geometry.hits, [[90, 180]], 'Capture scale before awaiting hierarchy');
 
-  // Exercise the real mode switch up to the awaited hierarchy. Old target results/errors must return before rendering.
-  for (const failed of [false, true]) {
-    let resolve, reject, errors = 0;
-    const hierarchy = new Promise((a, b) => { resolve = a; reject = b; });
-    const ctx = { appState: { source: {} }, targets: { deviceId: 'a', bundleId: 'app' }, state: { mode: 'live' }, currentDevice: () => ({}), api: () => hierarchy, showRefreshError: () => errors++ };
-    vm.createContext(ctx); vm.runInContext('let modeSeq = 0, refreshSeq = 0;\n' + section('async function setMode(mode)', '// 小屏用单栏 + 工具栏两端开关切换面板'), ctx);
-    const mode = ctx.setMode('2d'); ctx.targets.deviceId = 'b'; ctx.appState.source = {};
-    if (failed) reject(new Error('old target failed')); else resolve([]);
-    await mode; assert.equal(ctx.state.mode, 'live'); assert.equal(errors, 0);
-  }
+  // Real mode scheduling, cancellation and stale hierarchy responses are covered by TargetTaskTests.cjs.
   console.log('PASS live inspection: pixel/point conversion, layout/pan/zoom/rotation and stale target isolation');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Exercise the real hierarchy navigation with collapsed branches and remembered child paths.
+{
+  const nodes = new Map();
+  function node(key, parent = null) {
+    const item = { key, parent, children: [] }; nodes.set(key, item); parent?.children.push(item); return item;
+  }
+  const root = node('root'), a = node('a', root), a1 = node('a1', a), a2 = node('a2', a), b = node('b', root);
+  let rows = [];
+  const ctx = { VC_KEY: 'vc:', viewKeyOf: key => key.replace(/^vc:/, ''),
+    state: { mode: '2d', nodes, selected: 'a', expanded: new Set(['root']), vcCollapsed: new Set(), query: '', vcFocus: false },
+    shownChildren: item => item.children, showSelectionTip() {},
+    $: () => ({ querySelectorAll: () => rows.map(key => ({ dataset: { key } })) }),
+    renderTree() { rows = []; const walk = item => { rows.push(item.key); if (ctx.state.expanded.has(item.key)) item.children.forEach(walk); }; walk(root); },
+    select(key) { ctx.state.selected = key; ctx.rememberTrail(nodes.get(key)); ctx.renderTree(); },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(section('const childTrail = new Map();', '// MARK: - Breadcrumb'), ctx);
+  ctx.renderTree();
+  assert(ctx.handleStageKey('ArrowDown')); assert.equal(ctx.state.selected, 'a', 'First Down only expands');
+  ctx.handleStageKey('ArrowDown'); assert.equal(ctx.state.selected, 'a1', 'Second Down enters a child');
+  ctx.handleStageKey('ArrowRight'); assert.equal(ctx.state.selected, 'a2');
+  ctx.handleStageKey('ArrowUp'); assert.equal(ctx.state.selected, 'a');
+  ctx.handleStageKey('ArrowDown'); assert.equal(ctx.state.selected, 'a2', 'Down returns to the remembered child');
+  ctx.handleStageKey('ArrowDown'); assert.equal(ctx.state.selected, 'a2', 'Leaf remains selected');
+  ctx.handleStageKey('ArrowLeft'); assert.equal(ctx.state.selected, 'a1');
+  ctx.handleStageKey('ArrowLeft'); assert.equal(ctx.state.selected, 'a', 'Left follows visible row order, including parents');
+  ctx.handleStageKey('ArrowRight'); assert.equal(ctx.state.selected, 'a1', 'Right enters visible descendants in row order');
+  ctx.handleStageKey('ArrowUp'); ctx.handleStageKey('ArrowUp'); assert.equal(ctx.state.selected, 'root');
+  ctx.state.selected = 'a'; ctx.handleTreeKey('ArrowDown'); assert.equal(ctx.state.selected, 'a1', 'Tree still uses visible row order');
+  ctx.handleTreeKey('ArrowLeft'); assert.equal(ctx.state.selected, 'a', 'Tree Left still selects parent');
+  ctx.state.mode = '3d'; ctx.handleStageKey('ArrowRight'); assert.equal(ctx.state.selected, 'a1');
+  ctx.handleStageKey('ArrowUp', true); assert.equal(ctx.state.selected, 'a'); assert(!ctx.state.expanded.has('a'), 'Option Up collapses parent from a leaf');
+  assert.equal(ctx.handleStageKey('ArrowLeft', true), false);
+  ctx.state.mode = 'live'; assert.equal(ctx.handleStageKey('ArrowLeft'), false); assert.equal(ctx.state.selected, 'a');
+  console.log('PASS stage direction swap, two-step expansion, visible row order, remembered child, Option collapse and tree/live isolation');
+}

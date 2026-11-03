@@ -35,14 +35,26 @@ final class HubServer {
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     /// 同一设备的 App 激活必须串行; 运行中的命令结束后只执行排队目标中的最后一个
     private let activationQueue = DispatchQueue(label: "com.layerlens.hub.activate")
-    private struct ActivationRequest {
+    private final class ActivationRequest {
         let deviceId: String
         let bundleId: String
         let kind: DeviceKind
         let connection: HubConnection
+        let owner: String
+        let task: String
+        var cancelled = false // activationQueue 上读写
+        // 总预算包含排队, 给网页 30s 超时留出传输和收尾时间。
+        private let deadline = ProcessInfo.processInfo.systemUptime + 28
+        var remaining: TimeInterval { max(0, deadline - ProcessInfo.processInfo.systemUptime) }
+        init(deviceId: String, bundleId: String, kind: DeviceKind, connection: HubConnection, owner: String, task: String) {
+            self.deviceId = deviceId; self.bundleId = bundleId; self.kind = kind
+            self.connection = connection; self.owner = owner; self.task = task
+        }
     }
+    private var latestActivationOrders: [String: Int] = [:]
+    private var cancelledActivationTasks: Set<String> = []
+    private var activeActivations: [String: ActivationRequest] = [:]
     private var pendingActivations: [String: ActivationRequest] = [:]
-    private var activatingDevices: Set<String> = []
     private let webRoot: URL
     private var listener: NWListener?
     private let allowedHosts: Set<String> = ["127.0.0.1:\(HubServer.port)", "localhost:\(HubServer.port)"]
@@ -428,19 +440,43 @@ final class HubServer {
             default:
                 connection.respond(.error(400, "Invalid request"))
             }
+        case "/api/hub/activation/cancel":
+            guard let owner = json["owner"] as? String, !owner.isEmpty,
+                  let task = json["task"] as? String, !task.isEmpty else {
+                connection.respond(.error(400, "Invalid task")); return
+            }
+            activationQueue.async { [self] in
+                cancelActivations(owner: owner, task: task)
+                connection.respond(.json(["ok": true]))
+            }
         case "/api/hub/activate":
             // 把在后台的 App 切到前台; 已在运行时只激活, 不重启
             guard let device = json["device"] as? String, let app = json["app"] as? String, !device.isEmpty, !app.isEmpty else {
                 connection.respond(.error(400, "Invalid target"))
                 return
             }
-            registry.deviceKind(deviceId: device) { [self] kind in
-                guard let kind else {
-                    connection.respond(.error(404, "Device not found"))
-                    return
+            let owner = json["owner"] as? String ?? ""
+            let task = json["task"] as? String ?? ""
+            let order = json["order"] as? Int ?? 0
+            activationQueue.async { [self] in
+                if !owner.isEmpty {
+                    guard order >= (latestActivationOrders[owner] ?? 0), !cancelledActivationTasks.contains(owner + "|" + task) else {
+                        connection.respond(.json(["ok": false, "superseded": true], status: 409)); return
+                    }
+                    latestActivationOrders[owner] = order
+                    cancelActivations(owner: owner, except: task)
+                    activationQueue.asyncAfter(deadline: .now() + 60) { [weak self] in
+                        if self?.latestActivationOrders[owner] == order { self?.latestActivationOrders.removeValue(forKey: owner) }
+                    }
                 }
-                enqueueActivation(deviceId: device, bundleId: app, kind: kind, connection: connection)
+                registry.deviceKind(deviceId: device) { [self] kind in
+                    guard let kind else {
+                        connection.respond(.error(404, "Device not found")); return
+                    }
+                    enqueueActivation(deviceId: device, bundleId: app, kind: kind, connection: connection, owner: owner, task: task, order: order)
+                }
             }
+
         default:
             connection.respond(.error(404, "Not Found"))
         }
@@ -448,9 +484,15 @@ final class HubServer {
 
     /// 快速切换时合并尚未开始的激活请求. 已经发给 devicectl 的命令不能可靠撤销,
     /// 所以让它结束后再执行最新目标, 保证最后一次点击最终处于前台.
-    private func enqueueActivation(deviceId: String, bundleId: String, kind: DeviceKind, connection: HubConnection) {
-        let request = ActivationRequest(deviceId: deviceId, bundleId: bundleId, kind: kind, connection: connection)
+    private func enqueueActivation(deviceId: String, bundleId: String, kind: DeviceKind, connection: HubConnection, owner: String, task: String, order: Int) {
+        let request = ActivationRequest(deviceId: deviceId, bundleId: bundleId, kind: kind, connection: connection, owner: owner, task: task)
         activationQueue.async { [self] in
+            if !owner.isEmpty {
+                if cancelledActivationTasks.contains(owner + "|" + task) || latestActivationOrders[owner] != order {
+                    connection.respond(.json(["ok": false, "superseded": true], status: 409)); return
+                }
+                cancelActivations(owner: owner, except: task)
+            }
             if let superseded = pendingActivations.updateValue(request, forKey: deviceId) {
                 superseded.connection.respond(.json(["ok": false, "superseded": true], status: 409))
             }
@@ -458,24 +500,58 @@ final class HubServer {
         }
     }
 
+    private func cancelActivations(owner: String, task: String? = nil, except: String? = nil) {
+        dispatchPrecondition(condition: .onQueue(activationQueue))
+        if let task {
+            let key = owner + "|" + task
+            cancelledActivationTasks.insert(key)
+            // cancel 可能先于 deviceKind 回调到达; 短暂保留墓碑防止旧任务重新排队。
+            activationQueue.asyncAfter(deadline: .now() + 35) { [weak self] in self?.cancelledActivationTasks.remove(key) }
+        }
+        func matches(_ request: ActivationRequest) -> Bool {
+            request.owner == owner && (task == nil || request.task == task) && (except == nil || request.task != except)
+        }
+        for (device, request) in Array(pendingActivations) where matches(request) {
+            pendingActivations.removeValue(forKey: device)
+            request.cancelled = true
+            request.connection.respond(.json(["ok": false, "superseded": true], status: 409))
+        }
+        for request in activeActivations.values where matches(request) { request.cancelled = true }
+    }
+
     private func startNextActivation(deviceId: String) {
         dispatchPrecondition(condition: .onQueue(activationQueue))
-        guard !activatingDevices.contains(deviceId), let request = pendingActivations.removeValue(forKey: deviceId) else { return }
-        activatingDevices.insert(deviceId)
+        guard activeActivations[deviceId] == nil, let request = pendingActivations.removeValue(forKey: deviceId) else { return }
+        activeActivations[deviceId] = request
         workQueue.async { [self] in
+            guard !activationQueue.sync(execute: { request.cancelled }) else {
+                finishActivation(request, response: .json(["ok": false, "superseded": true], status: 409)); return
+            }
+            let remaining = request.remaining
+            guard remaining > 0 else {
+                finishActivation(request, response: .json(["ok": false, "reason": "timeout", "error": "Activation queue timed out"], status: 504)); return
+            }
             let arguments = request.kind == .simulator
                 ? ["simctl", "launch", request.deviceId, request.bundleId]
                 : ["devicectl", "device", "process", "launch", "--device", request.deviceId, request.bundleId]
             // 真机的开发者通道偶尔卡住(锁屏、休眠、连接不稳), 最多等待 20 秒
-            let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments, timeout: 20)
+            let result = TargetRegistry.runReportingError("/usr/bin/xcrun", arguments, timeout: min(20, remaining))
             guard result.ok else {
                 let failure = Self.launchFailure(result.error)
                 finishActivation(request, response: .json(["ok": false, "reason": failure.reason, "error": failure.detail], status: 500))
                 return
             }
             // 等 App 在(可能换了的)端口上响应, 之后前端再读取层级
-            registry.waitForApp(deviceId: request.deviceId, bundleId: request.bundleId, timeout: 5) { [self] ready in
-                finishActivation(request, response: .json(["ok": true, "ready": ready, "kind": request.kind == .simulator ? "simulator" : "device"]))
+            activationQueue.async { [self] in
+                guard !request.cancelled else {
+                    finishActivation(request, response: .json(["ok": false, "superseded": true], status: 409)); return
+                }
+                guard request.remaining > 0 else {
+                    finishActivation(request, response: .json(["ok": false, "reason": "timeout", "error": "Activation timed out"], status: 504)); return
+                }
+                registry.waitForApp(deviceId: request.deviceId, bundleId: request.bundleId, timeout: min(5, request.remaining)) { [self] ready in
+                    finishActivation(request, response: .json(["ok": true, "ready": ready, "kind": request.kind == .simulator ? "simulator" : "device"]))
+                }
             }
         }
     }
@@ -483,7 +559,7 @@ final class HubServer {
     private func finishActivation(_ request: ActivationRequest, response: HTTPResponse) {
         activationQueue.async { [self] in
             request.connection.respond(response)
-            activatingDevices.remove(request.deviceId)
+            activeActivations.removeValue(forKey: request.deviceId)
             startNextActivation(deviceId: request.deviceId)
         }
     }

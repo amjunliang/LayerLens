@@ -1489,3 +1489,6 @@ body.log-open .log-pane { display: flex; }
 .git-section-empty > .icon { flex: none; width: 16px; height: 16px; }
 .git-empty-stage > .icon { color: var(--accent); }
 .git-empty-clean > .icon { color: #30b87a; }
+
+/* 当前切换任务的层级等待状态; 不阻挡工具栏和其他窗口。 */
+.target-task-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 12; display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 12px; background: var(--panel); color: var(--text); box-shadow: 0 4px 24px #0003; pointer-events: none; }
