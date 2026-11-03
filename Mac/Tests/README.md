@@ -22,7 +22,7 @@ bash Mac/Tests/run.sh
 
 | 范围 | 测试 |
 | --- | --- |
-| Home 原生消息、旧版双击回退、关闭隔离及服务异常 | `SimHomeButtonTests.swift`、`LiveHomeTests.cjs` |
+| Home 原生消息、旧版双击回退、关闭隔离及服务异常 | `SimHomeButtonTests.swift`、`LiveHomeTests.cjs`、`LiveResumeTests.cjs` |
 | H.264 编码、丢帧与网页解码 | `LiveVideoTests.swift`、`LiveVideoDecoderTests.cjs` |
 | 实时点选定位的像素与 point 换算、缩放旋转及切换目标隔离 | `LiveInspectTests.cjs` |
 | 目标选择、前后台状态、共享订阅与扫描竞争 | `TargetStateHubTests.swift`、`TargetSelectionTests.cjs`、`AutoFollowTests.cjs`、`TargetTaskTests.cjs` |

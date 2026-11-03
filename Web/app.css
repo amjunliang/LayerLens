@@ -572,11 +572,11 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 .live-wrap { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-user-select: none; user-select: none; }
 /* 2D/实时共用留白: 8px 间隔、24px 控件、8px 底部边距。 */
 body:not(.mode-3d) .stage-wrap, .live-wrap { padding: 8px 12px 40px; }
-.live-home-dock { display: flex; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 41; width: 112px; height: 24px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); color: var(--stage-text); }
+.live-home-dock { display: flex; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 41; width: 168px; height: 24px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); color: var(--stage-text); }
 /* 控件在底部渐变(40)之上, 最大化面板(30)时隐藏, 避免穿透到面板上。 */
 body.log-max .live-home-dock { visibility: hidden; }
-.live-home-dock::after { content: ''; position: absolute; left: 50%; top: 5px; bottom: 5px; width: 1px; background: var(--float-line); pointer-events: none; }
-.live-home-dock .icon-btn { flex: 1; min-width: 0; width: auto; height: 100%; border: 0; border-radius: 0; background: transparent; color: inherit; }
+.live-home-dock .icon-btn + .icon-btn::before { content: ''; position: absolute; left: 0; top: 5px; bottom: 5px; width: 1px; background: var(--float-line); pointer-events: none; }
+.live-home-dock .icon-btn { position: relative; flex: 1; min-width: 0; width: auto; height: 100%; border: 0; border-radius: 0; background: transparent; color: inherit; }
 .live-home-dock .icon-btn .icon { width: 16px; height: 16px; }
 .live-home-dock .icon-btn:hover { background: transparent; color: inherit; }
 .live-home-dock .icon-btn:focus { outline: none; }

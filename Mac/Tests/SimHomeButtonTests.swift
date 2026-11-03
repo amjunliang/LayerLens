@@ -35,6 +35,13 @@ final class FailedDevice: NSObject {
             precondition(xpc_dictionary_get_uint64(payload, "usageCode") == 64)
             precondition(xpc_dictionary_get_uint64(payload, "state") == (down ? 1 : 2))
         }
+        for down in [true, false] {
+            let power = SimHomeButton.message(down: down, usage: 0x30)
+            let payload = xpc_dictionary_get_value(power, "payload")!
+            precondition(xpc_dictionary_get_uint64(payload, "usagePage") == 12)
+            precondition(xpc_dictionary_get_uint64(payload, "usageCode") == 48)
+            precondition(xpc_dictionary_get_uint64(payload, "state") == (down ? 1 : 2))
+        }
         let barrier = SimHomeButton.message(down: false, barrier: true)
         precondition(xpc_dictionary_get_bool(barrier, "isBarrier"))
         let payload = xpc_dictionary_get_value(barrier, "payload")!

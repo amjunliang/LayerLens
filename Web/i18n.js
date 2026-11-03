@@ -452,6 +452,9 @@ const EN = {
   '向右旋转': 'Rotate Right',
   '多任务': 'App Switcher',
   '返回主屏幕': 'Go to Home Screen',
+  '锁屏 / 唤醒': 'Lock / Wake',
+  '无法唤醒设备，请重试。': 'Unable to wake the device. Please retry.',
+  '锁屏 / 唤醒暂不可用，请重试。': 'Lock / Wake is unavailable. Please retry.',
   '不可用': 'Unavailable',
   '模拟器画面采集与输入注入的实现参考': 'Reference for simulator capture and input injection',
   // 面板与状态提示

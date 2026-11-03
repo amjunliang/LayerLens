@@ -139,6 +139,7 @@ private final class DeviceLiveSession {
             if let geometry { message(geometry, to: socket) }
             video.add(socket)
             if resolver == nil && native == nil { start() }
+            else if native != nil { write("{\"type\":\"resume\"}") }
         }
     }
     private func start() {
@@ -196,7 +197,7 @@ private final class DeviceLiveSession {
         if kind == 254 { LiveLog.write(String(decoding: data, as: UTF8.self)); return }
         if kind == 255 { fail(String(decoding: data, as: UTF8.self)); return }
         if kind == 8, let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           info["type"] as? String == "rotation-result" {
+           ["rotation-result", "input-error"].contains(info["type"] as? String ?? "") {
             if let orientation = info["orientation"] as? Int, (1...4).contains(orientation) { geometry?["orientation"] = orientation }
             for socket in viewers.values { message(info, to: socket) }
             return
@@ -252,7 +253,7 @@ private final class DeviceLiveSession {
             }), let width = item["width"] as? NSNumber, let height = item["height"] as? NSNumber,
                   width.doubleValue > 0, height.doubleValue > 0 else { return }
         }
-        if type == "button" { guard let button = item["button"] as? String, ["swipe-to-home", "app-switcher"].contains(button) else { return } }
+        if type == "button" { guard let button = item["button"] as? String, ["swipe-to-home", "app-switcher", "sleep-wake"].contains(button) else { return } }
         if type == "rotate" {
             guard let direction = item["direction"] as? String, ["left", "right"].contains(direction),
                   let requestID = item["requestId"] as? String, !requestID.isEmpty, requestID.count <= 128 else { return }
@@ -268,6 +269,10 @@ private final class DeviceLiveSession {
             framePending = latestPixels != nil; encodePending(); return
         }
         if type == "keyframe" { video.requestKeyFrame(); return }
+        if type == "resume" {
+            guard viewers[id] != nil else { return }
+            write(text); return
+        }
         if type == "restart" {
             for socket in viewers.values { socket.close() }; stop(); return
         }

@@ -99,6 +99,7 @@ extern int layerlens_native_service_ids(xrc_t,uint64_t *,uint64_t *);
 @public
     _Atomic bool stopped;
     _Atomic bool rotating;
+    _Atomic bool resumePending;
     xrc_t media, input, buttons, digitizer;
     int mediaFD, rtpFD, inputFD, buttonFD, digitizerFD;
     uint64_t touchService, keyboardService;
@@ -132,6 +133,7 @@ extern int layerlens_native_service_ids(xrc_t,uint64_t *,uint64_t *);
 - (void)emit:(uint8_t)kind data:(NSData *)data;
 - (void)receive:(CMSampleBufferRef)sample;
 - (void)handle:(NSDictionary *)message;
+- (BOOL)wakeDisplayIfNeeded:(NSString **)error;
 @end
 
 static dispatch_queue_t nativeWork(void){
@@ -246,6 +248,13 @@ static void installNativeSink(void){
     dlopen("/System/Library/PrivateFrameworks/AVConference.framework/AVConference",RTLD_NOW);
     _coredevice_xpc_add_bundle([NSBundle bundleWithPath:@"/Library/Developer/PrivateFrameworks/CoreDevice.framework"]);
     _coredevice_xpc_init_services();
+    buttons=[self openFeature:"com.apple.coredevice.feature.remote.hid.button" fd:&buttonFD];
+    if(!buttons) return;
+    NSString *wakeError=nil;
+    if(![self wakeDisplayIfNeeded:&wakeError]){
+        if(!atomic_load(&stopped)) [self fail:wakeError?:@"Device display wake failed"];
+        return;
+    }
     const char *dev=_arguments[0].UTF8String,*utun=_arguments[1].UTF8String,*rxip=_arguments[2].UTF8String,*txip=_arguments[3].UTF8String;
     __weak LLNativeSession *weakSelf=self;
     NSString *sessID = [[NSUUID UUID] UUIDString];
@@ -348,7 +357,6 @@ static void installNativeSink(void){
 
     if(atomic_load(&stopped)) return;
     input=[self openFeature:"com.apple.coredevice.feature.remote.universalhidservice" fd:&inputFD];
-    buttons=[self openFeature:"com.apple.coredevice.feature.remote.hid.button" fd:&buttonFD];
     digitizer=[self openFeature:"com.apple.coredevice.feature.remote.hid.digitizer" fd:&digitizerFD];
     if(!input || !buttons || !digitizer) return;
     if(layerlens_native_service_ids(input,&touchService,&keyboardService)!=0 || !touchService){ [self fail:@"Touchscreen descriptor unavailable"];return; }
@@ -424,8 +432,51 @@ static void installNativeSink(void){
     NSData *data=[NSData dataWithBytes:words length:sizeof words];
     [self send:^{ return coredevice_send_universalhid_hid_report(self->input,data.bytes,self->keyboardService); }];
 }
+// nativeWork owns display queries and wake transitions, for startup and reuse.
+- (BOOL)wakeDisplayIfNeeded:(NSString **)error {
+    if(atomic_load(&stopped) || !buttons) return NO;
+    NSDictionary *info=ipbDeviceControl(_arguments[0],@[@"device",@"info",@"displays"],error);
+    if(atomic_load(&stopped)) return NO;
+    if(!info) return NO;
+    NSString *backlight=info[@"backlightState"];
+    [self emit:254 data:[[NSString stringWithFormat:@"device wake check: backlight=%@",backlight?:@"unknown"] dataUsingEncoding:NSUTF8StringEncoding]];
+    // Sleep/wake is a toggle. Never toggle an on or unknown display.
+    if(![backlight isEqual:@"off"]) return YES;
+    [self emit:254 data:[@"device display asleep; sending sleep/wake" dataUsingEncoding:NSUTF8StringEncoding]];
+    if([self send:^{ return coredevice_send_hid_button_custom(self->buttons,0x0c,0x30,0); }]) return NO;
+    usleep(80000);
+    if([self send:^{ return coredevice_send_hid_button_custom(self->buttons,0x0c,0x30,1); }]) return NO;
+    if([self send:^{ return coredevice_send_hid_button_barrier(self->buttons); }]) return NO;
+    uint64_t deadline=ipb_bounded_now_ns()+3*NSEC_PER_SEC;
+    do {
+        if(atomic_load(&stopped)) return NO;
+        usleep(100000);
+        info=ipbDeviceControl(_arguments[0],@[@"device",@"info",@"displays"],error);
+    } while([info[@"backlightState"] isEqual:@"off"] && ipb_bounded_now_ns()<deadline);
+    if(atomic_load(&stopped)) return NO;
+    if(!info || [info[@"backlightState"] isEqual:@"off"]){
+        if(!*error) *error=@"Device display did not wake; retry the connection.";
+        return NO;
+    }
+    [self emit:254 data:[@"device display awake; media may resume" dataUsingEncoding:NSUTF8StringEncoding]];
+    return YES;
+}
 - (void)handle:(NSDictionary *)message {
     if(atomic_load(&stopped)) return;
+    if([message[@"type"] isEqual:@"resume"]){
+        if(atomic_exchange(&resumePending,true)) return;
+        dispatch_async(nativeWork(),^{ @autoreleasepool {
+            @try {
+                if(atomic_load(&self->stopped)) return;
+                NSString *error=nil;
+                if(![self wakeDisplayIfNeeded:&error] && !atomic_load(&self->stopped)){
+                    NSDictionary *result=@{@"type":@"input-error",@"detail":@"wake-unavailable",@"message":error?:@"Device display wake failed"};
+                    [self emit:8 data:[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]];
+                }
+            } @finally { atomic_store(&self->resumePending,false); }
+        }});
+        return;
+    }
     if([message[@"type"] isEqual:@"rotate"]){
         NSString *direction=message[@"direction"], *requestID=message[@"requestId"];
         if(![@[@"left",@"right"] containsObject:direction] || ![requestID isKindOfClass:NSString.class] || requestID.length>128) return;
@@ -468,7 +519,7 @@ static void installNativeSink(void){
             IPBKeyboardState empty={0};if(self->keyboardService) [self keyboard:empty];
         }else if([type isEqual:@"button"]){
             uint64_t page=[message[@"button"] isEqual:@"app-switcher"]?0xff01:0x0c;
-            uint64_t usage=page==0xff01?0x10:0x40;
+            uint64_t usage=page==0xff01?0x10:([message[@"button"] isEqual:@"sleep-wake"]?0x30:0x40);
             [self send:^{ return coredevice_send_hid_button_custom(self->buttons,page,usage,0); }];
             usleep(80000);
             [self send:^{ return coredevice_send_hid_button_custom(self->buttons,page,usage,1); }];

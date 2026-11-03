@@ -438,7 +438,7 @@ function setupPageActivity() {
       ++refreshSeq;
       pageActivity.controller?.abort();
       resetImages();
-      liveSuspend();
+      liveSuspend(true);
       if (stage3D.frame) cancelAnimationFrame(stage3D.frame);
       stage3D.frame = 0;
       return;
@@ -1036,7 +1036,7 @@ async function setMode(mode) {
     else fitView();
     return;
   }
-  liveSuspend();
+  liveSuspend(true);
   renderCanvas();
   if (keepView) applyStageTransform();
   else fitView();
@@ -1670,6 +1670,7 @@ const live = {
   decoder: null,
   retryTimer: 0,
   connected: false,
+  suspended: false,
   hasFrame: false,
   pendingFrame: null,
   inspect: false,
@@ -1758,6 +1759,7 @@ function liveStart() {
   ws.onopen = () => {
     if (live.ws !== ws) return;
     live.connected = true;
+    live.suspended = false;
     liveReportSize(true);
     if (live.restartOnOpen) {
       live.restartOnOpen = false;
@@ -1780,6 +1782,12 @@ function liveStart() {
       const message = JSON.parse(e.data);
       if (message.type === 'input-error' && message.detail === 'home-unavailable') {
         toast(LANG === 'en' ? 'Home button is unavailable. Please retry.' : 'Home 按键暂不可用，请重试。');
+      }
+      if (message.type === 'input-error' && message.detail === 'sleep-wake-unavailable') {
+        toast(t('锁屏 / 唤醒暂不可用，请重试。'));
+      }
+      if (message.type === 'input-error' && message.detail === 'wake-unavailable') {
+        toast(t('无法唤醒设备，请重试。'));
       }
       if (message.type === 'rotation-result') liveRotationResult(message);
       if (message.type === 'geometry') {
@@ -1809,7 +1817,8 @@ function liveStart() {
 }
 
 // 离开实时页或失焦只释放输入，保留传输和解码状态。
-function liveSuspend() {
+function liveSuspend(wakeOnResume = false) {
+  if (wakeOnResume) live.suspended = true;
   if (live.touch) clearTimeout(live.touch.timer);
   live.touch = null;
   liveSend({ type: 'release' });
@@ -1818,6 +1827,10 @@ function liveSuspend() {
 function liveResume() {
   layoutLive();
   if (!pageActivity.active || state.mode !== 'live') return;
+  if (live.suspended && live.ws?.readyState === WebSocket.OPEN) {
+    live.suspended = false;
+    if (live.real) liveSend({ type: 'resume' });
+  }
   if (live.pendingFrame) {
     const frame = live.pendingFrame;
     live.pendingFrame = null;
@@ -2164,6 +2177,10 @@ function liveRestored() {
 // 每次点击发送完整 Home 按下/抬起; 双击由设备系统识别。
 function liveHome() {
   liveSend({ type: 'button', button: 'swipe-to-home' });
+}
+
+function liveSleepWake() {
+  liveSend({ type: 'button', button: 'sleep-wake' });
 }
 
 // MARK: - Targets
@@ -3881,8 +3898,9 @@ function setupLiveEvents() {
   // 多任务: 从底部上滑并停顿, 与真机手势一致
   $('liveSwitcher').addEventListener('click', () => liveSend({ type: 'button', button: 'app-switcher' }));
   $('liveRotate').addEventListener('click', liveRotate);
+  $('liveSleepWake').addEventListener('click', liveSleepWake);
   // 鼠标点击动作按钮不抢走画布焦点; Tab/键盘仍可正常聚焦操作。
-  for (const id of ['liveHome', 'liveRotate']) {
+  for (const id of ['liveHome', 'liveRotate', 'liveSleepWake']) {
     const button = $(id);
     let feedbackTimer;
     button.addEventListener('pointerdown', e => {

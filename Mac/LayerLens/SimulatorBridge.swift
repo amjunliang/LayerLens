@@ -312,6 +312,15 @@ final class SimTouch {
         return send(message)
     }
 
+    /// Xcode 26 legacy sleep/wake button source=1, hardware target=0x33.
+    @discardableResult
+    func sendSleepWake(down: Bool) -> Bool {
+        typealias ButtonFn = @convention(c) (UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
+        guard let symbol = SimBridge.symbol("IndigoHIDMessageForButton"),
+              let message = unsafeBitCast(symbol, to: ButtonFn.self)(1, down ? 1 : 2, 0x33) else { return false }
+        return send(message)
+    }
+
     private func send(_ message: UnsafeMutableRawPointer) -> Bool {
         let sel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
         guard let cls = object_getClass(client), let method = class_getInstanceMethod(cls, sel) else {
@@ -357,7 +366,7 @@ final class SimHomeButton {
     }
     deinit { stop() }
 
-    func press(legacyPress: @escaping () -> Void, unavailable: @escaping () -> Void) {
+    func press(usage: UInt64 = 0x40, legacyPress: @escaping () -> Void, unavailable: @escaping () -> Void) {
         lock.lock()
         guard !stopped, pendingPresses < 2 else { lock.unlock(); return }
         pendingPresses += 1
@@ -384,16 +393,16 @@ final class SimHomeButton {
             guard DispatchTime.now() < deadline else { unavailable(); return }
             if self.legacy { legacyPress(); return }
             guard let connection = self.connection, !self.failed else { unavailable(); return }
-            xpc_connection_send_message(connection, Self.message(down: true))
+            xpc_connection_send_message(connection, Self.message(down: true, usage: usage))
             usleep(30_000)
-            xpc_connection_send_message(connection, Self.message(down: false))
+            xpc_connection_send_message(connection, Self.message(down: false, usage: usage))
         }
     }
 
-    static func message(down: Bool, barrier: Bool = false) -> xpc_object_t {
+    static func message(down: Bool, barrier: Bool = false, usage: UInt64 = 0x40) -> xpc_object_t {
         let payload = xpc_dictionary_create(nil, nil, 0)
         if !barrier { xpc_dictionary_set_uint64(payload, "usagePage", 0x0c) }
-        xpc_dictionary_set_uint64(payload, "usageCode", barrier ? 0 : 0x40)
+        xpc_dictionary_set_uint64(payload, "usageCode", barrier ? 0 : usage)
         xpc_dictionary_set_uint64(payload, "state", down ? 1 : 2)
         let message = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(message, "messageType", barrier ? "IndigoKeyboardButtonEvent" : "IndigoButtonEvent")

@@ -15,7 +15,9 @@ assert.deepEqual(sent, [
   { type: 'button', button: 'swipe-to-home' },
 ]);
 assert(!source.includes('/api/hub/home'));
-console.log('PASS Home forwards each click immediately without SpringBoard HTTP');
+context.liveSleepWake();
+assert.deepEqual(sent.at(-1), { type: 'button', button: 'sleep-wake' });
+console.log('PASS Home and Sleep/Wake forward immediately without display queries');
 
 const rotateStart=source.indexOf('function liveRotate()');
 const button={disabled:false}, notices=[], timers=[];

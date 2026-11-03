@@ -365,6 +365,22 @@ final class SimulatorStream {
                     }
                 }
             })
+        case "button" where message["button"] as? String == "sleep-wake":
+            homeButton?.press(usage: 0x30, legacyPress: { [weak self, weak touch] in
+                self?.touchQueue.async { [weak self, weak touch] in
+                    guard let self, let touch, self.touch === touch else { return }
+                    touch.sendSleepWake(down: true)
+                    usleep(30_000)
+                    touch.sendSleepWake(down: false)
+                }
+            }, unavailable: { [weak self] in
+                self?.queue.async { [weak self] in
+                    self?.video.forEachSocket { socket in
+                        guard ObjectIdentifier(socket) == id else { return }
+                        socket.sendText("{\"type\":\"input-error\",\"detail\":\"sleep-wake-unavailable\"}")
+                    }
+                }
+            })
         case "button" where message["button"] as? String == "app-switcher":
             // 上滑到屏幕中部时先快后慢(缓出), 末速度接近 0 即被识别为停顿而进入多任务, 不必久停
             touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
