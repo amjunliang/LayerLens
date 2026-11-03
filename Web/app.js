@@ -256,6 +256,7 @@ function liveCanvasPNG() {
 
 // 屏幕截图(画布右键菜单): 实时模式取模拟器原始分辨率截图(画面按显示尺寸缩小编码), 取不到时用当前画面; 2D/3D 取当前窗口的 App 截图
 function screenShotPNG() {
+  if (state.mode === 'live' && live.real) return liveCanvasPNG();
   if (state.mode === 'live') return fetchPNG(`/sim/${encodeURIComponent(live.udid)}/screenshot`).catch(liveCanvasPNG);
   const win = currentWindow();
   return win ? fetchPNG(shotURL(win.oid, 'group')) : Promise.reject(new Error(t('暂无画面')));
@@ -417,7 +418,7 @@ function hideMenu() {
   hideLayer(menu, 120, () => menu.remove());
 }
 
-// 严格焦点模式: 只暂停页面的视图采集和播放, Hub 的日志/抓包/终端继续运行。
+// 失焦时暂停层级与舞台刷新；实时连接保留，解码后只保留最新一帧。
 const pageActivity = { active: false, ready: false, pending: false, controller: null, generation: 0 };
 
 function pageHasFocus() {
@@ -437,13 +438,14 @@ function setupPageActivity() {
       ++refreshSeq;
       pageActivity.controller?.abort();
       resetImages();
-      liveStop();
+      liveSuspend();
       if (stage3D.frame) cancelAnimationFrame(stage3D.frame);
       stage3D.frame = 0;
       return;
     }
     if (pageActivity.ready) resumePageActivity();
   };
+  window.addEventListener('pagehide', () => { cancelSwitch(); liveStop(); });
   window.addEventListener('focus', update);
   window.addEventListener('blur', update);
   window.addEventListener('layerlens-window-focus', update);
@@ -455,7 +457,7 @@ async function resumePageActivity() {
   try { await loadTargets(); } catch (_) { /* 下一次轮询再试 */ }
   if (!pageActivity.active || generation !== pageActivity.generation) return;
   renderTargetMenu();
-  syncLive();
+  await reconcileTargets();
   if (state.mode !== 'live' && targets.bundleId && pageActivity.pending) {
     pageActivity.pending = false;
     refresh();
@@ -627,19 +629,13 @@ let refreshSeq = 0;
 async function refresh() {
   if (!pageActivity.active) { pageActivity.pending = true; return; }
   pageActivity.pending = false;
-  pageActivity.controller?.abort();
-  const controller = new AbortController();
-  pageActivity.controller = controller;
-  const seq = ++refreshSeq;
-  try {
-    const roots = await api('/api/hierarchy', { signal: controller.signal });
-    if (seq !== refreshSeq || !pageActivity.active) return;
-    applyHierarchy(roots);
-  } catch (e) {
-    if (seq === refreshSeq && e.name !== 'AbortError') showRefreshError(e);
-  } finally {
-    if (pageActivity.controller === controller) pageActivity.controller = null;
+  // 激活和层级读取属于同一任务; 激活期间刷新只记录需要的新层级。
+  if (pendingSwitch) {
+    pendingSwitch.needsHierarchy = true;
+    return pendingSwitch.promise;
   }
+  const job = targetTask || beginTargetTask(targets.deviceId, targets.bundleId);
+  return readTaskHierarchy(job);
 }
 
 function showRefreshError(e) {
@@ -856,6 +852,7 @@ function scrollToSelected() {
 
 // 选中路径记忆: 父节点 key -> 上次经过的子节点 key, → 时原路返回
 const childTrail = new Map();
+let stageNavigation = false;
 
 function rememberTrail(node) {
   for (let n = node; n && n.parent; n = n.parent) childTrail.set(n.parent.key, n.key);
@@ -927,6 +924,13 @@ function handleTreeKey(key, alt = false) {
   }
   showSelectionTip();
   return true;
+}
+
+// 舞台只交换原有两组方向键, 复用层级树导航的全部行为。
+function handleStageKey(key, alt = false) {
+  if (state.mode === 'live' || (alt && key !== 'ArrowUp')) return false;
+  const mapped = { ArrowUp: 'ArrowLeft', ArrowDown: 'ArrowRight', ArrowLeft: 'ArrowUp', ArrowRight: 'ArrowDown' }[key];
+  return mapped ? handleTreeKey(mapped, alt) : false;
 }
 
 // MARK: - Breadcrumb
@@ -1001,20 +1005,12 @@ let modeSeq = 0;
 
 async function setMode(mode) {
   // 每次调用都作废还在取层级的切换, 如取层级期间又点回实时
-  const seq = ++modeSeq;
+  ++modeSeq;
   if (mode === state.mode) return;
   const fromLive = state.mode === 'live';
-  // 从实时画面切出时层级已过期: 先取到新层级再切换, 只绘制一次, 避免先画旧层级再刷新
-  let roots = null;
-  if (fromLive) {
-    ++refreshSeq;
-    try {
-      roots = await api('/api/hierarchy');
-    } catch (e) {
-      showRefreshError(e);
-    }
-    if (seq !== modeSeq || state.mode !== 'live') return;
-  }
+  // 模式立即响应; 是否等待激活、读取层级由当前切换任务决定。
+  const needsHierarchy = fromLive && targets.bundleId && currentDevice();
+  if (mode === 'live') pageActivity.controller?.abort();
   // 2D 与实时画面共用一套视角, 3D 单独一套; 切换时各自保留上次的缩放和平移
   const kind = (m) => (m === '3d' ? 'depth' : 'plan');
   const fromKind = kind(state.mode);
@@ -1040,11 +1036,11 @@ async function setMode(mode) {
     else fitView();
     return;
   }
-  liveStop();
-  if (roots) applyHierarchy(roots);
-  else renderCanvas();
+  liveSuspend();
+  renderCanvas();
   if (keepView) applyStageTransform();
   else fitView();
+  if (needsHierarchy) await refresh();
 }
 
 // 小屏用单栏 + 工具栏两端开关切换面板: 触屏窄屏, 或桌面窗口窄到工具栏放不下; 其余按宽度自动收起侧栏
@@ -1063,9 +1059,9 @@ function contentSize(wrap) {
   ];
 }
 
-// 2D/实时适应窗口时内容占画布的比例; 窄屏的留白由画布内边距给出(上下 8px), 这里不再缩小
+// 2D/实时使用固定内边距, 用满其余区域; 3D 保持原来的适配留白。
 function planFitRatio() {
-  return isNarrow() ? 1 : 0.92;
+  return state.mode === '3d' && !isNarrow() ? 0.92 : 1;
 }
 
 // 小屏一次只显示一个面板: 层级 / 详情盖住画布, 再点一次收起回到画布
@@ -1115,6 +1111,8 @@ function drawableNodes(win) {
 }
 
 function syncModeUI() {
+  syncOfflineView();
+  renderTargetTask();
   document.body.classList.toggle('mode-3d', state.mode === '3d');
   document.body.classList.toggle('mode-live', state.mode === 'live');
   $('liveWrap').hidden = state.mode !== 'live';
@@ -1429,12 +1427,30 @@ function placeBox(box, node, win) {
 }
 
 // 2D 下取包含该点的最上层节点
+// 系统浮动栏的透明容器不应挡住下面的内容, 但仍允许选择它的可见子视图。
+function systemPassthrough(node) {
+  return node.classChain.includes('_UITouchPassthroughView') || node.cls === '_UIFloatingBarContainerView'
+    || node.cls === 'UIKit._GlassGroupView'
+    || (node.cls === 'UIView' && node.parent?.cls === 'UIKit.NavigationBarTransitionContainer' && !node.children.length)
+    || node.classChain.some(cls => cls.startsWith('_TtGC5UIKit') && cls.includes('FloatingBarHostingView'));
+}
+
 function hitTest(x, y) {
   const win = currentWindow();
   let hit = null;
-  drawableNodes(win).forEach((node) => {
+  const contains = node => {
     const [nx, ny, nw, nh] = node.rect;
-    if (x >= nx - win.rect[0] && x <= nx - win.rect[0] + nw && y >= ny - win.rect[1] && y <= ny - win.rect[1] + nh) hit = node;
+    return x >= nx - win.rect[0] && x <= nx - win.rect[0] + nw && y >= ny - win.rect[1] && y <= ny - win.rect[1] + nh;
+  };
+  drawableNodes(win).forEach((node) => {
+    if (systemPassthrough(node) || !contains(node)) return;
+    // 浮动标签栏的子容器可能报告全屏矩形, 仍须落在其实际承载区域内。
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      // GlassGroup 下是系统玻璃装饰, 不作为覆盖内容的交互元素。
+      if (parent.cls === 'UIKit._GlassGroupView') return;
+      if (systemPassthrough(parent) && !contains(parent)) return;
+    }
+    hit = node;
   });
   return hit;
 }
@@ -1637,21 +1653,25 @@ function setupCanvasEvents() {
 }
 
 // MARK: - Live
-// 模拟器实时画面: Mac App 采集模拟器屏幕编码为 H.264 经 /sim/ 推送, 并注入触摸与按键, 页面只负责解码绘制与转发操作
+// 真机与模拟器共用 H.264 解码显示; 采集和输入由各自的 Mac 后端负责。
 
 const LIVE_RETRY_MS = 2000;
 const LIVE_CORNER = 55;
-// 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向左旋转的下一个方向, 与 Simulator.app 的 ⌘← 一致
+// 设备方向(UIDeviceOrientation) -> 画布旋转角度; 向右旋转的下一个方向, 与顺时针图标一致
 const LIVE_ROTATION = { 1: 0, 3: -90, 2: 180, 4: 90 };
-const LIVE_ROTATE_LEFT = { 1: 3, 3: 2, 2: 4, 4: 1 };
+const LIVE_ROTATE_RIGHT = { 1: 4, 4: 2, 2: 3, 3: 1 };
 const LIVE_KEY_CODE = /^(Key[A-Z]|Digit\d|Enter|Backspace|Tab|Space|Arrow(Up|Down|Left|Right)|Minus|Equal|Bracket(Left|Right)|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash)$/;
 const live = {
   udid: '',
+  real: false,
+  error: '',
   screen: [0, 0],
   ws: null,
   decoder: null,
   retryTimer: 0,
   connected: false,
+  hasFrame: false,
+  pendingFrame: null,
   inspect: false,
   altHeld: false,
   touch: null,
@@ -1668,27 +1688,29 @@ function liveAvailable() {
 
 // Mac App 加载 Xcode 的模拟器私有框架失败时为 false
 function liveSupported() {
-  return targets.hub?.live !== false;
+  return live.real || targets.hub?.live !== false;
 }
 
-// 实时画面只取决于当前设备是否为运行中的模拟器(在 Mac App 的设备列表中), 与 App 是否运行、是否响应无关;
-// 加载时和每次刷新设备列表后调用, 模拟器关闭时断开, 重新启动后自动连上
+// 所有已连接设备都显示实时入口，采集能力由实际连接结果决定。
 async function syncLive() {
   if (!pageActivity.active) return;
   const device = currentDevice();
-  const udid = device?.kind === 'simulator' ? device.id : '';
-  // 真机也显示按钮, 置灰并说明原因
-  const realDevice = !!device && !udid;
-  $('liveModeBtn').hidden = !udid && !realDevice;
-  $('liveModeBtn').classList.toggle('unavailable', realDevice);
-  $('liveModeBtn').title = realDevice ? t('真机不支持实时画面') : t('模拟器实时画面');
+  const physical = (device?.kind || targetHistory[targets.deviceId]?.kind) === 'device';
+  const udid = device?.id || '';
+  $('liveModeBtn').hidden = false;
+  $('liveModeBtn').classList.remove('unavailable');
+  $('liveModeBtn').title = physical ? '真机实时画面（实验性）' : t('模拟器实时画面');
+  $('liveRotate').hidden = false;
+  $('liveRotate').disabled = !device || !!live.rotatePending;
   document.body.classList.toggle('has-live', !!udid);
   if (udid !== live.udid) {
     liveStop();
     live.udid = udid;
+    live.real = physical;
+    live.error = '';
     if (udid) {
       try {
-        const info = await fetch(`/sim/${encodeURIComponent(udid)}/info`).then((r) => r.json());
+        const info = physical ? { screen: { width: 402, height: 874 } } : await fetch(`/sim/${encodeURIComponent(udid)}/info`).then((r) => r.json());
         live.screen = [info.screen.width, info.screen.height];
       } catch (e) {
         // 查询失败时用常见尺寸, 只影响画面比例, 触摸按比例换算不受影响
@@ -1697,20 +1719,23 @@ async function syncLive() {
       if (live.udid !== udid) return;
     }
   }
+  live.real = physical;
+  $('liveCanvas').hidden = !device;
   if (state.mode !== 'live') return;
   if (udid) {
     liveStart();
-  } else if (realDevice) {
-    // 真机不支持实时画面, 回到 2D
-    setMode('2d');
   } else {
-    showLiveGuide(t('模拟器未运行'));
+    showLiveGuide();
   }
 }
 
 function liveStart() {
-  if (!pageActivity.active || live.ws || !liveAvailable()) return;
+  if (!pageActivity.active) return;
+  if (!liveAvailable()) { showLiveGuide(); return; }
+  if (live.ws) { liveResume(); return; }
   clearTimeout(live.retryTimer);
+  live.error = '';
+  live.frames = 0;
   layoutLive();
   if (typeof VideoDecoder === 'undefined') {
     showLiveGuide(t('当前浏览器不支持 WebCodecs, 请使用 Chrome 或 Safari'), false);
@@ -1720,13 +1745,19 @@ function liveStart() {
     showLiveGuide();
     return;
   }
-  const ws = new WebSocket(`ws://${location.host}/sim/${encodeURIComponent(live.udid)}/stream`);
+  showLiveGuide();
+  const ws = new WebSocket(`ws://${location.host}/${live.real ? 'device' : 'sim'}/${encodeURIComponent(live.udid)}/stream`);
   ws.binaryType = 'arraybuffer';
   live.ws = ws;
+  if (live.real) live.startTimer = setTimeout(() => {
+    if (live.ws !== ws) return;
+    live.error = LANG === 'en' ? 'Unable to capture the device screen. Check the connection, unlock the device, then retry.' : '无法获取设备画面，请确认设备已连接并解锁后重试。';
+    liveStop();
+    showLiveGuide(live.error);
+  }, 5000);
   ws.onopen = () => {
-    if (live.ws !== ws || !pageActivity.active) return;
+    if (live.ws !== ws) return;
     live.connected = true;
-    $('liveGuide').hidden = true;
     liveReportSize(true);
     if (live.restartOnOpen) {
       live.restartOnOpen = false;
@@ -1734,11 +1765,12 @@ function liveStart() {
     }
   };
   ws.onmessage = (e) => {
-    if (live.ws !== ws || !pageActivity.active) return;
+    if (live.ws !== ws) return;
     if (e.data instanceof ArrayBuffer) {
       const buf = new Uint8Array(e.data);
       feedLiveFrame(buf);
       live.frames++;
+
       // 0x02 关键帧: 手动修复后收到即画面已恢复
       if (live.restoring && buf[0] === 0x02) liveRestored();
       return;
@@ -1746,6 +1778,17 @@ function liveStart() {
     // 方向由 Mac App 记录并广播, 多个页面保持一致
     try {
       const message = JSON.parse(e.data);
+      if (message.type === 'input-error' && message.detail === 'home-unavailable') {
+        toast(LANG === 'en' ? 'Home button is unavailable. Please retry.' : 'Home 按键暂不可用，请重试。');
+      }
+      if (message.type === 'rotation-result') liveRotationResult(message);
+      if (message.type === 'geometry') {
+        if (live.real) live.sourceGeometry = message;
+        live.screen = [message.width, message.height]; live.orientation = message.orientation; layoutLive();
+      }
+      if (message.type === 'error' || message.type === 'status') {
+        if (message.type === 'error') { live.error = message.detail; showLiveGuide(message.detail); }
+      }
       if (message.type === 'orientation' && LIVE_ROTATION[message.value] !== undefined) {
         live.orientation = message.value;
         layoutLive();
@@ -1759,13 +1802,40 @@ function liveStart() {
     const wasConnected = live.connected;
     liveStop();
     if (state.mode !== 'live') return;
-    showLiveGuide(wasConnected ? t('实时画面连接已断开') : '');
-    live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
+    if (live.real && !wasConnected && !live.error) live.error = LANG === 'en' ? 'Unable to connect to the device screen. Please retry.' : '无法连接设备画面，请重试。';
+    showLiveGuide(live.error || (wasConnected ? t('实时画面连接已断开') : ''));
+    if (!(live.real && live.error)) live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
 }
 
+// 离开实时页或失焦只释放输入，保留传输和解码状态。
+function liveSuspend() {
+  if (live.touch) clearTimeout(live.touch.timer);
+  live.touch = null;
+  liveSend({ type: 'release' });
+}
+
+function liveResume() {
+  layoutLive();
+  if (!pageActivity.active || state.mode !== 'live') return;
+  if (live.pendingFrame) {
+    const frame = live.pendingFrame;
+    live.pendingFrame = null;
+    paintLive(frame);
+  }
+  if (live.hasFrame) $('liveGuide').hidden = true;
+  else showLiveGuide(live.error || undefined);
+}
+
 function liveStop() {
+  clearTimeout(live.rotateTimer);
+  live.rotatePending = null;
+  liveSuspend();
+  live.pendingFrame?.close?.();
+  live.pendingFrame = null;
+  live.hasFrame = false;
   clearTimeout(live.retryTimer);
+  clearTimeout(live.startTimer);
   if (live.ws) {
     const ws = live.ws;
     live.ws = null;
@@ -1784,48 +1854,123 @@ function liveStop() {
     live.decoder = null;
   }
   live.connected = false;
+  live.decoderConfig = null;
+  live.waitingKeyFrame = true;
+  live.keyFrameRequestedAt = 0;
+  live.sourceGeometry = null;
   live.touch = null;
 }
 
 // 私有框架加载失败时说明原因, 否则显示等待连接
 function showLiveGuide(title) {
+  if (targets.deviceId && currentDeviceGone()) {
+    syncOfflineView();
+    return;
+  }
+  syncOfflineView();
+  if (!targets.deviceId) {
+    $('liveGuide').hidden = false;
+    $('liveLoading').hidden = true;
+    $('liveRetry').hidden = true;
+    $('liveError').hidden = true;
+    $('liveGuideTitle').textContent = t('请先选择设备');
+    $('liveWaiting').hidden = true;
+    return;
+  }
   const supported = liveSupported();
   $('liveGuide').hidden = false;
-  $('liveGuideTitle').textContent = title || (supported ? t('正在连接实时画面…') : t('无法加载 Xcode 的模拟器框架'));
+  $('liveLoading').hidden = !!title || !!live.error || !supported || !liveAvailable();
+  $('liveRetry').hidden = !(live.real && live.error);
+  $('liveRetry').textContent = LANG === 'en' ? 'Retry' : '重试';
+  if (live.real && live.error) {
+    $('liveGuideTitle').textContent = LANG === 'en' ? 'Unable to capture device screen' : '无法获取设备画面';
+    $('liveError').hidden = false;
+    $('liveError').textContent = live.error;
+    $('liveWaiting').hidden = true;
+    return;
+  }
+  $('liveGuideTitle').textContent = title || (supported ? (LANG === 'en' ? 'Loading screen…' : '正在加载画面…') : t('无法加载 Xcode 的模拟器框架'));
   $('liveError').hidden = supported;
   $('liveError').textContent = supported ? '' : `${t('请确认已安装 Xcode, 并用 xcode-select 选中它')}\n${targets.hub?.liveError || ''}`;
-  $('liveWaiting').hidden = !supported;
+  $('liveWaiting').hidden = !supported || !!title || !!live.error;
+  $('liveWaiting').textContent = t('正在等待连接…');
 }
 
-// 帧格式: 1 字节类型 + 数据. 0x01 解码配置, 0x02 关键帧, 0x03 增量帧, 0x04 首个关键帧前的 JPEG 占位图
+// Both sources: 01 = avcC, 02 = H.264 keyframe, 03 = H.264 delta.
+function requestLiveKeyFrame() {
+  live.waitingKeyFrame = true;
+  const now = performance.now();
+  if (live.keyFrameRequestedAt && now - live.keyFrameRequestedAt < 500) return;
+  live.keyFrameRequestedAt = now;
+  liveSend({ type: 'keyframe' });
+}
+
+function configureLiveDecoder(payload, onFrame) {
+  if (live.decoder && live.decoder.state !== 'closed') live.decoder.close();
+  live.pendingFrame?.close?.();
+  live.pendingFrame = null;
+  const socket = live.ws;
+  const decoder = new VideoDecoder({ output: (frame) => {
+    if (live.ws !== socket || live.decoder !== decoder) { frame.close?.(); return; }
+    onFrame(frame);
+  }, error: (e) => {
+    if (live.ws !== socket || live.decoder !== decoder) return;
+    console.warn('live decoder:', e.message);
+    live.decoder = null;
+    requestLiveKeyFrame();
+  } });
+  live.decoder = decoder;
+  const hex = (b) => b.toString(16).padStart(2, '0');
+  decoder.configure({
+    codec: `avc1.${hex(payload[1])}${hex(payload[2])}${hex(payload[3])}`,
+    description: payload,
+    optimizeForLatency: true,
+    hardwareAcceleration: 'prefer-hardware',
+  });
+  live.timestamp = 0;
+  live.waitingKeyFrame = true;
+}
+
 function feedLiveFrame(buf) {
   const type = buf[0];
   const payload = buf.slice(1);
   const socket = live.ws;
   const onFrame = (frame) => {
-    if (live.ws !== socket || !pageActivity.active) { frame.close?.(); return; }
+    if (live.ws !== socket) { frame.close?.(); return; }
+    clearTimeout(live.startTimer);
+    live.hasFrame = true;
+    live.error = '';
+    live.pendingFrame?.close?.();
+    live.pendingFrame = null;
+    if (!pageActivity.active || state.mode !== 'live') {
+      live.pendingFrame = frame;
+      return;
+    }
     paintLive(frame);
+    $('liveGuide').hidden = true;
   };
   if (type === 0x01) {
-    if (live.decoder) live.decoder.close();
-    live.decoder = new VideoDecoder({ output: onFrame, error: (e) => console.warn('live decoder:', e.message) });
-    const hex = (b) => b.toString(16).padStart(2, '0');
-    live.decoder.configure({
-      codec: `avc1.${hex(payload[1])}${hex(payload[2])}${hex(payload[3])}`,
-      description: payload,
-      optimizeForLatency: true,
-      hardwareAcceleration: 'prefer-hardware',
-    });
-    live.timestamp = 0;
-  } else if ((type === 0x02 || type === 0x03) && live.decoder && live.decoder.state === 'configured') {
+    if (payload.length < 4) return;
+    live.decoderConfig = payload;
+    try { configureLiveDecoder(payload, onFrame); }
+    catch (e) { live.error = e.message; showLiveGuide(e.message); }
+  } else if (type === 0x02 || type === 0x03) {
+    if (type === 0x03 && live.waitingKeyFrame) return;
     try {
+      if (live.decoder?.state !== 'configured') {
+        if (type !== 0x02 || !live.decoderConfig) return;
+        configureLiveDecoder(live.decoderConfig, onFrame);
+      }
+      if (live.decoder.decodeQueueSize >= 2) {
+        if (type !== 0x02) { requestLiveKeyFrame(); return; }
+        // A fresh keyframe replaces queued work. Until then, stop adding deltas;
+        // repeatedly cancelling a slow decoder would prevent it outputting anything.
+        configureLiveDecoder(live.decoderConfig, onFrame);
+      }
       live.decoder.decode(new EncodedVideoChunk({ type: type === 0x02 ? 'key' : 'delta', timestamp: live.timestamp, data: payload }));
       live.timestamp += 16667;
-    } catch (e) {
-      // 丢帧, 等下一个关键帧
-    }
-  } else if (type === 0x04) {
-    createImageBitmap(new Blob([payload], { type: 'image/jpeg' })).then(onFrame).catch(() => {});
+      if (type === 0x02) live.waitingKeyFrame = false;
+    } catch (e) { requestLiveKeyFrame(); }
   }
 }
 
@@ -1836,11 +1981,14 @@ function paintLive(frame) {
     const canvas = $('liveCanvas');
     const w = frame.displayWidth || frame.width;
     const h = frame.displayHeight || frame.height;
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+    const native = live.real ? live.sourceGeometry : null;
+    const width = native?.width || w, height = native?.height || h;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
     }
-    canvas.getContext('2d').drawImage(frame, 0, 0);
+    if (native) canvas.getContext('2d').drawImage(frame, 0, 0, width, height);
+    else canvas.getContext('2d').drawImage(frame, 0, 0);
   } finally {
     // 包括绘制失败、失焦以及已断开的帧, 都必须归还解码/GPU 资源。
     frame.close?.();
@@ -1852,15 +2000,26 @@ function layoutLive() {
   const canvas = $('liveCanvas');
   const [sw, sh] = live.screen;
   if (!sw || !sh || !wrap.clientWidth) return;
-  // 与 2D 舞台相同的适配系数, 切换时比例与位置保持一致; 横屏时按旋转后的尺寸适配
+  // 与 2D 共用适配比例和容器留白, 切换时保持画面尺寸与中心一致。
   const [width, height] = contentSize(wrap);
   const deg = LIVE_ROTATION[live.orientation] || 0;
   const [fw, fh] = Math.abs(deg) === 90 ? [sh, sw] : [sw, sh];
   const scale = Math.min(width / fw, height / fh) * planFitRatio() * state.zoom;
   canvas.style.width = sw * scale + 'px';
   canvas.style.height = sh * scale + 'px';
-  canvas.style.borderRadius = LIVE_CORNER * scale + 'px';
+  // 模拟器尺寸为 point，真机尺寸为像素：将同一圆角半径换算到各自坐标单位。
+  const cornerScale = live.real ? (live.sourceGeometry?.pointScale || 1) : 1;
+  canvas.style.borderRadius = LIVE_CORNER * cornerScale * scale + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) rotate(${deg}deg)`;
+  // 胶囊距设备底部和画布底部各至少 8px; 自身位于渐变上方, 不额外缩小画面。
+  const dock = $('liveHome').parentElement;
+  const screenRect = canvas.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  const dockHeight = dock.offsetHeight;
+  dock.style.left = Math.max(dock.offsetWidth / 2, Math.min(wrap.clientWidth - dock.offsetWidth / 2, screenRect.left - wrapRect.left + screenRect.width / 2)) + 'px';
+  const bottomInset = Math.max(8, parseFloat(getComputedStyle(wrap).paddingBottom) - dockHeight - 8);
+  dock.style.top = Math.max(0, Math.min(wrap.clientHeight - dockHeight - bottomInset, screenRect.bottom - wrapRect.top + 8)) + 'px';
+  dock.style.bottom = 'auto';
   if (live.connected) liveReportSize();
 }
 
@@ -1880,6 +2039,7 @@ function checkLiveDrag(touch) {
 }
 
 function showLiveHeal() {
+  if (live.real) return;
   if (live.healing) return;
   $('liveHeal').dataset.state = 'warn';
   $('liveHealText').textContent = t('触摸似乎没有生效, 修复会结束前台 App');
@@ -1895,7 +2055,7 @@ function hideLiveHeal() {
 
 // 重启模拟器的 backboardd(连带 SpringBoard), 约 10 秒后界面恢复
 async function healLiveTouch() {
-  if (live.healing || !live.udid) return;
+  if (live.real || live.healing || !live.udid) return;
   live.healing = true;
   $('liveHeal').dataset.state = 'restarting';
   $('liveHealText').textContent = t('正在修复触摸, 模拟器桌面约 10 秒后恢复');
@@ -1945,7 +2105,30 @@ function livePoint(e) {
 }
 
 function liveRotate() {
-  liveSend({ type: 'orientation', value: LIVE_ROTATE_LEFT[live.orientation] || 1 });
+  if (live.rotatePending) return;
+  if (!live.real) {
+    liveSend({ type: 'orientation', value: LIVE_ROTATE_RIGHT[live.orientation] || 1 });
+    return;
+  }
+  if (!live.ws || live.ws.readyState !== WebSocket.OPEN) return;
+  const requestId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+  live.rotatePending = requestId;
+  $('liveRotate').disabled = true;
+  live.rotateTimer = setTimeout(() => liveRotationResult({ requestId, ok: false, detail: t('旋转操作超时') }), 12000);
+  liveSend({ type: 'rotate', direction: 'right', requestId });
+}
+
+function liveRotationResult(message) {
+  // 使用设备回报的实际方向, 多窗口保持一致。
+  if (message.ok && LIVE_ROTATION[message.orientation] !== undefined) {
+    live.orientation = message.orientation;
+    layoutLive();
+  }
+  if (!live.rotatePending || live.rotatePending !== message.requestId) return;
+  clearTimeout(live.rotateTimer);
+  live.rotatePending = null;
+  $('liveRotate').disabled = !live.udid;
+  if (!message.ok) toast(t('旋转失败: {0}', message.detail || t('设备未完成旋转')), true);
 }
 
 // 画面黑屏或卡住(如锁屏、休眠后)时手动恢复: 让 LayerLens 重建采集与编码, 收到关键帧即恢复成功;
@@ -1978,19 +2161,8 @@ function liveRestored() {
   toast(t('实时画面已恢复'));
 }
 
-// Home: 由 LayerLens 启动 SpringBoard, 直接回桌面; 失败时退回上滑手势.
-// Xcode 27 的 Device Hub 接管后, 硬件 home 按钮事件无效
-async function liveHome() {
-  try {
-    const res = await fetch('/api/hub/home', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device: live.udid }),
-    });
-    if (res.ok) return;
-  } catch (e) {
-    // LayerLens 不可用, 走手势
-  }
+// 每次点击发送完整 Home 按下/抬起; 双击由设备系统识别。
+function liveHome() {
   liveSend({ type: 'button', button: 'swipe-to-home' });
 }
 
@@ -1999,16 +2171,42 @@ async function liveHome() {
 // 选择保存在地址参数和 localStorage 中, App 重启换端口后由 Mac App 重新匹配
 
 const TARGET_KEY = 'layerlens_target';
-const TARGETS_POLL_MS = 2000;
+const TARGETS_POLL_MS = 10000;
 const API_VERSION = 1;
 // hadDevice: 页面加载时选中的设备是否存在
 // idle: 正在显示没有设备的默认页
-const targets = { hub: null, devices: [], deviceId: '', bundleId: '', hadDevice: false, idle: false };
+const targets = { hub: null, devices: [], deviceId: '', bundleId: '', deviceOnly: false, pinned: false, followRevision: 0, hadDevice: false, idle: false };
 
 // 连接过的设备和 App: 断开后仍显示在菜单中, 选中项不随设备断开跳动, 连回来后自动恢复.
 // 由 Mac App 记录和保存(扫描到的设备和 App 自动记录), 随设备列表返回; 网页和 App 窗口共用一份, 重启后保留, 用户可从菜单中移除
 // { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version } } } }
 const targetHistory = {};
+// Keep names scoped to the exact device/app, including while metadata is loading.
+const targetNames = new Map();
+
+function targetAppName(deviceId, bundleId, hint = '') {
+  const key = JSON.stringify([deviceId, bundleId]);
+  const app = targets.devices.find((device) => device.id === deviceId)?.apps.find((app) => app.bundleId === bundleId);
+  const name = [hint, app?.appName, targetHistory[deviceId]?.apps?.[bundleId]?.appName, targetNames.get(key)]
+    .find((name) => typeof name === 'string' && name.trim() && name !== bundleId);
+  if (name) targetNames.set(key, name);
+  return name || bundleId;
+}
+
+function renderSelectedAppName(hint = '') {
+  if (!targets.bundleId) {
+    $('appName').title = '';
+    $('targetBtn').title = t('切换设备 / App');
+    return;
+  }
+  const name = targetAppName(targets.deviceId, targets.bundleId, hint);
+  $('appName').textContent = name;
+  $('appName').title = targets.bundleId;
+  $('targetBtn').title = name === targets.bundleId ? targets.bundleId : `${name}\n${targets.bundleId}`;
+  $('targetBtn').title += '\n' + t(targets.pinned ? '已固定此 App' : '自动跟随前台 App');
+  appInfo.name = name;
+  document.title = `${name} - LayerLens`;
+}
 // 旧版存在网页本地的记录, 首次加载时交给 Mac App
 const LEGACY_HISTORY_KEY = 'layerlens_target_history';
 
@@ -2043,7 +2241,7 @@ function migrateTargetHistory() {
 
 // 扫描到的设备和 App 由 Mac App 自动记录; 当前目标尚未扫描到时(如带地址参数打开、设备未连接)补一条占位记录
 function recordTargetHistory() {
-  if (!targets.deviceId) return;
+  if (!targets.deviceId || (targets.bundleId && !targetBundleId(targets.bundleId))) return;
   const existing = targetHistory[targets.deviceId];
   if (existing && (!targets.bundleId || existing.apps?.[targets.bundleId])) return;
   // 未启动的模拟器从模拟器列表取名称
@@ -2051,7 +2249,10 @@ function recordTargetHistory() {
   const entry = existing || { id: targets.deviceId, name: device?.name || t('已断开的设备'), model: device?.model || '', os: device?.os || '', kind: device?.kind || (currentDevice() ? '' : device ? 'simulator' : '') };
   entry.apps = entry.apps || {};
   const app = currentApp();
-  if (targets.bundleId) entry.apps[targets.bundleId] = { bundleId: targets.bundleId, appName: app?.appName || appInfo.name || '', version: app?.version || '' };
+  if (targets.bundleId) {
+    const name = targetAppName(targets.deviceId, targets.bundleId);
+    entry.apps[targets.bundleId] = { bundleId: targets.bundleId, appName: name === targets.bundleId ? '' : name, version: app?.version || '' };
+  }
   targetHistory[targets.deviceId] = entry;
   postTargetHistory({ op: 'add', entry });
 }
@@ -2105,18 +2306,116 @@ function compatibilityWarning(app) {
   return t('LayerLens Mac App 版本过旧, 部分功能可能不可用, 请更新 Mac App');
 }
 
-async function loadTargets() {
-  const res = await fetch('/api/targets', { cache: 'no-store' });
-  const data = await res.json();
-  targets.hub = data.hub;
+// 每个窗口只连接 Mac 汇总状态; App 上游订阅由 Mac 统一维护。
+const targetStateHub = { socket: null, timer: 0, epoch: '', revision: -1, inventoryRevision: -1, ready: false, states: new Map() };
+const targetStateKey = (device, app) => JSON.stringify([device, app]);
+
+function receiveTargetForeground(deviceId, bundleId, foreground) {
+  if (deviceId !== targets.deviceId || bundleId !== targets.bundleId) return;
+  appState.stateRevision = (appState.stateRevision || 0) + 1;
+  if (!foreground && appState.value !== 'background') {
+    setAppState('background');
+    checkForeground();
+  } else if (foreground && (appState.value === 'background' || appState.value === 'offline')) {
+    setAppState('online');
+    if (state.mode !== 'live') refresh();
+  }
+}
+
+function mergeTargetStates() {
+  if (!targetStateHub.ready) return;
+  for (const device of targets.devices) {
+    device.apps = device.apps.filter(app => {
+      const entry = targetStateHub.states.get(targetStateKey(device.id, app.bundleId));
+      // 已移除的记录留作墓碑, 防止在途旧扫描把它复活。
+      if (entry?.removed) return false;
+      if (entry) Object.assign(app, entry);
+      return true;
+    });
+    for (const entry of targetStateHub.states.values()) {
+      if (!entry.removed && entry.deviceId === device.id && !device.apps.some(app => app.bundleId === entry.bundleId)) device.apps.push({...entry});
+    }
+  }
+}
+
+function acceptTargetStates(message) {
+  if (message.type !== 'states' || !Array.isArray(message.apps)) return;
+  if (message.epoch !== targetStateHub.epoch) {
+    if (!message.replace) return;
+    targetStateHub.epoch = message.epoch;
+    targetStateHub.revision = -1;
+    targetStateHub.inventoryRevision = -1;
+  }
+  const stateChanged = message.revision > targetStateHub.revision;
+  const inventoryChanged = message.inventory && message.inventoryRevision > targetStateHub.inventoryRevision;
+  if (!stateChanged && !inventoryChanged) return;
+  if (stateChanged) {
+    targetStateHub.revision = message.revision;
+    if (message.replace) {
+      for (const [key, entry] of targetStateHub.states) targetStateHub.states.set(key, {...entry, removed: true});
+    }
+    for (const entry of message.apps) targetStateHub.states.set(targetStateKey(entry.deviceId, entry.bundleId), entry);
+    for (const entry of message.removed || []) targetStateHub.states.set(targetStateKey(entry.deviceId, entry.bundleId), {...entry, removed: true});
+  }
+  targetStateHub.ready = true;
+  if (inventoryChanged) {
+    targetStateHub.inventoryRevision = message.inventoryRevision;
+    applyTargetInventory(message.inventory);
+  } else mergeTargetStates();
+  syncSelectedTargetState();
+  renderTargetMenu();
+  if (pageActivity.ready && pageActivity.active) reconcileTargets().catch(() => {});
+}
+
+function applyTargetInventory(data) {
+  if (data.hub) targets.hub = data.hub;
   targets.devices = data.devices || [];
   targets.simulators = data.simulators || [];
-  // 旧版 Mac App 不返回历史, 保留本页的记录
-  if (data.history) {
-    replaceTargetHistory(data.history);
-    netCaptureHistoryChanged();
-  }
+  mergeTargetStates();
+  if (data.history) { replaceTargetHistory(data.history); netCaptureHistoryChanged(); }
   settleSimPending();
+}
+
+function ensureTargetStateSocket() {
+  if (targetStateHub.socket) return;
+  clearTimeout(targetStateHub.timer);
+  const url = new URL('/api/hub/target-states', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(url);
+  targetStateHub.socket = socket;
+  socket.onmessage = event => {
+    if (targetStateHub.socket !== socket) return;
+    acceptTargetStates(JSON.parse(event.data));
+  };
+  socket.onclose = () => {
+    if (targetStateHub.socket !== socket) return;
+    targetStateHub.socket = null;
+    targetStateHub.ready = false;
+    // 同一 revision 的重连快照也需要重新同步。
+    targetStateHub.revision = -1;
+    targetStateHub.inventoryRevision = -1;
+    selectedTargetDisconnected();
+    targetStateHub.timer = setTimeout(ensureTargetStateSocket, 2000);
+  };
+  socket.onerror = () => {};
+}
+
+let targetLoad = null;
+async function loadTargets() {
+  if (targetLoad) return targetLoad;
+  const epoch = targetStateHub.epoch, version = targetStateHub.inventoryRevision;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  targetLoad = (async () => {
+    const res = await fetch('/api/targets', { cache: 'no-store', signal: controller.signal });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    // 已有更新的原生通知时, 在途的 HTTP 快照只作为过期结果丢弃。
+    if (epoch === targetStateHub.epoch && version === targetStateHub.inventoryRevision) applyTargetInventory(data);
+    ensureTargetStateSocket();
+    syncSelectedTargetState();
+  })();
+  try { await targetLoad; } finally { clearTimeout(timer); targetLoad = null; }
 }
 
 // 模拟器启动 / 关闭: 等列表反映出结果(出现在或离开已启动设备中)再清除进行中状态, 超时也清除
@@ -2180,11 +2479,18 @@ function simPowerButton(id, booted) {
   return button;
 }
 
+function targetBundleId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/.test(value) ? value : '';
+}
+
 function savedTarget() {
   const params = new URLSearchParams(location.search);
-  if (params.get('device')) return { deviceId: params.get('device'), bundleId: params.get('app') || '', explicit: true };
+  if (params.get('device')) return { deviceId: params.get('device'), bundleId: targetBundleId(params.get('app')), pinned: params.get('pin') === '1', explicit: true };
   try {
-    return JSON.parse(localStorage.getItem(TARGET_KEY)) || {};
+    const saved = JSON.parse(localStorage.getItem(TARGET_KEY)) || {};
+    saved.bundleId = targetBundleId(saved.bundleId);
+    saved.pinned = !!saved.pinned && !!saved.bundleId;
+    return saved;
   } catch (e) {
     return {};
   }
@@ -2198,11 +2504,15 @@ function pickTarget() {
   if (saved.explicit || known || device?.apps.some((a) => a.bundleId === saved.bundleId)) {
     targets.deviceId = saved.deviceId || '';
     targets.bundleId = saved.bundleId || '';
+    targets.deviceOnly = !!targets.deviceId && !targets.bundleId;
+    targets.pinned = !!saved.pinned && !!targets.bundleId;
     return;
   }
   const first = defaultDevice();
   targets.deviceId = first ? first.id : '';
   targets.bundleId = firstAppId(first);
+  targets.deviceOnly = !targets.bundleId;
+  targets.pinned = false;
 }
 
 // 优先有运行中 App 的设备; 都没有时选第一台已启动的模拟器, 以便直接显示实时画面
@@ -2210,19 +2520,19 @@ function defaultDevice() {
   return targets.devices.find((d) => d.apps.length) || targets.devices.find((d) => d.kind === 'simulator') || targets.devices[0];
 }
 
-// 挂起的 App 由 Mac App 标记 suspended; 在后台但未挂起(如 Xcode 调试中)的由 App 上报 foreground
-// foreground 由 Pod 上报, 可能是布尔值或 0 / 1; 旧版 Pod 不上报
+// 前后台只能来自明确通知或查询。扫描超时只反映可达性, 不能推断后台。
 function appInBackground(app) {
-  return !!app.suspended || app.foreground === false || app.foreground === 0;
+  return app.foreground === false || app.foreground === 0;
 }
 
 function appInForeground(app) {
-  return !app.suspended && (app.foreground === true || app.foreground === 1);
+  return app.foreground === true || app.foreground === 1;
 }
 
 // 自动选择时优先前台的 App, 挂起的 App 现在也会留在列表里
 function firstAppId(device) {
-  return (device?.apps.find((a) => !appInBackground(a)) || device?.apps[0])?.bundleId || '';
+  const foreground = device?.apps.filter((app) => app.stateReachable !== false && appInForeground(app)) || [];
+  return foreground.length === 1 ? foreground[0].bundleId : '';
 }
 
 // 选择在后台的 App 时先把它切到前台, 否则层级和实时画面都不是它
@@ -2244,7 +2554,8 @@ const ACTIVATE_DEBOUNCE_MS = 150;
 
 // failure: 启动失败的原因, 不再切换; hint: 已启动但没有在前台响应, 照常切换并提示可能的原因
 // signal: 用户切到别处时取消, 返回 { cancelled: true }
-async function activateApp(deviceId, bundleId, signal) {
+async function activateApp(deviceId, bundleId, signal, job) {
+  if (signal?.aborted) return { cancelled: true };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ACTIVATE_TIMEOUT_MS);
   const cancel = () => controller.abort();
@@ -2253,7 +2564,7 @@ async function activateApp(deviceId, bundleId, signal) {
     const response = await fetch('/api/hub/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device: deviceId, app: bundleId }),
+      body: JSON.stringify({ device: deviceId, app: bundleId, owner: job ? targetTaskOwner : undefined, task: job?.id, order: job?.order }),
       signal: controller.signal,
     });
     const result = await response.json().catch(() => ({}));
@@ -2267,72 +2578,228 @@ async function activateApp(deviceId, bundleId, signal) {
     if (signal?.aborted) return { cancelled: true };
     if (controller.signal.aborted) return { failure: t(LAUNCH_FAILURES.timeout) };
     // 请求本身失败(如 LayerLens 正在重启)时仍切换, 由页面提示连接状态
-    return {};
+    return job ? {failure: t('切换失败: {0}', e.message)} : {};
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', cancel);
   }
 }
 
-// 进行中的切换 { deviceId, bundleId, controller, timer, action }: 以最后一次点击为准
+// 每次选择拥有独立任务; 任务身份保留到下一次选择, 所有迟到结果必须检查它。
 let pendingSwitch = null;
+let targetTask = null;
+let targetTaskOrder = 0;
+const targetTaskOwner = crypto.randomUUID();
+
+function taskCurrent(job) {
+  return targetTask === job && !job.controller.signal.aborted && targets.deviceId === job.deviceId && targets.bundleId === job.bundleId;
+}
+
+function renderTargetTask() {
+  const status = $('targetTaskStatus');
+  if (!status) return;
+  const job = targetTask;
+  const busy = job && taskCurrent(job) && ['queued', 'activating', 'syncing', 'hierarchy'].includes(job.phase) && (job.phase !== 'hierarchy' || hierarchyAvailable());
+  status.hidden = state.mode === 'live' || !busy;
+  $('targetTaskText').textContent = !busy ? '' : job.phase === 'hierarchy' ? t('正在获取层级…') : t('正在切换到 {0}…', job.appName || job.bundleId);
+}
+
+function setTaskPhase(job, phase) {
+  if (!taskCurrent(job)) return;
+  job.phase = phase;
+  renderTargetTask();
+  renderTargetMenu();
+}
 
 function cancelSwitch() {
-  const job = pendingSwitch;
+  const job = targetTask;
   if (!job) return null;
+  const wasBusy = ['queued', 'activating', 'syncing', 'hierarchy'].includes(job.phase);
+  targetTask = null;
   pendingSwitch = null;
   clearTimeout(job.timer);
   job.controller.abort();
+  pageActivity.controller?.abort();
+  ++refreshSeq;
+  ++appInfoSeq;
+  resetImages();
+  cancelTaskActivation(job);
+  job.phase = 'cancelled';
   hideToast();
+  renderTargetTask();
   renderTargetMenu();
+  return wasBusy ? job : null;
+}
+
+// 网页超时/失败也要撤掉后台排队, 防止提示失败以后才把旧 App 拉到前台。
+function cancelTaskActivation(job) {
+  if (!job.activationSent) return;
+  job.activationSent = false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  fetch('/api/hub/activation/cancel', {method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({owner: targetTaskOwner, task: job.id, order: job.order}), signal: controller.signal}).catch(() => {}).finally(() => clearTimeout(timer));
+}
+
+function beginTargetTask(deviceId, bundleId, appName = '') {
+  cancelSwitch();
+  const job = {id: crypto.randomUUID(), order: ++targetTaskOrder, deviceId, bundleId, appName, controller: new AbortController(), timer: 0, phase: 'ready', action: 'connect', promise: null, needsHierarchy: false};
+  targetTask = job;
   return job;
 }
 
-// 页面已先切到目标 App, 激活在短暂去抖后异步完成. 旧任务的结果不会再修改当前页面.
-function activateSelectedAppLater(deviceId, bundleId, appName) {
-  const job = { deviceId, bundleId, controller: new AbortController(), timer: 0, action: 'switch' };
-  pendingSwitch = job;
-  renderTargetMenu();
-  job.timer = setTimeout(async () => {
-    job.timer = 0;
-    const result = await activateApp(deviceId, bundleId, job.controller.signal);
-    if (pendingSwitch !== job) return;
-    const selected = () => targets.deviceId === deviceId && targets.bundleId === bundleId;
-    if (result.failure) {
-      if (selected()) {
-        try {
-          sessionStorage.setItem(STAY_OFFLINE_KEY, deviceId + '|' + bundleId);
-        } catch (e) {
-          // 不可用时照常跟随前台 App
-        }
-        setAppState('offline');
-      }
-      toast(t('{0}. 显示的是保存在本机的日志和抓包', result.failure.replace(/[.。]$/, '')), true, true);
-    } else if (result.hint) {
-      if (selected()) setAppState('background');
-      toast(result.hint, true, true);
-    } else if (selected()) {
-      // waitForApp 已确认新端口可用; 更新一次列表后再取层级, 避免连到挂起前的旧端口
-      try {
-        await loadTargets();
-      } catch (e) {
-        // 事件流仍会自动重连
-      }
-      if (pendingSwitch !== job || !selected()) return;
-      appState.instanceId = currentApp()?.instanceId || '';
-      appState.warning = compatibilityWarning(currentApp());
-      setAppState('online');
-      loadAppInfo();
-      if (state.mode !== 'live') refresh();
-    }
-    if (pendingSwitch !== job) return;
-    pendingSwitch = null;
-    renderTargetMenu();
-    syncOfflineView();
-  }, ACTIVATE_DEBOUNCE_MS);
+// 请求同时受任务取消和阶段超时约束; 新任务不会等旧请求释放才能开始。
+async function taskRequest(job, path, timeout = 5000, options = {}) {
+  if (!taskCurrent(job)) throw new DOMException('Cancelled', 'AbortError');
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  job.controller.signal.addEventListener('abort', cancel, {once: true});
+  let expired = false;
+  const timer = setTimeout(() => { expired = true; controller.abort(); }, timeout);
+  try {
+    const response = await fetch(path, {...options, signal: controller.signal});
+    const value = await response.json();
+    if (!taskCurrent(job)) throw new DOMException('Cancelled', 'AbortError');
+    if (!response.ok) throw new Error(value.error || 'HTTP ' + response.status);
+    return value;
+  } catch (error) {
+    if (expired) throw new Error(t('请求超时, 请重试'));
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    job.controller.signal.removeEventListener('abort', cancel);
+  }
 }
 
-// 切换设备会重新加载页面, 提示存到加载后再显示
+function hierarchyAvailable() {
+  return !['background', 'offline', 'restarting'].includes(appState.value);
+}
+
+async function readTaskHierarchy(job) {
+  if (!hierarchyAvailable()) return;
+  if (!taskCurrent(job) || !job.bundleId || state.mode === 'live') return;
+  pageActivity.controller?.abort();
+  const controller = new AbortController();
+  pageActivity.controller = controller;
+  // 一个任务内再次刷新/切模式只保留最后一次层级请求。
+  const cancel = () => controller.abort();
+  job.controller.signal.addEventListener('abort', cancel, {once: true});
+  let expired = false;
+  const timer = setTimeout(() => { expired = true; controller.abort(); }, 5000);
+  const seq = ++refreshSeq;
+  setTaskPhase(job, 'hierarchy');
+  try {
+    const roots = await api(`/api/hierarchy`, {signal: controller.signal});
+    if (!taskCurrent(job) || seq !== refreshSeq || controller.signal.aborted || !hierarchyAvailable() || state.mode === 'live' || !pageActivity.active) return;
+    applyHierarchy(roots);
+    setTaskPhase(job, 'done');
+  } catch (error) {
+    if (!taskCurrent(job) || seq !== refreshSeq) return;
+    if (error.name === 'AbortError' && !expired) return;
+    job.error = expired ? t('请求超时, 请重试') : error.message;
+    setTaskPhase(job, 'failed');
+    showRefreshError(new Error(job.error));
+  } finally {
+    clearTimeout(timer);
+    job.controller.signal.removeEventListener('abort', cancel);
+    if (pageActivity.controller === controller) pageActivity.controller = null;
+    if (taskCurrent(job) && seq === refreshSeq && job.phase === 'hierarchy') setTaskPhase(job, 'ready');
+  }
+}
+
+// 激活命令的结果不等于 App 的前后台状态; 已确认的状态连接优先。
+function observedTargetState(job) {
+  const entry = targetStateHub.ready ? targetStateHub.states.get(targetStateKey(job.deviceId, job.bundleId)) : null;
+  if (entry?.removed) return 'offline';
+  const app = entry || currentApp();
+  if (app && appInBackground(app)) return 'background';
+  if (app?.stateConnected && (app.foreground === true || app.foreground === 1)) return 'online';
+  return null;
+}
+
+async function runTargetTask(job) {
+  try {
+    setTaskPhase(job, 'activating');
+    job.activationSent = true;
+    const result = await activateApp(job.deviceId, job.bundleId, job.controller.signal, job);
+    if (!taskCurrent(job) || result.cancelled) return;
+    const observed = observedTargetState(job);
+    if (result.failure || (result.hint && observed !== 'online')) {
+      if (result.failure) cancelTaskActivation(job);
+      else job.activationSent = false;
+      job.error = result.failure || result.hint;
+      if (result.failure) {
+        try { sessionStorage.setItem(STAY_OFFLINE_KEY, job.deviceId + '|' + job.bundleId); } catch (_) {}
+      }
+      setAppState(observed || 'offline', observed ? undefined : job.error);
+      setTaskPhase(job, 'failed');
+      toast(result.failure ? t('{0}. 显示的是保存在本机的日志和抓包', job.error.replace(/[.。]$/, '')) : job.error, true, true);
+      return;
+    }
+    job.activationSent = false;
+    setTaskPhase(job, 'syncing');
+    const epoch = targetStateHub.epoch, version = targetStateHub.inventoryRevision;
+    try {
+      const inventory = await taskRequest(job, '/api/targets', 3000);
+      if (taskCurrent(job) && epoch === targetStateHub.epoch && version === targetStateHub.inventoryRevision) applyTargetInventory(inventory);
+    } catch (error) { if (!taskCurrent(job)) return; } // 状态推送兜底, 列表失败不阻断任务。
+    if (!taskCurrent(job)) return;
+    const instance = currentApp()?.instanceId || '';
+    if (appState.instanceId && instance && instance !== appState.instanceId) {
+      setRunning(false);
+      clearHierarchy();
+    }
+    if (instance) appState.instanceId = instance;
+    const confirmed = observedTargetState(job);
+    if (confirmed !== 'offline') appState.dropped = false;
+    appState.warning = compatibilityWarning(currentApp());
+    setAppState(confirmed || 'online');
+    if (confirmed !== 'offline') await loadAppInfo(job);
+    if (!taskCurrent(job)) return;
+    if (state.mode !== 'live' && pageActivity.active) {
+      do {
+        job.needsHierarchy = false;
+        await readTaskHierarchy(job);
+      } while (taskCurrent(job) && job.needsHierarchy && state.mode !== 'live' && pageActivity.active);
+    }
+    else { pageActivity.pending = true; setTaskPhase(job, 'done'); }
+  } catch (error) {
+    if (!taskCurrent(job)) return;
+    cancelTaskActivation(job);
+    job.error = error.message;
+    setTaskPhase(job, 'failed');
+    toast(t('切换失败: {0}', job.error), true);
+  } finally {
+    if (pendingSwitch === job) {
+      pendingSwitch = null;
+      if (taskCurrent(job) && !['failed', 'done'].includes(job.phase)) setTaskPhase(job, 'done');
+      renderTargetTask();
+      renderTargetMenu();
+      syncOfflineView();
+    }
+  }
+}
+
+function activateSelectedAppLater(deviceId, bundleId, appName, action = 'switch') {
+  // 选择动作刚创建、尚未发出的任务可直接配置; 重试则创建全新任务。
+  const job = targetTask && taskCurrent(targetTask) && targetTask.action === 'connect' && targetTask.phase === 'ready' ? targetTask : beginTargetTask(deviceId, bundleId, appName);
+  job.appName = appName;
+  job.action = action;
+  if (liveAvailable()) setMode('live');
+  pendingSwitch = job;
+  setTaskPhase(job, 'queued');
+  job.promise = new Promise(resolve => {
+    const cancelled = () => resolve();
+    job.controller.signal.addEventListener('abort', cancelled, {once: true});
+    job.timer = setTimeout(async () => {
+      job.timer = 0;
+      try { if (taskCurrent(job)) await runTargetTask(job); }
+      finally { job.controller.signal.removeEventListener('abort', cancelled); resolve(); }
+    }, ACTIVATE_DEBOUNCE_MS);
+  });
+  return job.promise;
+}
+
+// 兼容旧页面重载时暂存的提示
 const PENDING_TOAST_KEY = 'layerlens_pending_toast';
 
 function showPendingToast() {
@@ -2345,19 +2812,35 @@ function showPendingToast() {
   }
 }
 
-function switchTarget(deviceId, bundleId) {
-  // 重新加载后保持当前模式(如实时画面)和视角
+function switchTarget(deviceId, bundleId, activating = false, appName = '') {
+  cancelSwitch();
+  targets.pinned = false;
+  targets.followRevision = (targets.followRevision || 0) + 1;
+  if (deviceId !== targets.deviceId || bundleId !== targets.bundleId) setRunning(false);
   saveViewState();
-  try {
-    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId }));
-  } catch (e) {
-    // 不可用时只依赖地址参数
+  liveSuspend();
+  appState.source = null;
+  clearTimeout(appState.offlineTimer);
+  appState.offlineTimer = 0;
+  appState.connected = false;
+  targets.deviceId = deviceId;
+  targets.bundleId = '';
+  targets.deviceOnly = !bundleId;
+  targets.idle = false;
+  targets.hadDevice = !!currentDevice();
+  rememberTarget(deviceId, bundleId);
+  // 先连接设备画面，App 激活与层级请求独立进行，不再整页刷新。
+  syncLive();
+  if (bundleId) switchTargetInPlace(bundleId, activating, appName);
+  else {
+    ++appInfoSeq;
+    clearHierarchy();
+    connectInPlace(deviceId, '');
   }
-  const params = new URLSearchParams({ device: deviceId, app: bundleId });
-  location.search = params.toString();
+  renderTargetMenu();
 }
 
-const targetMenuUi = { offlineOpen: false };
+const targetMenuUi = { offlineOpen: false, signature: '' };
 
 // 设备扫描和历史字典都不保证顺序; 使用稳定字段排序, 避免每次刷新菜单来回跳
 function compareTargetText(a, b) {
@@ -2374,7 +2857,15 @@ function compareTargetApps(a, b) {
 
 // 顶栏按钮中应用名后显示所在设备, 同一 App 同时运行在模拟器和真机上时能区分; 只选了设备时名称已是设备名, 不重复
 function renderTargetLabel() {
+  renderSelectedAppName();
   // 未启动的模拟器在模拟器列表中, 历史里可能只有占位记录
+  const pin = $('targetPin'), pinned = !!targets.pinned && !!targets.bundleId;
+  const pinLabel = t(pinned ? '恢复自动跟随' : '固定此 App');
+  pin.hidden = !targets.bundleId;
+  pin.title = pinLabel;
+  pin.classList.toggle('on', pinned);
+  pin.setAttribute('aria-label', pinLabel);
+  pin.setAttribute('aria-pressed', String(pinned));
   const device = currentDevice() || (targets.simulators || []).find((sim) => sim.id === targets.deviceId);
   const entry = targetHistory[targets.deviceId];
   const name = device?.name || entry?.name || '';
@@ -2390,10 +2881,16 @@ function renderTargetLabel() {
 
 function renderTargetMenu() {
   const menu = $('targetMenu');
-  const children = [];
-  const background = appState.value === 'background';
   recordTargetHistory();
   renderTargetLabel();
+  settleBootLaunch();
+  syncOfflineView();
+  if (menu.hidden || menu.classList.contains('closing')) { targetMenuUi.signature = ''; return; }
+  const signature = JSON.stringify([targets.devices, targets.simulators, targetHistory, targets.deviceId, targets.bundleId, targets.pinned, appState.value, appState.connected, pendingSwitch && [pendingSwitch.deviceId, pendingSwitch.bundleId, pendingSwitch.action], [...simPending], targetMenuUi.offlineOpen, LANG]);
+  if (signature === targetMenuUi.signature) return;
+  targetMenuUi.signature = signature;
+  const children = [];
+  const background = appState.value === 'background';
   // 按类型分组: 模拟器(已启动在前, 未启动的灰色显示在后), 真机; 已断开的历史设备排在各组最后
   const simulators = targets.devices.filter((d) => d.kind === 'simulator').sort(compareTargetDevices);
   const offline = targets.simulators || [];
@@ -2437,29 +2934,28 @@ function renderTargetMenu() {
   options.addEventListener('click', () => openPanel('options'));
   children.push(options);
   menu.replaceChildren(...children);
-  settleBootLaunch();
-  syncOfflineView();
 }
 
 // 已启动的设备及其上运行的 App
 function targetDeviceRows(device, background) {
   const rows = [];
-  // 模拟器可以只选设备, 不连接 App 时也能使用实时画面
-  const selectable = device.kind === 'simulator';
+  // 真机和模拟器都可只选设备，不连接 App 时也能使用实时画面。
+  const selectable = true;
   const head = el(selectable ? 'button' : 'div', 'target-device');
   // 真机名称是用户自定义的, 附上机型; 与名称相同(如模拟器)时不重复
   const model = device.model && device.model !== device.name ? device.model : '';
   head.append(el('span', 'status-dot ok'), el('span', 'target-device-name', device.name), el('span', 'target-device-os', [model, device.os].filter(Boolean).join(' · ')));
   if (selectable) {
     head.classList.toggle('current', device.id === targets.deviceId && !targets.bundleId);
-    head.title = t('只使用实时画面');
+    head.title = t('自动跟随此设备的前台 App');
     head.addEventListener('click', () => {
       hidePopovers();
       cancelSwitch();
-      if (device.id !== targets.deviceId || targets.bundleId) switchTarget(device.id, '');
+      switchTarget(device.id, '');
     });
     const row = el('div', 'target-device-row');
-    row.append(head, simPowerButton(device.id, true));
+    row.append(head);
+    if (device.kind === 'simulator') row.append(simPowerButton(device.id, true));
     rows.push(row);
   } else {
     rows.push(head);
@@ -2475,9 +2971,16 @@ function targetDeviceRows(device, background) {
 
 // 已断开的历史设备: 灰色显示, 可从列表移除; 选中的设备不能移除
 function goneDeviceRows(entry) {
-  const head = el('div', 'target-device offline');
+  const head = el('button', 'target-device offline');
   const model = entry.model && entry.model !== entry.name ? entry.model : '';
   head.append(el('span', 'status-dot'), el('span', 'target-device-name', entry.name), el('span', 'target-device-os', [model, entry.os].filter(Boolean).join(' · ') || t('已断开')));
+  head.classList.toggle('current', entry.id === targets.deviceId && !targets.bundleId);
+  head.title = t('自动跟随此设备的前台 App');
+  head.addEventListener('click', () => {
+    hidePopovers();
+    cancelSwitch();
+    switchTarget(entry.id, '');
+  });
   if (entry.id !== targets.deviceId) head.appendChild(historyRemoveButton(entry.id, ''));
   const group = el('div', 'target-apps');
   historyApps(entry.id).sort(compareTargetApps).forEach((app) => group.append(targetAppRow(entry.id, app, false)));
@@ -2510,17 +3013,24 @@ function targetAppRow(deviceId, app, background) {
   const inBackground = !away && (current && appState.connected ? background : (current && background) || appInBackground(app));
   const live = targets.devices.some((d) => d.id === deviceId);
   const switching = pendingSwitch?.deviceId === deviceId && pendingSwitch.bundleId === app.bundleId;
+  const unreachable = !away && !inBackground && app.stateReachable === false;
   row.classList.toggle('current', current);
-  row.classList.toggle('background', inBackground);
+  row.classList.toggle('background', inBackground || unreachable);
   row.classList.toggle('away', away);
   row.classList.toggle('switching', switching);
-  row.append(el('span', 'status-dot'), el('span', 'target-app-name', app.appName || app.bundleId));
+  const name = targetAppName(deviceId, app.bundleId, app.appName);
+  row.append(el('span', 'status-dot'), el('span', 'target-app-name', name));
   if (!away && !appCompatible(app)) row.append(el('span', 'target-badge', t('版本不兼容')));
-  row.append(el('span', 'target-app-meta', switching ? t(pendingSwitch.action === 'launch' ? '启动中…' : '切换中…') : inBackground ? t('在后台') : away ? t('未连接') : app.version || ''));
+  row.append(el('span', 'target-app-meta', switching ? t(pendingSwitch.action === 'launch' ? '启动中…' : '切换中…') : inBackground ? t('在后台') : away ? t('未连接') : unreachable ? t('响应超时') : app.version || ''));
   if (away && !current) row.appendChild(historyRemoveButton(deviceId, app.bundleId));
   row.title = !away ? `${app.bundleId} · ${t('端口 {0}', app.port)}` : live ? `${app.bundleId} · ${t('已挂起或退出, 点击启动或切到前台')}` : `${app.bundleId} · ${t('设备未连接, 连上后自动恢复')}`;
   row.addEventListener('click', async () => {
     hidePopovers();
+    // 已选中且在线时没有新目标; 保留正在加载的详情、截图和层级。
+    if (current && !inBackground && !away && !pendingSwitch) {
+      if (!appState.connected) watchApp();
+      return;
+    }
     // 新的点击取代进行中的切换
     const cancelled = cancelSwitch();
     // 未连接的 App 直接切过去显示保存的日志和抓包, 同时尝试启动, 启动后自动连接; 启动失败只提示
@@ -2530,72 +3040,38 @@ function targetAppRow(deviceId, app, background) {
       } catch (e) {
         // 不可用时照常跟随前台 App
       }
-      if (deviceId === targets.deviceId && targets.bundleId) {
-        switchTargetInPlace(app.bundleId);
+      if (deviceId === targets.deviceId) {
+        switchTargetInPlace(app.bundleId, live, app.appName);
         if (live) launchAwayApp(deviceId, app.bundleId, app.appName);
         return;
       }
-      // 切换设备会重新加载页面, 加载后再启动
-      if (live) {
-        try {
-          sessionStorage.setItem(PENDING_LAUNCH_KEY, deviceId + '|' + app.bundleId);
-        } catch (e) {
-          // 不可用时不启动
-        }
-      }
-      switchTarget(deviceId, app.bundleId);
+      switchTarget(deviceId, app.bundleId, live, app.appName);
+      if (live) launchAwayApp(deviceId, app.bundleId, app.appName);
       return;
     }
     // 同一设备切 App 时先更新页面, 再在后台激活; 快速切换只会激活最后停留的 App
     if (live && (inBackground || away || !current)) {
-      if (deviceId === targets.deviceId && targets.bundleId) {
+      if (deviceId === targets.deviceId) {
         if (!current) switchTargetInPlace(app.bundleId, true, app.appName || app.bundleId);
         else setAppState('background', t('正在切换到 {0}…', app.appName || app.bundleId));
         activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
         return;
       }
-      // 跨设备需要重新加载页面, 仍先确认 App 可用, 避免新页面连到旧端口
-      // 激活要等 App 响应, 挂起的真机 App 要十几秒; 提示一直显示到结束, 期间可以切到别处
-      const job = { deviceId, bundleId: app.bundleId, controller: new AbortController(), action: 'switch' };
-      pendingSwitch = job;
-      toast(t('正在切换到 {0}…', app.appName || app.bundleId), false, false, true);
-      renderTargetMenu();
-      const result = await activateApp(deviceId, app.bundleId, job.controller.signal);
-      // 已被取消或被新的切换取代
-      if (pendingSwitch !== job) return;
-      pendingSwitch = null;
-      renderTargetMenu();
-      const { failure } = result;
-      // 启动失败(如设备锁屏)时仍然切过去, 查看 LayerLens 保存的日志和抓包
-      const hint = failure ? t('{0}. 显示的是保存在本机的日志和抓包', failure.replace(/[.。]$/, '')) : result.hint;
-      if (failure && !current) {
-        try {
-          sessionStorage.setItem(STAY_OFFLINE_KEY, deviceId + '|' + app.bundleId);
-        } catch (e) {
-          // 不可用时照常跟随前台 App
-        }
-      }
-      if (hint) toast(hint, true, true);
-      else hideToast();
-      if (hint && !current && !(deviceId === targets.deviceId && targets.bundleId)) {
-        try {
-          sessionStorage.setItem(PENDING_TOAST_KEY, hint);
-        } catch (e) {
-          // 不可用时没有提示
-        }
-      }
+      switchTarget(deviceId, app.bundleId, true, app.appName);
+      activateSelectedAppLater(deviceId, app.bundleId, app.appName || app.bundleId);
+      return;
     }
     // 当前 App 回到前台后由事件流恢复, 不必重新加载; 事件流断开时立即重连, 不等浏览器的重试间隔. 同一设备上换 App 原地切换, 实时画面不中断
     if (current) {
       // 切回已连接的当前 App: 取消的切换在同一设备上时, 启动请求已发出, 那个 App 可能已被拉到前台, 把当前 App 切回前台
       if (cancelled && cancelled.deviceId === deviceId && live && !(inBackground || away)) {
-        activateApp(deviceId, app.bundleId);
+        activateSelectedAppLater(deviceId, app.bundleId, app.appName);
       }
       if (cancelled) toast(t('已取消切换'));
       if (!appState.connected) watchApp();
       return;
     }
-    if (deviceId === targets.deviceId && targets.bundleId) switchTargetInPlace(app.bundleId);
+    if (deviceId === targets.deviceId) switchTargetInPlace(app.bundleId);
     else switchTarget(deviceId, app.bundleId);
   });
   return row;
@@ -2618,8 +3094,8 @@ function offlineSimulatorRow(sim) {
   return [row, group];
 }
 
-// 跟随模拟器前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
-// 前台是未集成的 App(如设置)时保持不动. 旧版 Pod 不上报 foreground, 不参与跟随.
+// 跟随当前设备前台 App: 当前 App 进入后台(或已退出)时, 切到同一设备上在前台的另一个已集成 App;
+// 没有可关联的前台 App 时短暂等待再退回设备模式。旧版 Pod 不上报 foreground, 不参与跟随。
 // 事件流连着时以 App 实时推送的状态为准; Mac App 的列表每 2s 扫描一次, 刚切换后可能还是旧状态
 const STAY_OFFLINE_KEY = 'layerlens_stay_offline';
 
@@ -2641,20 +3117,7 @@ function stayingOffline() {
 const PENDING_LAUNCH_KEY = 'layerlens_pending_launch';
 
 function launchAwayApp(deviceId, bundleId, appName) {
-  const job = { deviceId, bundleId, controller: new AbortController(), timer: 0, action: 'launch' };
-  pendingSwitch = job;
-  renderTargetMenu();
-  syncOfflineView();
-  job.timer = setTimeout(async () => {
-    job.timer = 0;
-    const { failure, hint } = await activateApp(deviceId, bundleId, job.controller.signal);
-    if (pendingSwitch !== job) return;
-    pendingSwitch = null;
-    renderTargetMenu();
-    syncOfflineView();
-    if (failure) toast(t('{0}. 显示的是保存在本机的日志和抓包', failure.replace(/[.。]$/, '')), true, true);
-    else if (hint) toast(hint, true, true);
-  }, ACTIVATE_DEBOUNCE_MS);
+  return activateSelectedAppLater(deviceId, bundleId, appName, 'launch');
 }
 
 function resumePendingLaunch() {
@@ -2673,16 +3136,18 @@ function resumePendingLaunch() {
 }
 
 function currentAppAway() {
-  if (!currentDevice() || !targets.bundleId || stayingOffline()) return false;
+  if (!currentDevice() || targets.pinned || stayingOffline()) return false;
+  if (!targets.bundleId) return true;
   // 正在把当前选择拉到前台时不要自动跟随仍在前台的旧 App
   if (pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId) return false;
   if (appState.value === 'background') return true;
   const app = currentApp();
-  if (appState.value === 'offline') return !app;
+  if (appState.value === 'offline') return !app || appInBackground(app);
   return !appState.connected && !!app && appInBackground(app);
 }
 
 function followForeground(next) {
+  if (targets.pinned || next[0] !== targets.deviceId) return;
   const app = targets.devices.find((d) => d.id === next[0])?.apps.find((a) => a.bundleId === next[1]);
   switchTargetInPlace(next[1]);
   toast(t('已切换到前台 App {0}', app?.appName || next[1]));
@@ -2690,19 +3155,48 @@ function followForeground(next) {
 
 // 同一设备上换 App: 只替换目标、事件流、App 信息和层级, 不重新加载页面, 实时画面不中断
 function rememberTarget(deviceId, bundleId) {
+  const pinned = !!targets.pinned && !!bundleId;
   try {
-    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId }));
+    localStorage.setItem(TARGET_KEY, JSON.stringify({ deviceId, bundleId, pinned }));
   } catch (e) {
     // 不可用时只依赖地址参数
   }
-  history.replaceState(null, '', '?' + new URLSearchParams({ device: deviceId, app: bundleId }).toString());
+  const params = new URLSearchParams({ device: deviceId, app: bundleId });
+  if (pinned) params.set('pin', '1');
+  history.replaceState(null, '', '?' + params.toString());
+}
+
+function setTargetPinned(on) {
+  targets.pinned = !!on && !!targets.bundleId;
+  targets.followRevision = (targets.followRevision || 0) + 1;
+  if (!targets.pinned) {
+    try { sessionStorage.removeItem(STAY_OFFLINE_KEY); } catch (e) {}
+  }
+  rememberTarget(targets.deviceId, targets.bundleId);
+  renderTargetMenu();
+  if (!targets.pinned) checkForeground();
 }
 
 function switchTargetInPlace(bundleId, activating = false, appName = '') {
+  const changed = bundleId !== targets.bundleId;
+  beginTargetTask(targets.deviceId, bundleId, appName);
+  if (bundleId !== targets.bundleId) {
+    targets.pinned = false;
+    targets.followRevision = (targets.followRevision || 0) + 1;
+  }
+  if (bundleId !== targets.bundleId) setRunning(false);
+  if (bundleId) {
+    $('emptyState').hidden = true;
+    document.body.classList.remove('has-empty');
+    document.body.classList.add('has-app');
+  }
   rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
+  targets.deviceOnly = !bundleId;
   ++appInfoSeq;
   renderTargetLabel();
+  renderSelectedAppName(appName);
+  appInfo.base = '';
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
   appState.dropped = false;
@@ -2715,14 +3209,13 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
   setAppState(app ? (activating ? 'background' : 'online') : 'offline', activating ? t('正在切换到 {0}…', appName || app?.appName || bundleId) : '');
   watchApp();
   if (activating) {
-    $('appName').textContent = appName || app?.appName || bundleId;
-    appInfo.name = appName || app?.appName || bundleId;
-    appInfo.base = '';
     updateAppMeta();
   } else {
     loadAppInfo();
   }
   clearHierarchy();
+  // 换目标先显示设备实时画面, 用户再进入 2D/3D 时读取新层级。
+  if ((changed || activating) && liveAvailable()) setMode('live');
   if (!activating && state.mode !== 'live') refresh();
 }
 
@@ -2751,16 +3244,29 @@ async function connectInPlace(deviceId, bundleId) {
   // 已选的 App 未运行时等事件流连上, 由 reconnected 原地更新
   if (targets.bundleId) return;
   rememberTarget(deviceId, '');
-  $('appName').textContent = currentDevice()?.name || t('未连接');
-  if (currentDevice()?.kind === 'simulator' && liveAvailable()) setMode('live');
-  const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
-  showEmptyState(t('没有运行中的已集成 App'), body);
-  setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
+  showDeviceOnly();
+}
+
+function showDeviceOnly() {
+  const device = currentDevice();
+  const name = device?.name || targetHistory[targets.deviceId]?.name
+    || (targets.simulators || []).find((sim) => sim.id === targets.deviceId)?.name || t('设备');
+  $('appName').textContent = name;
+  appInfo.base = '';
+  appState.warning = '';
+  document.title = `${name} - LayerLens`;
+  document.body.classList.remove('has-app');
+  showEmptyState(t('请选择 App 查看视图层级'), t('也可以切换到实时查看设备画面'));
+  setAppState(device ? 'online' : 'offline', device ? t('只使用实时画面') : '');
+  setMode('live');
+  if (state.mode === 'live') syncLive();
+  checkForeground();
 }
 
 // 实时画面下旧层级作废时只清空, 不重新获取: 取层级和截图都在 App 主线程执行, 刚启动或回到前台时会卡住实时画面;
 // 切回 2D / 3D 或选择元素时会重新获取
 function clearHierarchy() {
+  pageActivity.controller?.abort();
   ++refreshSeq;
   resetImages();
   state.roots = [];
@@ -2777,7 +3283,11 @@ async function probeForeground() {
   const device = currentDevice();
   if (!device) return null;
   const others = device.apps.filter((a) => a.bundleId !== targets.bundleId);
+  const epoch = targetStateHub.epoch, revision = targetStateHub.revision;
   const found = await Promise.all(others.map(async (a) => {
+    const entry = targetStateHub.ready && targetStateHub.states.get(targetStateKey(device.id, a.bundleId));
+    if (entry && entry.stateReachable === false) return null;
+    if (entry?.stateConnected && [true, false, 0, 1].includes(entry.foreground)) return appInForeground(entry) ? a.bundleId : null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 800);
     try {
@@ -2790,24 +3300,31 @@ async function probeForeground() {
       clearTimeout(timer);
     }
   }));
-  const bundleId = found.find(Boolean);
-  return bundleId ? [device.id, bundleId] : null;
+  if (targetStateHub.epoch !== epoch || targetStateHub.revision !== revision) return null;
+  const foreground = [...new Set(found.filter(Boolean))];
+  return foreground.length === 1 ? [device.id, foreground[0]] : null;
 }
 
-// 当前 App 是否确实在后台: 以 App 实时返回的状态为准; 挂起不响应时沿用列表中的挂起标记
-// 接口在 App 主线程执行, 前台时主线程繁忙(取层级、截图、加载视频)也会超时; 连续多次超时才视为挂起
-const PROBE_MISS_LIMIT = 3;
-
+// 只有 App 明确返回的前后台状态才用于切换提示。通信超时表示未知。
+// 请求期间切换目标、事件流重连或收到新状态后, 丢弃旧响应。
 async function probeCurrentBackground() {
+  const key = logTargetKey();
+  const source = appState.source;
+  const revision = appState.stateRevision;
+  const entry = targetStateHub.ready && targetStateHub.states.get(targetStateKey(targets.deviceId, targets.bundleId));
+  if (entry?.stateConnected && [true, false, 0, 1].includes(entry.foreground)) return entry.foreground === false || entry.foreground === 0;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 800);
   try {
     const res = await fetch(targetBase() + '/api/app', { cache: 'no-store', signal: controller.signal });
-    appState.probeMisses = 0;
-    return appInBackground(await res.json());
+    if (!res.ok) return null;
+    const info = await res.json();
+    if (key !== logTargetKey() || source !== appState.source || revision !== appState.stateRevision) return null;
+    if (info.foreground === false || info.foreground === 0) return true;
+    if (info.foreground === true || info.foreground === 1) return false;
+    return null;
   } catch (e) {
-    appState.probeMisses = (appState.probeMisses || 0) + 1;
-    return appState.probeMisses >= PROBE_MISS_LIMIT && !!currentApp()?.suspended;
+    return null;
   } finally {
     clearTimeout(timer);
   }
@@ -2817,18 +3334,32 @@ async function probeCurrentBackground() {
 const foregroundCheck = { running: false };
 
 async function checkForeground() {
-  if (!pageActivity.active || foregroundCheck.running) return;
+  if (!pageActivity.active || foregroundCheck.running || !currentAppAway()) return;
   foregroundCheck.running = true;
+  const initialRevision = targets.followRevision || 0;
+  let missingKey = '', missingSince = 0;
   try {
     for (let attempt = 0; attempt < 15 && pageActivity.active && currentAppAway(); attempt++) {
       try {
-        await loadTargets();
-        // 只认直接询问得到的实时状态, 列表中的前台标记可能过期, 会在两个 App 间来回切换
+        const deviceId = targets.deviceId, key = logTargetKey(), revision = targets.followRevision || 0;
+        if (!targetStateHub.ready) await loadTargets();
         const next = await probeForeground();
-        if (next && pageActivity.active && currentAppAway()) {
+        if (targets.deviceId !== deviceId || logTargetKey() !== key || (targets.followRevision || 0) !== revision || !pageActivity.active || !currentAppAway()) continue;
+        if (next) {
           followForeground(next);
           return;
         }
+        // 只有明确后台/已退出才退回设备; 通信超时仍是未知状态。
+        const app = currentApp();
+        const absent = targets.bundleId && (app ? appInBackground(app) : appState.value === 'offline');
+        if (absent) {
+          if (missingKey !== key) { missingKey = key; missingSince = Date.now(); }
+          if (Date.now() - missingSince >= 1000) {
+            // 同设备切换保留视频 WebSocket、解码器和当前帧。
+            switchTarget(deviceId, '');
+            return;
+          }
+        } else { missingKey = ''; missingSince = 0; }
       } catch (e) {
         // 下次再试
       }
@@ -2836,11 +3367,14 @@ async function checkForeground() {
     }
   } finally {
     foregroundCheck.running = false;
+    // 在途查询遇到新的选择/固定操作时, 只为新的意图重新检查。
+    if ((targets.followRevision || 0) !== initialRevision && pageActivity.active && currentAppAway()) checkForeground();
   }
 }
 
 // 需要自动切换时返回 [设备 ID, Bundle ID]: 选中的设备启动了, 选中的设备上出现 App, 或未选设备时出现设备
 function nextTarget() {
+  if (targets.pinned && targets.deviceId) return null;
   if (targets.idle) {
     if (!targets.devices.length) return null;
     const back = currentDevice();
@@ -2851,7 +3385,8 @@ function nextTarget() {
   const device = currentDevice();
   if (device) {
     if (!targets.hadDevice) return [device.id, targets.bundleId || firstAppId(device)];
-    if (!targets.bundleId && device.apps.length) return [device.id, firstAppId(device)];
+    const foreground = firstAppId(device);
+    if (!targets.bundleId && foreground) return [device.id, foreground];
     return null;
   }
   if (targets.deviceId || !targets.devices.length) return null;
@@ -2859,34 +3394,27 @@ function nextTarget() {
   return [first.id, firstAppId(first)];
 }
 
-// 定时刷新设备列表, 设备或 App 出现时自动连接
+// 定时刷新设备列表的兜底与原生推送共用同一套目标恢复规则。
+let reconcilingTargets = false;
+async function reconcileTargets() {
+  if (reconcilingTargets || !pageActivity.active) return;
+  reconcilingTargets = true;
+  try {
+    syncLive();
+    if (!targets.bundleId && targets.deviceId && appState.deviceGone !== currentDeviceGone()) {
+      setAppState(currentDevice() ? 'online' : 'offline', currentDevice() ? t('只使用实时画面') : '');
+    } else if (appState.value === 'offline' && appState.deviceGone !== currentDeviceGone()) setAppState('offline');
+    const next = nextTarget();
+    if (next) await connectInPlace(...next);
+    if (currentAppAway()) checkForeground();
+  } finally { reconcilingTargets = false; }
+}
+
+// 原生通知负责实时变化, 10s 轮询仅作丢失通知的兜底。
 function pollTargets() {
   setTimeout(async () => {
     if (!pageActivity.active) { pollTargets(); return; }
-    try {
-      await loadTargets();
-      if (!pageActivity.active) { pollTargets(); return; }
-      renderTargetMenu();
-      syncLive();
-      // 选中的设备断开或连回时更新提示
-      if (appState.value === 'offline' && appState.deviceGone !== currentDeviceGone()) setAppState('offline');
-      // 回到前台的通知可能早于事件流连上而错过, 列表里显示已在前台时恢复
-      if (appState.value === 'background' && currentApp() && appInForeground(currentApp())) {
-        setAppState('online');
-        if (state.mode !== 'live') refresh();
-      }
-      const next = nextTarget();
-      if (next) await connectInPlace(...next);
-      // 事件流里的后台通知可能丢失(如重连时被覆盖), 列表显示在后台时直接询问当前 App 确认
-      if (appState.value === 'online' && currentApp() && appInBackground(currentApp())) {
-        if (await probeCurrentBackground()) setAppState('background');
-      } else {
-        appState.probeMisses = 0;
-      }
-      if (currentAppAway()) checkForeground();
-    } catch (e) {
-      // Mac App 已退出, 下次再试
-    }
+    try { await loadTargets(); renderTargetMenu(); await reconcileTargets(); } catch (_) {}
     pollTargets();
   }, TARGETS_POLL_MS);
 }
@@ -2899,47 +3427,53 @@ const appState = { value: 'online', connected: false, dropped: false, blank: fal
 const OFFLINE_GRACE_MS = 4000;
 
 function watchApp() {
-  appState.source?.close();
-  const key = logTargetKey();
-  const source = new LayerLensEventSource(targetBase() + '/api/events');
-  appState.source = source;
-  const active = () => appState.source === source && logTargetKey() === key;
-  source.onopen = () => {
-    if (!active()) return;
-    appState.connected = true;
-    clearTimeout(appState.offlineTimer);
+  // 只是切换本窗口观察的目标, 不建立或关闭 App 上游连接。
+  appState.source = { key: logTargetKey() };
+  ensureTargetStateSocket();
+  syncSelectedTargetState();
+}
+
+function selectedTargetDisconnected() {
+  if (!targets.bundleId || !appState.source || appState.source.key !== logTargetKey()) return;
+  appState.connected = false;
+  appState.dropped = true;
+  if (appState.value === 'restarting' || appState.offlineTimer) return;
+  appState.offlineTimer = setTimeout(() => {
     appState.offlineTimer = 0;
-    if (!appState.dropped) {
-      setAppState('online');
+    if (!appState.connected && appState.value !== 'restarting') setAppState('offline');
+  }, OFFLINE_GRACE_MS);
+}
+
+function syncSelectedTargetState() {
+  if (!targetStateHub.ready || !targets.bundleId || appState.source?.key !== logTargetKey()) return;
+  const entry = targetStateHub.states.get(targetStateKey(targets.deviceId, targets.bundleId));
+  if (!entry || entry.removed || !entry.stateConnected) {
+    // 明确在后台时保留后台提示, 通信中断本身不等于 App 退出。
+    if (entry && !entry.removed && (entry.foreground === false || entry.foreground === 0)) {
+      clearTimeout(appState.offlineTimer);
+      appState.offlineTimer = 0;
+      receiveTargetForeground(targets.deviceId, targets.bundleId, false);
+      appState.connected = false;
       return;
     }
-    reconnected();
-  };
-  // App 进入后台后被挂起, 事件流不断开, 由 App 推送前后台状态; 旧版 Pod 不推送, 视为前台
-  source.addEventListener('state', (e) => {
-    if (!active()) return;
-    const { foreground } = JSON.parse(e.data || '{}');
-    const away = foreground === false || foreground === 0;
-    if (away && appState.value === 'online') {
-      setAppState('background');
-      checkForeground();
-    } else if (!away && appState.value === 'background') {
-      setAppState('online');
-      // 在后台期间页面可能已变化, 实时画面之外重新获取层级
-      if (state.mode !== 'live') refresh();
+    selectedTargetDisconnected();
+    return;
+  }
+  const wasConnected = appState.connected;
+  const restarted = appState.instanceId && entry.instanceId !== appState.instanceId;
+  appState.connected = true;
+  clearTimeout(appState.offlineTimer);
+  appState.offlineTimer = 0;
+  if ((!wasConnected && appState.dropped) || restarted) {
+    if (!appState.reconnecting) {
+      const selection = appState.source;
+      appState.reconnecting = selection;
+      reconnected().finally(() => { if (appState.reconnecting === selection) appState.reconnecting = null; });
     }
-  });
-  source.onerror = () => {
-    if (!active()) return;
-    appState.connected = false;
-    appState.dropped = true;
-    if (appState.value === 'restarting' || appState.offlineTimer) return;
-    // 回到前台时 App 会重启监听, 事件流短暂断开后约 2s 重连; 宽限一段时间再显示离线, 避免提示条闪现
-    appState.offlineTimer = setTimeout(() => {
-      appState.offlineTimer = 0;
-      if (!appState.connected && appState.value !== 'restarting') setAppState('offline');
-    }, OFFLINE_GRACE_MS);
-  };
+  } else if (!wasConnected && appState.value !== 'restarting') {
+    setAppState(entry.foreground === false || entry.foreground === 0 ? 'background' : 'online');
+  }
+  if ([true, false, 0, 1].includes(entry.foreground)) receiveTargetForeground(targets.deviceId, targets.bundleId, !!entry.foreground);
 }
 
 // link 为提示条上的次要按钮, 如 { text, panel }
@@ -2947,19 +3481,24 @@ function watchApp() {
 // 刚连上时首页还未加载完(实测约 2s 后启动遮罩才移除), 过早拉取的层级会过期.
 // 重启后通常停在首页, 模拟器上先切到实时画面便于操作到目标页, 切回 2D/3D 时会刷新层级
 async function reconnected() {
+  if (pendingSwitch) return;
+  const selection = appState.source, job = targetTask;
+  const current = () => appState.source === selection && targetTask === job && !pendingSwitch;
   try {
     await loadTargets();
   } catch (e) {
     // 取不到时按重启处理
   }
+  if (!current()) return;
   if (appState.instanceId && currentApp()?.instanceId === appState.instanceId) {
     appState.dropped = false;
     // 等待列表期间事件流可能已推送在后台, 不覆盖
-    if (appState.value !== 'background') setAppState('online');
+    setAppState(appInBackground(currentApp() || {}) ? 'background' : 'online');
     return;
   }
   const toLive = liveAvailable() && state.mode !== 'live';
   if (toLive) await setMode('live');
+  if (!current()) return;
   // 实时画面一直连着, 不整页重新加载, 原地更新 App 信息; oid 已重新分配, 旧层级作废
   if (state.mode === 'live') {
     appState.dropped = false;
@@ -2967,18 +3506,21 @@ async function reconnected() {
     appState.warning = compatibilityWarning(currentApp());
     // 原来靠整页重新加载复位, 这里手动结束运行跟踪
     setRunning(false);
-    setAppState('online');
+    setAppState(appInBackground(currentApp() || {}) ? 'background' : 'online');
     if (toLive) toast(t('App 已重启, 已切换到实时画面'));
     loadAppInfo();
     clearHierarchy();
     return;
   }
   setAppState('back');
-  setTimeout(() => location.reload(), 3000);
+  setTimeout(() => { if (current()) location.reload(); }, 3000);
 }
 
 function setAppState(value, message, link) {
   appState.value = value;
+  // 明确进入后台/离线后停止层级读取, 保留最后一份可查看的层级。
+  if (!hierarchyAvailable() && targetTask?.phase === 'hierarchy') pageActivity.controller?.abort();
+  renderTargetTask();
   // 连上过就有层级可看, 之后再离线不再遮住画布
   if (value === 'online') appState.blank = false;
   appState.deviceGone = currentDeviceGone();
@@ -3017,8 +3559,10 @@ function setAppState(value, message, link) {
   renderTargetMenu();
 }
 
-// 画布中央的引导, 实时模式下不显示
+// 画布中央的引导；离线目标由 syncOfflineView 标记后在所有模式显示。
 function showEmptyState(title, body) {
+  $('emptyState').classList.remove('offline-state');
+  document.body.classList.remove('has-offline-state');
   $('emptyTitle').textContent = title;
   $('emptyBody').textContent = body;
   offlineViewShown = false;
@@ -3052,17 +3596,31 @@ function showGuide() {
 
 const RUN_POLL_MS = 1000;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
-const xcode = { running: false, timer: null };
+const xcode = { running: false, timer: null, job: null };
 
 // 由 LayerLens 驱动 Xcode, 它按 App 上报过的源文件路径找到对应的工作区
-async function callXcode(command) {
-  const app = encodeURIComponent(targets.bundleId);
-  const res = command === 'run'
-    ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: targets.bundleId, device: targets.deviceId || '' }) })
-    : await fetch(`/api/hub/run-status?app=${app}`, { cache: 'no-store' });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
+function currentRun(job) {
+  return xcode.running && xcode.job === job && targets.deviceId === job.deviceId && targets.bundleId === job.bundleId;
+}
+
+async function callXcode(command, job) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  job.controller.signal.addEventListener('abort', cancel, { once: true });
+  if (job.controller.signal.aborted) controller.abort();
+  const timer = setTimeout(cancel, command === 'run' ? 30000 : 5000);
+  try {
+    const run = encodeURIComponent(job.runId || '');
+    const res = command === 'run'
+      ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: job.bundleId, device: job.deviceId }), signal: controller.signal })
+      : await fetch(`/api/hub/run-status?run=${run}`, { cache: 'no-store', signal: controller.signal });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  } finally {
+    clearTimeout(timer);
+    job.controller.signal.removeEventListener('abort', cancel);
+  }
 }
 
 // 错误码转为可操作的提示, 未识别的错误原样显示
@@ -3072,12 +3630,21 @@ function runErrorText(e) {
     project_not_open: t('Xcode 中未打开本项目'),
     permission_denied: t('没有控制 Xcode 的权限, 请在 系统设置 › 隐私与安全性 › 自动化 中允许'),
     permission_required: t('需要允许 LayerLens 控制 Xcode'),
+    xcode_busy: t('Xcode 正忙, 请稍后再试'),
+    xcode_scheme_unverified: t('无法确认选中 App 对应的运行 Scheme，请在 Xcode 中检查 Scheme 和 Run 配置'),
+    xcode_destination_unavailable: t('当前 Scheme 不支持选中的设备，请在 Xcode 中检查运行目标'),
   };
+  if (e.name === 'AbortError') return t('等待超时, 请在 Xcode 查看');
   if (e instanceof TypeError) return t('无法连接 LayerLens');
   return messages[e.message] || t('运行失败: {0}', e.message);
 }
 
 function setRunning(on) {
+  if (!on) {
+    const job = xcode.job;
+    xcode.job = null;
+    if (job) { clearTimeout(job.hint); job.controller.abort(); }
+  }
   xcode.running = on;
   clearTimeout(xcode.timer);
   $('xcodeRun').classList.toggle('loading', on);
@@ -3085,13 +3652,17 @@ function setRunning(on) {
 }
 
 // 结束跟踪: 旧 App 仍在则回到在线并提示, 否则显示离线提示条
-function endRun(message) {
+function endRun(message, job = xcode.job) {
+  if (job && !currentRun(job)) return;
   setRunning(false);
-  if (!appState.connected) {
+  if (appInBackground(currentApp() || {}) || appState.value === 'background') {
+    setAppState('background');
+  } else if (!appState.connected) {
     setAppState('offline', message);
     return;
+  } else {
+    setAppState('online');
   }
-  setAppState('online');
   if (message) toast(message, true);
 }
 
@@ -3100,27 +3671,32 @@ async function xcodeRun() {
     endRun();
     return;
   }
+  const job = { deviceId: targets.deviceId, bundleId: targets.bundleId, controller: new AbortController(), hint: null };
+  xcode.job = job;
   setRunning(true);
   try {
     // 首次运行会弹出系统授权窗口, 请求会等待用户选择
-    const hint = setTimeout(() => toast(t('请在系统弹窗中允许 LayerLens 控制 Xcode')), 1500);
+    job.hint = setTimeout(() => { if (currentRun(job)) toast(t('请在系统弹窗中允许 LayerLens 控制 Xcode')); }, 1500);
     try {
-      const { switched } = await callXcode('run');
-      // Xcode 会先切到正在查看的设备; 没有对应的运行目标时沿用 Xcode 当前选择, App 可能运行在别的设备上
-      if (!switched && targets.deviceId) toast(t('Xcode 中没有当前设备的运行目标, 将运行到 Xcode 当前选择的设备'));
+      const { runId } = await callXcode('run', job);
+      if (!currentRun(job)) return;
+      if (!runId) throw new Error('xcode_scheme_unverified');
+      job.runId = runId;
     } finally {
-      clearTimeout(hint);
+      clearTimeout(job.hint);
     }
   } catch (e) {
-    endRun(runErrorText(e));
+    if (currentRun(job)) endRun(runErrorText(e), job);
     return;
   }
-  setAppState('restarting');
+  if (!currentRun(job)) return;
+  // 编译跟踪只控制运行按钮, 设备的前后台状态继续驱动自动跟随。
   const deadline = Date.now() + RUN_TIMEOUT_MS;
   const check = async () => {
-    if (!xcode.running) return;
+    if (!currentRun(job)) return;
     try {
-      const { status, detail } = await callXcode('status');
+      const { status, detail } = await callXcode('status', job);
+      if (!currentRun(job)) return;
       if (['failed', 'error occurred', 'cancelled'].includes(status)) {
         endRun(status === 'cancelled' ? t('运行已取消') : detail ? t('编译失败: {0}', detail) : t('编译失败, 请在 Xcode 查看'));
         return;
@@ -3128,7 +3704,7 @@ async function xcodeRun() {
     } catch (e) {
       // 查询失败不影响跟踪, 下次再试
     }
-    if (!xcode.running) return;
+    if (!currentRun(job)) return;
     if (Date.now() > deadline) {
       endRun(t('等待超时, 请在 Xcode 查看'));
       return;
@@ -3158,12 +3734,19 @@ function canInspect() {
 
 // 刷新层级后选中该点最上层的视图, 并切到 2D 查看
 async function inspectAt(point) {
+  const source = appState.source, deviceId = targets.deviceId, bundleId = targets.bundleId;
+  // 真机流是像素坐标, 层级是 point; 模拟器的实时坐标本身就是 point。
+  const nativeScale = live.real ? live.sourceGeometry?.pointScale : 1;
+  const scale = Number.isFinite(nativeScale) && nativeScale > 0 ? nativeScale : 1;
+  const x = point.x / scale, y = point.y / scale;
   setLiveInspect(false);
+  const seq = modeSeq + 1;
   await setMode('2d');
+  if (seq !== modeSeq || state.mode !== '2d' || appState.source !== source || targets.deviceId !== deviceId || targets.bundleId !== bundleId) return;
   const win = keyWindow();
   if (!win) return;
   state.selected = win.key;
-  const node = hitTest(point.x - win.rect[0], point.y - win.rect[1]);
+  const node = hitTest(x - win.rect[0], y - win.rect[1]);
   select((node || win).key);
 }
 
@@ -3298,6 +3881,20 @@ function setupLiveEvents() {
   // 多任务: 从底部上滑并停顿, 与真机手势一致
   $('liveSwitcher').addEventListener('click', () => liveSend({ type: 'button', button: 'app-switcher' }));
   $('liveRotate').addEventListener('click', liveRotate);
+  // 鼠标点击动作按钮不抢走画布焦点; Tab/键盘仍可正常聚焦操作。
+  for (const id of ['liveHome', 'liveRotate']) {
+    const button = $(id);
+    let feedbackTimer;
+    button.addEventListener('pointerdown', e => {
+      if (e.button === 0) e.preventDefault();
+    });
+    button.addEventListener('click', () => {
+      clearTimeout(feedbackTimer);
+      button.classList.add('click-feedback');
+      feedbackTimer = setTimeout(() => button.classList.remove('click-feedback'), 700);
+    });
+  }
+  $('liveRetry').addEventListener('click', () => { liveStop(); live.error = ''; showLiveGuide(); liveStart(); });
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
   $('sandboxBtn').addEventListener('click', openSandbox);
@@ -3642,12 +4239,14 @@ async function loadDetail() {
   renderDetail(node);
   if (!node.oid) return;
   try {
-    const detail = await api(`/api/detail?oid=${node.oid}`);
-    if (!pageActivity.active || state.selected !== node.key) return;
+    const job = targetTask;
+    const path = `/api/detail?oid=${node.oid}`;
+    const detail = await (job ? taskRequest(job, targetBase() + path) : api(path));
+    if (!pageActivity.active || state.nodes.get(node.key) !== node || state.selected !== node.key || state.tab !== 'attr') return;
     state.detail = detail;
     renderDetail(node);
   } catch (e) {
-    toast(e.message, true);
+    if (e.name !== 'AbortError' && state.nodes.get(node.key) === node && state.tab === 'attr') toast(e.message, true);
   }
 }
 
@@ -4002,7 +4601,8 @@ async function modify(node, attr, value) {
 
 async function loadClassInfo(node) {
   if (!pageActivity.active) { pageActivity.pending = true; return; }
-  const target = state.classTarget || { oid: node.viewOid || node.oid, name: node.cls };
+  const requestedTarget = state.classTarget;
+  const target = requestedTarget || { oid: node.viewOid || node.oid, name: node.cls };
   const container = $('detail');
   if (!target.oid) {
     container.replaceChildren(el('div', 'empty', t('该节点没有对应的 OC 对象')));
@@ -4010,11 +4610,13 @@ async function loadClassInfo(node) {
   }
   container.replaceChildren(el('div', 'empty', t('加载中...')));
   try {
-    const info = await api(`/api/class?oid=${target.oid}`);
-    if (!pageActivity.active || state.selected !== node.key || state.tab !== 'class') return;
+    const job = targetTask;
+    const path = `/api/class?oid=${target.oid}`;
+    const info = await (job ? taskRequest(job, targetBase() + path) : api(path));
+    if (!pageActivity.active || state.nodes.get(node.key) !== node || state.selected !== node.key || state.tab !== 'class' || state.classTarget !== requestedTarget) return;
     renderClassInfo(info, node);
   } catch (e) {
-    container.replaceChildren(el('div', 'empty', e.message));
+    if (e.name !== 'AbortError' && state.nodes.get(node.key) === node && state.tab === 'class' && state.classTarget === requestedTarget) container.replaceChildren(el('div', 'empty', e.message));
   }
 }
 
@@ -4127,8 +4729,8 @@ function syncTreeFilter() {
 }
 
 function requestMode(mode) {
-  if (mode === 'live' && !liveAvailable()) {
-    toast(t('真机不支持实时画面'));
+  if (mode === 'live' && !targets.deviceId) {
+    toast(t('请先选择设备'));
     return;
   }
   if (mode) setMode(mode);
@@ -4204,7 +4806,10 @@ function togglePopover(id) {
   const target = $(id);
   const willShow = target.hidden || target.classList.contains('closing');
   hidePopovers();
-  if (willShow) showLayer(target);
+  if (willShow) {
+    showLayer(target);
+    if (id === 'targetMenu') renderTargetMenu();
+  }
 }
 
 function hidePopovers() {
@@ -4374,6 +4979,10 @@ const SHORTCUT_GROUPS = [
     [['→'], '展开, 再按进入子节点'],
   ]],
   ['画布', false, [
+    [['↑'], '选中父节点'],
+    [['⌥', '↑'], '收起'],
+    [['↓'], '展开, 再按进入子节点'],
+    [['←', '→'], '上一个 / 下一个节点'],
     [['双指滑动'], '平移画布'],
     [['空格', '拖动'], '平移画布, 也可中键拖动'],
     [['捏合'], '缩放, 也可 ⌘ + 滚轮'],
@@ -4925,10 +5534,14 @@ const logs = {
   timer: null,
   source: 'live',
   file: null,
+  instanceId: '',
+  clearing: null,
   unsupported: false,
+  storageError: '',
   loading: false,
   nextId: 1,
   lines: [],
+  bytes: 0,
   view: [],
   filter: { raw: '', terms: [], regex: null },
   follow: true,
@@ -4995,10 +5608,16 @@ function logTargetKey() {
   return targets.deviceId && targets.bundleId ? targets.deviceId + '|' + targets.bundleId : '';
 }
 
+function recorderStorageError(kind, message, state) {
+  if (message && message !== state.storageError) toast(t('{0}保存失败, 将在恢复后重试: {1}', t(kind), message), true, true);
+  state.storageError = message;
+}
+
 function logConnect() {
   logDisconnect();
   logs.key = logTargetKey();
   logs.unsupported = false;
+  logs.storageError = '';
   resetLogLines();
   if (!logs.key) return;
   logs.loading = true;
@@ -5013,18 +5632,29 @@ function logConnect() {
   };
   // 连接或重连时 Hub 先发 reset 再补发内存中的日志
   es.addEventListener('reset', (e) => {
-    logs.unsupported = !!parse(e).unsupported;
+    if (logs.es !== es) return;
+    const data = parse(e);
+    logs.instanceId = data.instanceId || '';
+    logs.unsupported = !!data.unsupported;
+    recorderStorageError('日志', data.storageError || '', logs);
     logs.loading = false;
     resetLogLines();
     // App 重新启动后以前的启动多了一次
     loadLaunches();
   });
   es.addEventListener('status', (e) => {
-    logs.unsupported = !!parse(e).unsupported;
+    if (logs.es !== es) return;
+    const data = parse(e);
+    if (data.instanceId) logs.instanceId = data.instanceId;
+    logs.unsupported = !!data.unsupported;
+    recorderStorageError('日志', data.storageError || '', logs);
     scheduleLogRender();
   });
   es.addEventListener('logs', (e) => {
-    const entries = parse(e).entries || [];
+    if (logs.es !== es) return;
+    const data = parse(e);
+    if (data.instanceId) logs.instanceId = data.instanceId;
+    const entries = data.entries || [];
     appendLogLines(entries.map((entry) => ({ id: logs.nextId++, t: entry.t, m: entry.k ? '' : String(entry.m ?? ''), k: entry.k })));
   });
   logs.es = es;
@@ -5033,12 +5663,14 @@ function logConnect() {
 function logDisconnect() {
   logs.es?.close();
   logs.es = null;
+  logs.instanceId = '';
   logs.key = '';
   logs.loading = false;
 }
 
 function resetLogLines() {
   logs.lines = [];
+  logs.bytes = 0;
   // 重连或清空后保留过滤条件
   logs.view = logFilterActive() ? [] : logs.lines;
   logs.anchor = logs.focus = 0;
@@ -5051,6 +5683,7 @@ function resetLogLines() {
 
 function appendLogLines(lines) {
   if (!lines.length) return;
+  for (const line of lines) { line.bytes = String(line.m ?? '').length * 2 + 64; logs.bytes += line.bytes; }
   logs.lines.push(...lines);
   if (logs.view !== logs.lines) {
     lines.forEach((line) => {
@@ -5060,14 +5693,19 @@ function appendLogLines(lines) {
   if (logs.wrap) {
     for (let i = logs.heights.length; i < logs.view.length; i++) pushLogHeight(logs.view[i]);
   }
-  if (logs.lines.length > LOG_MAX_LINES) trimLogLines();
+  if (logs.lines.length > LOG_MAX_LINES || logs.bytes > 32 * 1024 * 1024) trimLogLines();
   if (!logs.follow) logs.unseen = true;
   scheduleLogRender();
 }
 
 // 超出上限时一次删掉最早的 10%, 避免每条都整体移动数组
 function trimLogLines() {
-  const remove = logs.lines.length - Math.floor(LOG_MAX_LINES * 0.9);
+  let remove = 0;
+  const targetLines = Math.floor(LOG_MAX_LINES * 0.9), targetBytes = 28 * 1024 * 1024;
+  while (remove < logs.lines.length - 1 && (logs.lines.length - remove > targetLines || logs.bytes > targetBytes)) {
+    logs.bytes -= logs.lines[remove].bytes || 0; remove++;
+  }
+  if (!remove) return;
   const firstId = logs.lines[remove].id;
   logs.lines.splice(0, remove);
   const removed = logs.view === logs.lines ? remove : logIndexOf(logs.view, firstId);
@@ -5334,8 +5972,12 @@ function measureLogRows(start, end, top) {
 }
 
 function renderLogStatus() {
+  const readonly = logs.source !== 'live';
+  $('logClear').disabled = readonly || !logs.key || !logs.instanceId || logs.loading || (logs.clearing?.key === logTargetKey() && logs.clearing.instanceId === logs.instanceId);
+  $('logClear').title = t(readonly ? '历史记录只读，请在缓存管理中删除' : '清空本次启动的日志记录 (同时删除本机保存的记录)');
   const total = logs.lines.length;
   const count = $('logCount');
+  count.title = logs.storageError ? t('日志保存失败: {0}', logs.storageError) : '';
   if (logs.view !== logs.lines) {
     count.replaceChildren(el('span', 'hit', String(logs.view.length)), document.createTextNode(' / ' + total));
   } else {
@@ -5350,6 +5992,7 @@ function renderLogStatus() {
   $('logNew').hidden = logs.follow || !logs.unseen;
   let empty = '';
   if (logs.source === 'live' && !logs.key) empty = t('未连接 App');
+  else if (logs.source === 'live' && logs.storageError && !total) empty = t('日志保存失败: {0}', logs.storageError);
   else if (logs.source === 'live' && logs.unsupported) empty = t('App 集成的 LayerLens 版本过低, 升级到 0.4.0 后可查看日志');
   else if (!total) empty = logs.loading || file?.loading ? t('正在加载…') : logs.source === 'live' ? t('暂无日志, App 调用 [LayerLens log:] 后显示在这里') : t('文件中没有日志');
   else if (!logs.view.length) empty = t('没有匹配的日志');
@@ -5632,13 +6275,50 @@ function exportLogs(lines) {
   logAction('export', body).then((data) => toast(t('已导出到 {0}', data.path))).catch((e) => toast(t('导出失败: {0}', e.message), true));
 }
 
-function clearLogs() {
-  if (logs.source === 'live') {
-    // Hub 清空后通过 reset 事件通知所有打开的面板
-    logAction('clear').catch((e) => toast(e.message, true));
-  } else {
-    logs.file = null;
-    resetLogLines();
+// 日志和抓包共用确认流程, 目标和启动在打开确认框时固定下来。
+function recordClearContext(kind) {
+  const log = kind === 'log';
+  if (log ? logs.source !== 'live' || logs.loading || logs.unsupported : net.session || net.archive) return null;
+  const instanceId = log ? logs.instanceId : net.instanceId;
+  const key = logTargetKey();
+  if (!key || !instanceId) return null;
+  return { kind, key, device: targets.deviceId, app: targets.bundleId, instanceId,
+    launch: launchState.selected, epoch: log ? '' : net.epoch, base: targetBase() };
+}
+
+function recordClearCurrent(job) {
+  const current = recordClearContext(job.kind);
+  return !!current && ['key', 'instanceId', 'launch', 'epoch'].every(field => current[field] === job[field]);
+}
+
+function confirmRecordClear(kind) {
+  const job = recordClearContext(kind);
+  if (!job || (kind === 'log' && logs.clearing?.key === job.key && logs.clearing.instanceId === job.instanceId)) return;
+  showConfirm($(kind === 'log' ? 'logClear' : 'netClear'), {
+    title: t(kind === 'log' ? '清空本次启动的日志记录?' : '清空本次启动的抓包记录?'),
+    detail: t('本机保存的记录将一并删除，无法恢复。以前的启动不受影响。'),
+    action: t('清空'),
+    onConfirm: () => {
+      if (!recordClearCurrent(job)) { toast(t('记录所属的启动已变化，请重新确认'), true); return; }
+      if (kind === 'log') clearLogs(job);
+      else clearNet(job);
+    },
+  });
+}
+
+async function clearLogs(job) {
+  if (!job || !recordClearCurrent(job)) return;
+  logs.clearing = job;
+  scheduleLogRender();
+  try {
+    await logAction('clear', { device: job.device, app: job.app, instanceId: job.instanceId });
+    // reset 事件负责清空显示; 不让迟到的 HTTP 响应抹掉清空之后的新日志。
+    if (recordClearCurrent(job)) loadLaunches();
+  } catch (e) {
+    if (recordClearCurrent(job)) toast(t('清空失败: {0}', t(e.message)), true);
+  } finally {
+    if (logs.clearing === job) logs.clearing = null;
+    scheduleLogRender();
   }
 }
 
@@ -5719,7 +6399,7 @@ function listenLogDock() {
 function setupLogsWindow() {
   const params = new URLSearchParams(location.search);
   targets.deviceId = params.get('device') || '';
-  targets.bundleId = params.get('app') || '';
+  targets.bundleId = targetBundleId(params.get('app'));
   logs.window = true;
   document.body.classList.add('logs-window');
   applyI18n();
@@ -5781,7 +6461,7 @@ function setupLogs() {
   $('logTop').addEventListener('click', () => scrollLogEdge(false));
   $('logBottom').addEventListener('click', () => scrollLogEdge(true));
   $('logNew').addEventListener('click', () => scrollLogEdge(true));
-  $('logClear').addEventListener('click', clearLogs);
+  $('logClear').addEventListener('click', () => confirmRecordClear('log'));
   $('logMore').addEventListener('click', () => {
     fillLogFontMenu();
     $('logFont').value = logs.font.family;
@@ -5921,12 +6601,15 @@ const net = {
   // 为 true 时下次连接从头取请求并合并到当前列表, 不先清空
   resync: false,
   instanceId: '',
+  epoch: '',
+  sourceRevision: 0,
+  statusQuery: 0,
   seq: 0,
   records: new Map(),
   list: [],
   view: [],
   paused: false,
-  pending: [],
+  pending: new Map(),
   selected: 0,
   detail: null,
   detailTab: 'response',
@@ -6055,7 +6738,7 @@ async function netConnect() {
     }
   }
   syncNetCapture();
-  const es = new LayerLensEventSource(`${targetBase()}/api/network?${new URLSearchParams(netSessionParams({ since: net.resync ? 0 : net.seq }))}`);
+  const es = new LayerLensEventSource(`${targetBase()}/api/network?${new URLSearchParams(netSessionParams({ since: net.resync ? 0 : net.seq, epoch: net.epoch }))}`);
   net.resync = false;
   const parse = (e) => {
     try {
@@ -6065,6 +6748,7 @@ async function netConnect() {
     }
   };
   es.addEventListener('network', (e) => {
+    if (token !== net.token) return;
     const data = parse(e);
     // 连上时可能还没有请求, 也要重新渲染以去掉"正在连接"
     if (net.connecting) {
@@ -6072,22 +6756,35 @@ async function netConnect() {
       scheduleNetRender();
     }
     // App 重启后序号从头开始, 上一次的请求内容已不在设备上
-    if (data.instanceId && net.instanceId && data.instanceId !== net.instanceId) {
+    if ((data.epoch && data.epoch !== net.epoch) || (data.instanceId && net.instanceId && data.instanceId !== net.instanceId)) {
       resetNet();
       loadLaunches();
     }
     if (data.instanceId) net.instanceId = data.instanceId;
+    if (data.epoch) net.epoch = data.epoch;
     receiveNetRecords(data.records || []);
+    updateNetResume(es);
   });
-  es.addEventListener('clear', () => resetNet());
+  es.addEventListener('clear', (e) => {
+    if (token !== net.token) return;
+    const data = parse(e);
+    resetNet();
+    net.epoch = data.epoch || '';
+    net.instanceId = data.instanceId || '';
+    updateNetResume(es);
+    loadLaunches();
+  });
   es.addEventListener('source', (e) => {
+    if (token !== net.token) return;
+    net.sourceRevision++;
     const data = parse(e);
     net.offline = !data.online;
+    recorderStorageError('抓包', data.storageError || '', net);
     net.dropped = data.dropped || 0;
     scheduleNetRender();
   });
   // 其他窗口切换了抓包开关
-  es.addEventListener('capture', () => resyncNet());
+  es.addEventListener('capture', () => { if (token === net.token) resyncNet(); });
   // 断开后由浏览器自动重连; 期间 App 可能换成了旧版 Pod, 重新检查一次.
   // 收到错误状态码(如 App 未运行时旧版 Mac App 返回 503)时浏览器不再重连, 稍后自己重新连接
   es.onerror = async () => {
@@ -6110,9 +6807,13 @@ async function netConnect() {
 
 // 旧版 Pod 没有抓包接口, 路由返回 Not Found; App 未运行时 Hub 返回 503, 不算过低
 async function netOutdated() {
+  const token = net.token;
+  const sourceRevision = net.sourceRevision;
+  const query = ++net.statusQuery;
   try {
     const res = await fetch(`${targetBase()}/api/network/status?${new URLSearchParams(netSessionParams())}`);
     const data = await res.json().catch(() => ({}));
+    if (token !== net.token || sourceRevision !== net.sourceRevision || query !== net.statusQuery) return false;
     // 0.6.1 起支持搜索内容
     if (res.ok) net.searchSupported = !!data.search;
     syncNetRemote();
@@ -6135,13 +6836,24 @@ function netDisconnect() {
   net.connecting = false;
 }
 
+// LayerLensEventSource reuses this URL on automatic WebSocket reconnects.
+// Advance it only after records are applied; paused/unreceived pages remain replayable.
+function updateNetResume(es = net.es) {
+  if (!es || es !== net.es) return;
+  const url = new URL(es.url, location.href);
+  url.searchParams.set('since', String(net.seq));
+  url.searchParams.set('epoch', net.epoch);
+  es.url = url.href;
+}
+
 function resetNet() {
   net.records.clear();
   net.list = [];
   net.view = [];
-  net.pending = [];
+  net.pending.clear();
   net.seq = 0;
   net.instanceId = '';
+  net.epoch = '';
   net.follow = true;
   resetNetRemote();
   closeNetDetail();
@@ -6151,7 +6863,17 @@ function resetNet() {
 function receiveNetRecords(records) {
   if (!records.length) return;
   if (net.paused) {
-    net.pending.push(...records);
+    for (const record of records) {
+      const previous = net.pending.get(record.id);
+      if (previous && (previous.s || 0) > (record.s || 0)) continue;
+      net.pending.set(record.id, { ...previous, ...record });
+    }
+    // Match the visible list's limit and keep the newest request IDs. Complete history
+    // remains on the Mac; a paused or repeatedly reconnecting view must stay bounded.
+    if (net.pending.size > NET_MAX_RECORDS) {
+      const keep = new Set([...net.pending.keys()].sort((a, b) => b - a).slice(0, NET_MAX_RECORDS));
+      for (const id of net.pending.keys()) if (!keep.has(id)) net.pending.delete(id);
+    }
     renderNetStatus();
     return;
   }
@@ -6191,10 +6913,11 @@ function setNetPaused(paused) {
   button.setAttribute('aria-pressed', String(paused));
   button.title = paused ? t('继续') : t('暂停');
   button.querySelector('use').setAttribute('href', paused ? '#i-play' : '#i-pause');
-  if (!paused && net.pending.length) {
-    const pending = net.pending;
-    net.pending = [];
+  if (!paused && net.pending.size) {
+    const pending = [...net.pending.values()];
+    net.pending.clear();
     applyNetRecords(pending);
+    updateNetResume();
   }
   renderNetStatus();
 }
@@ -6332,7 +7055,7 @@ function renderNetStatus() {
   if (net.view !== net.list) parts.push(el('span', 'hit', String(net.view.length)), document.createTextNode(' / ' + total));
   else if (total) parts.push(document.createTextNode(String(total)));
   // 暂停期间同一请求会收到开始与结束两次变化, 只数新请求
-  const paused = new Set(net.pending.filter((record) => !net.records.has(record.id)).map((record) => record.id)).size;
+  const paused = [...net.pending.keys()].filter((id) => !net.records.has(id)).length;
   if (paused) parts.push(document.createTextNode(' ' + t('+{0} 暂停中', paused)));
   if (net.dropped && !net.session) {
     const badge = el('span', 'net-dropped', t('丢弃 {0}', net.dropped));
@@ -7080,16 +7803,19 @@ function exportNetHar() {
   toast(t('正在下载…'));
 }
 
-async function clearNet() {
+async function clearNet(job) {
+  const token = net.token;
   try {
-    const res = await fetch(targetBase() + '/api/network/clear', { method: 'POST' });
+    const query = job ? '?' + new URLSearchParams({ instanceId: job.instanceId, epoch: job.epoch }) : '';
+    const res = await fetch((job?.base || targetBase()) + '/api/network/clear' + query, { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
   } catch (e) {
-    toast(t('清空失败: {0}', e.message), true);
+    if (token === net.token) toast(t('清空失败: {0}', e.message), true);
     return;
   }
-  // 设备推送 clear 后各窗口同步清空, 这里先清空当前页面
-  resetNet();
+  // A clear event may already have arrived with new records before the HTTP response.
+  // Reconcile using the current generation instead of erasing those newer records again.
+  if (token === net.token) resyncNet();
 }
 
 function setNetDetailWidth(width, save) {
@@ -7133,14 +7859,7 @@ function setupNetwork() {
   $('netPause').addEventListener('click', () => setNetPaused(!net.paused));
   setupNetCapture();
   setupLaunches();
-  // 清空会删除本机保存的文件, 有记录时先确认
-  $('netClear').addEventListener('click', () => {
-    if (!net.list.length) {
-      clearNet();
-      return;
-    }
-    showConfirm($('netClear'), { title: t('清空本次启动的抓包记录?'), detail: t('将删除 {0} 个请求, 本机保存的文件一并删除, 无法恢复. 以前的启动不受影响', net.list.length), action: t('清空'), onConfirm: clearNet });
-  });
+  $('netClear').addEventListener('click', () => confirmRecordClear('net'));
   $('netHar').addEventListener('click', exportNetHar);
   const list = $('netList');
   list.addEventListener('scroll', () => {
@@ -7273,6 +7992,9 @@ function setup() {
   showPendingToast();
   resumePendingLaunch();
   window.addEventListener('pagehide', saveViewState);
+  document.addEventListener('pointerdown', (e) => {
+    stageNavigation = e.target instanceof Element && !!e.target.closest('#stageWrap');
+  }, true);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') saveViewState();
   });
@@ -7439,11 +8161,11 @@ function setup() {
       return;
     }
     if (!$('modal').hidden && !$('modal').classList.contains('closing')) return;
-    if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
     if (gitHandleKey(e)) {
       e.preventDefault();
       return;
     }
+    if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
     if (e.code === 'Space' && state.mode !== 'live') {
       // 阻止页面滚动和触发聚焦中的按钮
       e.preventDefault();
@@ -7455,7 +8177,12 @@ function setup() {
       return;
     }
     if (e.key === 'r' && !e.metaKey && !e.ctrlKey) refresh();
-    if (!e.metaKey && !e.ctrlKey && (!e.altKey || e.key === 'ArrowLeft') && handleTreeKey(e.key, e.altKey)) e.preventDefault();
+    if (!e.metaKey && !e.ctrlKey) {
+      const handled = stageNavigation && state.mode !== 'live'
+        ? handleStageKey(e.key, e.altKey)
+        : (!e.altKey || e.key === 'ArrowLeft') && handleTreeKey(e.key, e.altKey);
+      if (handled) e.preventDefault();
+    }
     // 未选中页面文本时, ⌘C 复制选中节点路径
     if (e.key === 'c' && (e.metaKey || e.ctrlKey) && !window.getSelection().toString()) {
       const node = state.nodes.get(state.selected);
@@ -7480,6 +8207,10 @@ function setup() {
 
   applyTheme(loadTheme(), false);
   $('targetBtn').addEventListener('click', () => togglePopover('targetMenu'));
+  $('targetPin').addEventListener('click', () => {
+    hidePopovers();
+    setTargetPinned(!targets.pinned);
+  });
   setupPanels();
   setupInputMemory();
   start();
@@ -7500,7 +8231,7 @@ async function start() {
   await syncLive();
   pollTargets();
   // 一台设备都没有时显示默认页, 保留选中的目标, 该设备回来时优先连接
-  if (!targets.devices.length && !targets.bundleId) {
+  if (!targets.devices.length && !targets.deviceId && !targets.bundleId) {
     targets.idle = true;
     $('appName').textContent = t('未连接');
     showGuide();
@@ -7508,12 +8239,7 @@ async function start() {
     return;
   }
   if (!targets.bundleId) {
-    $('appName').textContent = device?.name || targetHistory[targets.deviceId]?.name || t('未连接');
-    // 只选了模拟器(没有运行中的 App)时直接显示实时画面
-    if (device?.kind === 'simulator' && liveAvailable()) setMode('live');
-    const body = liveAvailable() ? t('运行集成了 LayerLens 的 App 后会自动连接, 也可以切换到实时查看模拟器画面') : t('运行集成了 LayerLens 的 App 后会自动连接');
-    showEmptyState(t('没有运行中的已集成 App'), body);
-    setAppState('offline', t('没有运行中的已集成 App'), { text: t('查看集成说明'), panel: 'integration' });
+    showDeviceOnly();
     return;
   }
   document.body.classList.add('has-app');
@@ -7523,7 +8249,7 @@ async function start() {
   // App 未运行时等事件流连上后整页重新加载; 模拟器的实时画面照常可用
   if (!currentApp()) {
     appState.dropped = true;
-    $('appName').textContent = targetHistory[targets.deviceId]?.apps[targets.bundleId]?.appName || targets.bundleId;
+    renderSelectedAppName();
     appState.blank = true;
     setAppState('offline');
     return;
@@ -7534,21 +8260,20 @@ async function start() {
 
 let appInfoSeq = 0;
 
-function loadAppInfo() {
+function loadAppInfo(job = targetTask) {
+  renderSelectedAppName();
   const seq = ++appInfoSeq;
   const key = logTargetKey();
-  return api('/api/app').then((info) => {
-    if (seq !== appInfoSeq || key !== logTargetKey()) return;
-    $('appName').textContent = info.appName;
-    appInfo.name = info.appName;
+  return (job ? taskRequest(job, targetBase() + '/api/app', 3000) : api('/api/app')).then((info) => {
+    if (seq !== appInfoSeq || key !== logTargetKey() || (job && !taskCurrent(job))) return;
+    renderSelectedAppName(info.appName);
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
     updateAppMeta();
-    document.title = `${info.appName} - LayerLens`;
   }).catch((e) => {
-    if (seq !== appInfoSeq || key !== logTargetKey()) return;
+    if (seq !== appInfoSeq || key !== logTargetKey() || (job && !taskCurrent(job))) return;
     // App 刚换端口等情况下取不到, 仍显示名称, 事件流重连后会重新加载
-    $('appName').textContent = currentApp()?.appName || targets.bundleId;
+    renderSelectedAppName();
     toast(e.message, true);
   });
 }

@@ -44,8 +44,8 @@ final class WebSocketConnection {
         send(opcode: 0x2, payload: payload, completion: completion)
     }
 
-    func sendText(_ text: String) {
-        send(opcode: 0x1, payload: Data(text.utf8)) { _ in }
+    func sendText(_ text: String, completion: @escaping (Bool) -> Void = { _ in }) {
+        send(opcode: 0x1, payload: Data(text.utf8), completion: completion)
     }
 
     func close() {

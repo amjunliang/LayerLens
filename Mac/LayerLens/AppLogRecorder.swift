@@ -22,6 +22,7 @@ final class AppLogRecorder {
     /// 记在日志文件扩展属性上: 所属的 App 进程和已写入的最大序号, LayerLens 重启后据此找回文件续写
     static let instanceAttribute = "com.layerlens.instance"
     static let seqAttribute = "com.layerlens.seq"
+    private static let pendingAttribute = "com.layerlens.pending-write"
     /// 所属设备, LayerLens 重启后据此找回该设备最近的日志
     static let deviceAttribute = "com.layerlens.device"
 
@@ -37,7 +38,7 @@ final class AppLogRecorder {
         }
     }
 
-    /// 同一设备上同一 App 的日志, App 重启后继续使用, 中间插入一条标记
+    /// 同一设备上同一 App 当前启动的日志; 历史启动仅保存在各自文件中
     final class Source {
         let deviceId: String
         let bundleId: String
@@ -50,13 +51,17 @@ final class AppLogRecorder {
         var upstream: NWConnection?
         var upstreamInstance = ""
         var lastReceive = Date()
+        var lastUse = Date()
+        var present = false
+        var memoryBytes = 0
+        var storageError = ""
         /// 旧版 Pod 没有日志接口的进程, 不再重试
         var unsupported: Set<String> = []
         var file: FileHandle?
         var fileURL: URL?
         /// 已写入文件的最大序号, LayerLens 重启后 App 会重发内存中的日志, 已写过的不再写入
         var fileSeq: UInt64 = 0
-        var subscribers: [ObjectIdentifier: NWConnection] = [:]
+        var subscribers: [ObjectIdentifier: BoundedStreamWriter] = [:]
 
         init(deviceId: String, bundleId: String) {
             self.deviceId = deviceId
@@ -70,6 +75,17 @@ final class AppLogRecorder {
 
     private let queue = DispatchQueue(label: "com.layerlens.applog")
     private var sources: [String: Source] = [:]
+    private let storageFolder: URL
+    private let now: () -> Date
+    init(folder: URL = AppLogRecorder.folder, now: @escaping () -> Date = Date.init) { storageFolder = folder; self.now = now }
+
+    func connectionSummary(completion: @escaping ([String: Int]) -> Void) {
+        queue.async { [self] in
+            completion(["connections": sources.values.filter { $0.upstream != nil }.count,
+                        "files": sources.values.filter { $0.file != nil }.count,
+                        "storageErrors": sources.values.filter { !$0.storageError.isEmpty }.count, "cachedSources": sources.count, "cacheBytes": sources.values.reduce(0) { $0 + $1.memoryBytes }])
+        }
+    }
     private let timeFormatter = AppLogRecorder.formatter("yyyy-MM-dd HH:mm:ss.SSS")
     private let fileFormatter = AppLogRecorder.formatter("yyyy-MM-dd_HH-mm-ss")
 
@@ -87,6 +103,7 @@ final class AppLogRecorder {
         }
         let source = Source(deviceId: deviceId, bundleId: bundleId)
         source.deviceName = deviceName
+        source.lastUse = now()
         sources[key] = source
         restore(source)
         return source
@@ -97,7 +114,16 @@ final class AppLogRecorder {
     /// 每次扫描后调用: 为运行中的 App 建立日志流, 失效的重新连接; 挂起的 App 保持原连接等它回到前台
     func update(apps: [AppRecord]) {
         queue.async { [self] in
-            for app in apps where !app.suspended {
+            let present = Set(apps.map { $0.deviceId + "|" + $0.bundleId })
+            for (key, source) in sources {
+                source.present = present.contains(key)
+                if source.present { source.lastUse = now() }
+                else {
+                    if let upstream = source.upstream { disconnect(upstream, source: source) }
+                    source.file?.closeFile(); source.file = nil
+                }
+            }
+            for app in apps where app.responding {
                 guard let instanceId = app.info["instanceId"] as? String, !instanceId.isEmpty else { continue }
                 let source = source(deviceId: app.deviceId, bundleId: app.bundleId, deviceName: app.info["deviceName"] as? String ?? "")
                 if let name = app.info["deviceName"] as? String, !name.isEmpty {
@@ -107,15 +133,36 @@ final class AppLogRecorder {
                 if source.upstreamInstance == instanceId, source.upstream != nil, Date().timeIntervalSince(source.lastReceive) < Self.staleInterval { continue }
                 source.upstream?.cancel()
                 source.upstream = nil
+                source.present = true
                 connect(source, endpoint: app.endpoint, instanceId: instanceId)
             }
+            pruneCaches()
+        }
+    }
+
+    private func pruneCaches() {
+        let items = sources.map { key, source in
+            RecorderCache.Item(id: key, bytes: source.memoryBytes, lastUse: source.lastUse,
+                               pinned: source.present || !source.subscribers.isEmpty)
+        }
+        for key in RecorderCache.evictions(items, now: now()) {
+            guard let source = sources.removeValue(forKey: key) else { continue }
+            source.upstream?.cancel()
+            source.file?.closeFile()
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            for source in sources.values { source.upstream?.cancel(); source.file?.closeFile(); source.subscribers.values.forEach { $0.cancel() } }
+            sources.removeAll()
         }
     }
 
     private func connect(_ source: Source, endpoint: TargetEndpoint, instanceId: String) {
         source.upstreamInstance = instanceId
         source.lastReceive = Date()
-        let since = source.instanceId == instanceId ? source.lastSeq : 0
+        let since = source.instanceId == instanceId ? source.fileSeq : 0
         let request = HTTPClient.request(method: "GET", path: "/api/logs?since=\(since)", host: "127.0.0.1:\(endpoint.port)")
         switch endpoint {
         case .local(let port):
@@ -207,6 +254,7 @@ final class AppLogRecorder {
                     let block = Data(buffer[buffer.startIndex..<range.lowerBound])
                     buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                     self.handleEvent(block, source: source)
+                    if source.upstream !== connection { return }
                 }
             }
             if isComplete || error != nil {
@@ -229,68 +277,111 @@ final class AppLogRecorder {
         }
         guard name == "logs", let json = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] else { return }
         if let instanceId = json["instanceId"] as? String, instanceId != source.instanceId {
-            let restarted = !source.instanceId.isEmpty
             source.instanceId = instanceId
             source.lastSeq = 0
             source.fileSeq = 0
             source.file?.closeFile()
             source.file = nil
-            if !restarted {
-                resumeFile(source)
-            }
-            if restarted {
-                append([Entry(id: source.nextId, time: Date().timeIntervalSince1970 * 1000, text: "", kind: "restart")], to: source)
-                source.nextId += 1
+            source.fileURL = nil
+            source.entries = []
+            source.memoryBytes = 0
+            source.storageError = ""
+            // 新启动替换实时列表; 断线重连的 instanceId 不变, 不会走这里。
+            // 仍恢复该实例的持久断点, 防止重放已保存或已清空的日志。
+            do { try resumeFile(source) }
+            catch { source.storageError = error.localizedDescription }
+            broadcast(source, "reset", ["unsupported": source.isUnsupported, "storageError": source.storageError])
+            if !source.storageError.isEmpty {
+                if let connection = source.upstream { disconnect(connection, source: source) }
+                return
             }
         }
         var added: [Entry] = []
-        var unwritten: [Entry] = []
+        var sequence = source.fileSeq
         for item in json["entries"] as? [[String: Any]] ?? [] {
-            guard let seq = (item["s"] as? NSNumber)?.uint64Value, seq > source.lastSeq else { continue }
-            source.lastSeq = seq
-            let entry = Entry(id: source.nextId, time: (item["t"] as? NSNumber)?.doubleValue ?? 0, text: item["m"] as? String ?? "")
-            added.append(entry)
-            if seq > source.fileSeq {
-                unwritten.append(entry)
-            }
-            source.nextId += 1
+            guard let seq = (item["s"] as? NSNumber)?.uint64Value, seq > sequence else { continue }
+            sequence = seq
+            added.append(Entry(id: source.nextId + added.count, time: (item["t"] as? NSNumber)?.doubleValue ?? 0, text: item["m"] as? String ?? ""))
         }
         guard !added.isEmpty else { return }
-        if !unwritten.isEmpty {
-            write(unwritten, source: source)
-            source.fileSeq = source.lastSeq
-            if let url = source.fileURL {
-                Self.setAttribute(Self.seqAttribute, String(source.fileSeq), of: url)
+        do {
+            try write(added, sequence: sequence, source: source)
+            source.fileSeq = sequence
+            source.lastSeq = sequence
+            source.nextId += added.count
+            if !source.storageError.isEmpty {
+                source.storageError = ""
+                broadcast(source, "status", ["unsupported": source.isUnsupported, "storageError": ""])
             }
+            append(added, to: source)
+        } catch {
+            source.storageError = error.localizedDescription
+            broadcast(source, "status", ["unsupported": source.isUnsupported, "storageError": source.storageError])
+            // Stop consuming this stream. Reconnect from the last durable sequence, not received bytes.
+            if let connection = source.upstream { disconnect(connection, source: source) }
         }
-        append(added, to: source)
     }
 
     private func append(_ entries: [Entry], to source: Source) {
         source.entries.append(contentsOf: entries)
-        // 超出一成再裁剪, 不必每批都移动数组
-        if source.entries.count > Self.memoryLimit + Self.memoryLimit / 10 {
-            source.entries.removeFirst(source.entries.count - Self.memoryLimit)
+        source.memoryBytes += entries.reduce(0) { $0 + $1.text.utf8.count + 64 }
+        if source.entries.count > Self.memoryLimit + Self.memoryLimit / 10 || source.memoryBytes > RecorderCache.byteLimit {
+            var count = 0, bytes = source.memoryBytes
+            while count < source.entries.count && (source.entries.count - count > Self.memoryLimit || bytes > RecorderCache.byteLimit) {
+                bytes -= source.entries[count].text.utf8.count + 64; count += 1
+            }
+            source.entries.removeFirst(count); source.memoryBytes = bytes
         }
         broadcast(source, "logs", ["entries": entries.map(\.json)])
+        pruneCaches()
     }
 
     // MARK: - File
 
-    private func write(_ entries: [Entry], source: Source) {
+    private func write(_ entries: [Entry], sequence: UInt64, source: Source) throws {
+        if source.file == nil && !source.instanceId.isEmpty { try resumeFile(source) }
         if source.file == nil {
-            let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let name = fileFormatter.string(from: Date()) + "_" + Self.sanitize(source.deviceName.isEmpty ? source.deviceId : source.deviceName) + ".log"
-            let url = folder.appendingPathComponent(name)
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-            source.file = try? FileHandle(forWritingTo: url)
-            source.fileURL = url
-            Self.setAttribute(Self.instanceAttribute, source.instanceId, of: url)
-            Self.setAttribute(Self.deviceAttribute, source.deviceId, of: url)
+            let folder = storageFolder.appendingPathComponent(Self.sanitize(source.bundleId))
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let suffix = "_" + Self.sanitize(source.deviceId) + "_" + Self.sanitize(source.instanceId)
+            let base = fileFormatter.string(from: Date()) + "_" + Self.sanitize(source.deviceName.isEmpty ? source.deviceId : source.deviceName) + suffix
+            var url = folder.appendingPathComponent(base + ".log")
+            var fd: Int32 = -1
+            // O_EXCL prevents an existing log from ever being truncated, even under a filename collision.
+            for attempt in 0..<10 {
+                if attempt > 0 { url = folder.appendingPathComponent(base + "_" + UUID().uuidString + ".log") }
+                fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+                if fd >= 0 || errno != EEXIST { break }
+            }
+            guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            do {
+                try Self.setRequiredAttribute(Self.instanceAttribute, source.instanceId, of: url)
+                try Self.setRequiredAttribute(Self.deviceAttribute, source.deviceId, of: url)
+            } catch {
+                try? file.close(); try? FileManager.default.removeItem(at: url); throw error
+            }
+            source.file = file; source.fileURL = url
         }
+        guard let file = source.file, let url = source.fileURL else { throw CocoaError(.fileWriteUnknown) }
+        let offset = try file.seekToEnd()
         let text = entries.map { "[\(timeFormatter.string(from: Date(timeIntervalSince1970: $0.time / 1000)))] \($0.text)\n" }.joined()
-        try? source.file?.write(contentsOf: Data(text.utf8))
+        do {
+            try Self.setRequiredAttribute(Self.pendingAttribute, "\(offset):\(sequence)", of: url)
+            try file.write(contentsOf: Data(text.utf8))
+            try file.synchronize()
+            try Self.setRequiredAttribute(Self.seqAttribute, String(sequence), of: url)
+            _ = removexattr(url.path, Self.pendingAttribute, 0)
+        } catch {
+            // A failed write may have appended a prefix: roll it back before requesting the batch again.
+            do { try file.truncate(atOffset: offset); try file.synchronize() }
+            catch {
+                // Keep the open file for an explicit retry; never acknowledge or silently skip this batch.
+                source.storageError = "Log write and rollback failed: " + error.localizedDescription
+            }
+            try? file.close(); source.file = nil
+            throw error
+        }
     }
 
     /// LayerLens 重启后读回该设备最近的日志文件, App 未运行时日志面板也有内容; 同时接着写这个文件,
@@ -298,7 +389,7 @@ final class AppLogRecorder {
     /// 旧版本写的文件没有设备标记, 按文件名中的设备名匹配
     private func restore(_ source: Source) {
         let manager = FileManager.default
-        let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
+        let folder = storageFolder.appendingPathComponent(Self.sanitize(source.bundleId))
         let files = ((try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "log" }.sorted {
             let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -307,7 +398,18 @@ final class AppLogRecorder {
         let suffix = "_" + Self.sanitize(source.deviceName)
         guard let url = files.first(where: { Self.attribute(Self.deviceAttribute, of: $0) == source.deviceId })
                 ?? files.first(where: { !source.deviceName.isEmpty && Self.attribute(Self.deviceAttribute, of: $0) == nil && $0.deletingPathExtension().lastPathComponent.hasSuffix(suffix) }),
-              let data = try? Data(contentsOf: url) else { return }
+              let reader = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? reader.close() }
+        if Self.attribute(Self.pendingAttribute, of: url) != nil {
+            do {
+                let writer = try FileHandle(forWritingTo: url)
+                defer { try? writer.close() }
+                try Self.recoverWrite(writer, at: url)
+            } catch { source.storageError = error.localizedDescription; return }
+        }
+        let size = (try? reader.seekToEnd()) ?? 0
+        try? reader.seek(toOffset: size > UInt64(RecorderCache.byteLimit) ? size - UInt64(RecorderCache.byteLimit) : 0)
+        guard let data = try? reader.readToEnd() else { return }
         var entries: [Entry] = []
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false) {
             // 每条以 [时间] 开头, 其余为上一条的续行
@@ -325,6 +427,7 @@ final class AppLogRecorder {
             defer { source.nextId += 1 }
             return Entry(id: source.nextId, time: $0.time, text: $0.text)
         }
+        source.memoryBytes = source.entries.reduce(0) { $0 + $1.text.utf8.count + 64 }
         if let instanceId = Self.attribute(Self.instanceAttribute, of: url), let file = try? FileHandle(forWritingTo: url) {
             _ = try? file.seekToEnd()
             source.instanceId = instanceId
@@ -336,15 +439,25 @@ final class AppLogRecorder {
     }
 
     /// LayerLens 重启后找回同一次 App 运行的文件接着写
-    private func resumeFile(_ source: Source) {
-        let folder = Self.folder.appendingPathComponent(Self.sanitize(source.bundleId))
+    private func resumeFile(_ source: Source) throws {
+        let folder = storageFolder.appendingPathComponent(Self.sanitize(source.bundleId))
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-        guard let url = files.first(where: { $0.pathExtension == "log" && Self.attribute(Self.instanceAttribute, of: $0) == source.instanceId }),
-              let file = try? FileHandle(forWritingTo: url) else { return }
-        _ = try? file.seekToEnd()
-        source.file = file
-        source.fileURL = url
+        guard let url = files.first(where: { $0.pathExtension == "log" && Self.attribute(Self.instanceAttribute, of: $0) == source.instanceId && (Self.attribute(Self.deviceAttribute, of: $0) == nil || Self.attribute(Self.deviceAttribute, of: $0) == source.deviceId) }) else { return }
+        let file = try FileHandle(forWritingTo: url)
+        do { try Self.recoverWrite(file, at: url); _ = try file.seekToEnd() }
+        catch { try? file.close(); throw error }
+        source.file = file; source.fileURL = url
         source.fileSeq = UInt64(Self.attribute(Self.seqAttribute, of: url) ?? "") ?? 0
+    }
+
+    private static func recoverWrite(_ file: FileHandle, at url: URL) throws {
+        guard let pending = attribute(pendingAttribute, of: url) else { return }
+        let parts = pending.split(separator: ":")
+        guard parts.count == 2, let offset = UInt64(parts[0]), let sequence = UInt64(parts[1]) else { throw CocoaError(.fileReadCorruptFile) }
+        if (UInt64(attribute(seqAttribute, of: url) ?? "") ?? 0) < sequence {
+            try file.truncate(atOffset: offset); try file.synchronize()
+        }
+        _ = removexattr(url.path, pendingAttribute, 0)
     }
 
     /// 本机保存的日志所属的设备 ID -> Bundle ID; 只含记了所属设备的文件
@@ -373,6 +486,12 @@ final class AppLogRecorder {
         _ = data.withUnsafeBytes { setxattr(url.path, name, $0.baseAddress, data.count, 0, 0) }
     }
 
+    private static func setRequiredAttribute(_ name: String, _ value: String, of url: URL) throws {
+        let data = Data(value.utf8)
+        let result = data.withUnsafeBytes { setxattr(url.path, name, $0.baseAddress, data.count, 0, 0) }
+        if result != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    }
+
     private static func sanitize(_ name: String) -> String {
         name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
     }
@@ -396,18 +515,29 @@ final class AppLogRecorder {
     func subscribe(deviceId: String, bundleId: String, connection: NWConnection) {
         queue.async { [self] in
             let source = source(deviceId: deviceId, bundleId: bundleId)
+            source.lastUse = now()
             let id = ObjectIdentifier(connection)
-            source.subscribers[id] = connection
-            var data = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n".utf8)
-            data.append(Self.event("reset", ["unsupported": source.isUnsupported]))
+            let writer = BoundedStreamWriter(queue: queue, send: { data, done in
+                connection.send(content: data, completion: .contentProcessed { done($0 == nil) })
+            }, close: { connection.cancel() })
+            source.subscribers[id] = writer
             let entries = source.entries
-            for start in stride(from: 0, to: entries.count, by: Self.backlogBatch) {
-                data.append(Self.event("logs", ["entries": entries[start..<min(start + Self.backlogBatch, entries.count)].map(\.json)]))
+            var index = 0, started = false
+            let initial = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n".utf8) + Self.event("reset", ["unsupported": source.isUnsupported, "storageError": source.storageError, "instanceId": source.instanceId])
+            writer.startReplay {
+                if !started { started = true; return initial }
+                guard index < entries.count else { return nil }
+                let start = index
+                var bytes = 0
+                repeat { bytes += entries[index].text.utf8.count + 64; index += 1 }
+                while index < entries.count && index - start < 128 && bytes < 256 * 1024
+                return Self.event("logs", ["entries": entries[start..<index].map(\.json)])
             }
-            connection.send(content: data, completion: .contentProcessed { _ in })
             watchClose(connection) { [weak self] in
                 self?.queue.async {
-                    source.subscribers[id] = nil
+                    source.subscribers[id]?.cancel(); source.subscribers[id] = nil
+                    source.lastUse = self?.now() ?? Date()
+                    self?.pruneCaches()
                 }
             }
         }
@@ -427,14 +557,10 @@ final class AppLogRecorder {
 
     private func broadcast(_ source: Source, _ name: String, _ object: [String: Any]) {
         guard !source.subscribers.isEmpty else { return }
+        var object = object
+        object["instanceId"] = source.instanceId
         let data = Self.event(name, object)
-        for connection in source.subscribers.values {
-            connection.send(content: data, completion: .contentProcessed { error in
-                if error != nil {
-                    connection.cancel()
-                }
-            })
-        }
+        for writer in Array(source.subscribers.values) { writer.enqueue(data) }
     }
 
     private static func event(_ name: String, _ object: [String: Any]) -> Data {
@@ -446,13 +572,56 @@ final class AppLogRecorder {
 
     // MARK: - Actions
 
-    /// 清空内存中的日志(文件保留), 所有打开的面板一起清空
-    func clear(deviceId: String, bundleId: String) {
+    /// 原子清空本次启动的持久化内容, 保留续写序号, 不向 Pod 发送全局清空。
+    /// expectedInstance 将确认框绑定到特定启动, App 重启后拒绝旧操作。
+    func clear(deviceId: String, bundleId: String, expectedInstance: String,
+               completion: @escaping (Result<Void, Error>) -> Void) {
         queue.async { [self] in
             let source = source(deviceId: deviceId, bundleId: bundleId)
-            source.entries = []
-            broadcast(source, "reset", ["unsupported": source.isUnsupported])
+            guard !expectedInstance.isEmpty, source.instanceId == expectedInstance,
+                  source.upstreamInstance.isEmpty || source.upstreamInstance == expectedInstance else {
+                completion(.failure(NSError(domain: "LayerLens.LogClear", code: 409,
+                    userInfo: [NSLocalizedDescriptionKey: "Log launch changed; please confirm again"])))
+                return
+            }
+            do {
+                // 在重启后的第一条日志到达前, fileURL 可能仍指向以前的启动。
+                // 先建立/恢复当前实例文件, 绝不清空那个历史文件。
+                if source.file == nil { try write([], sequence: source.fileSeq, source: source) }
+                guard let url = source.fileURL,
+                      Self.attribute(Self.instanceAttribute, of: url) == expectedInstance,
+                      Self.attribute(Self.deviceAttribute, of: url) == deviceId else { throw CocoaError(.fileWriteUnknown) }
+                try replaceWithEmptyLog(url, source: source)
+                source.entries = []
+                source.memoryBytes = 0
+                source.storageError = ""
+                // HTTP 响应不再次清前端列表, reset 后的新日志不会被迟到响应抹掉。
+                broadcast(source, "reset", ["unsupported": source.isUnsupported, "storageError": ""])
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
         }
+    }
+
+    /// 内容和断点在同一个 inode 中提交, 清空中断不会留下“内容已删但断点丢失”的状态。
+    private func replaceWithEmptyLog(_ url: URL, source: Source) throws {
+        let temporary = url.deletingLastPathComponent().appendingPathComponent(".clear-" + UUID().uuidString)
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        let replacement = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var committed = false
+        defer {
+            if !committed { try? replacement.close(); try? FileManager.default.removeItem(at: temporary) }
+        }
+        try Self.setRequiredAttribute(Self.instanceAttribute, source.instanceId, of: temporary)
+        try Self.setRequiredAttribute(Self.deviceAttribute, source.deviceId, of: temporary)
+        try Self.setRequiredAttribute(Self.seqAttribute, String(source.fileSeq), of: temporary)
+        try replacement.synchronize()
+        guard rename(temporary.path, url.path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        committed = true
+        source.file?.closeFile()
+        source.file = replacement
     }
 
     /// 导出到下载文件夹并在访达中选中; text 为空时导出内存中的全部日志

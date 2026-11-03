@@ -9,6 +9,7 @@
 import AppKit
 import IOSurface
 import ObjectiveC
+import XPC
 
 /// CoreSimulator / SimulatorKit 私有接口的最小封装: 取模拟器屏幕 IOSurface, 注入触摸
 
@@ -302,6 +303,15 @@ final class SimTouch {
         return send(msg)
     }
 
+    /// Xcode 26 的硬件按键服务; Home source=0, hardware target=0x33。
+    @discardableResult
+    func sendHome(down: Bool) -> Bool {
+        typealias ButtonFn = @convention(c) (UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
+        guard let symbol = SimBridge.symbol("IndigoHIDMessageForButton"),
+              let message = unsafeBitCast(symbol, to: ButtonFn.self)(0, down ? 1 : 2, 0x33) else { return false }
+        return send(message)
+    }
+
     private func send(_ message: UnsafeMutableRawPointer) -> Bool {
         let sel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
         guard let cls = object_getClass(client), let method = class_getInstanceMethod(cls, sel) else {
@@ -311,5 +321,149 @@ final class SimTouch {
         typealias Fn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, DispatchQueue?, (@convention(block) (NSError?) -> Void)?) -> Void
         unsafeBitCast(method_getImplementation(method), to: Fn.self)(client, sel, message, true, nil, nil)
         return true
+    }
+}
+
+/// 仅负责 Home: 新模拟器使用 dtuhidd, 不支持该服务的 Xcode 26 保留 Indigo。
+/// 协议参考 facebook/idb 的 DTUHIDModels / SimulatorXPCConnection (MIT)。
+/// https://github.com/facebook/idb/tree/main/FBSimulatorControl/HID
+/// 独立队列预热, 不让服务启动或超时阻塞触摸和画面。
+final class SimHomeButton {
+    private static let service = "com.apple.coredevice.feature.remote.hid.digitizer"
+    private let device: NSObject
+    private let queue = DispatchQueue(label: "com.layerlens.live.home")
+    private let replyQueue = DispatchQueue(label: "com.layerlens.live.home.reply")
+    private let lock = NSLock()
+    private var stopped = false
+    private var connection: xpc_connection_t?
+    private var legacy = false // 仅在确定服务/符号不支持时回退
+    private var failed = false
+    private var generation = UUID()
+    private var pendingPresses = 0
+
+    init(device: NSObject) {
+        self.device = device
+        queue.async { [weak self] in self?.connect() }
+    }
+
+    func stop() {
+        lock.lock()
+        stopped = true
+        generation = UUID()
+        let old = connection
+        connection = nil
+        lock.unlock()
+        if let old { xpc_connection_cancel(old) }
+    }
+    deinit { stop() }
+
+    func press(legacyPress: @escaping () -> Void, unavailable: @escaping () -> Void) {
+        lock.lock()
+        guard !stopped, pendingPresses < 2 else { lock.unlock(); return }
+        pendingPresses += 1
+        lock.unlock()
+        let deadline = DispatchTime.now() + .milliseconds(500)
+        queue.async { [weak self] in
+            guard let self else { return }
+            defer {
+                self.lock.lock()
+                self.pendingPresses -= 1
+                self.lock.unlock()
+            }
+            self.lock.lock()
+            let active = !self.stopped
+            let needsConnect = (self.connection == nil || self.failed) && !self.legacy
+            self.lock.unlock()
+            guard active else { return }
+            guard DispatchTime.now() < deadline else { unavailable(); return }
+            if needsConnect { self.connect() }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            guard !self.stopped else { return }
+            // 不补发等待过久的点击, 防止切换目标后突然出现 Home 或连击。
+            guard DispatchTime.now() < deadline else { unavailable(); return }
+            if self.legacy { legacyPress(); return }
+            guard let connection = self.connection, !self.failed else { unavailable(); return }
+            xpc_connection_send_message(connection, Self.message(down: true))
+            usleep(30_000)
+            xpc_connection_send_message(connection, Self.message(down: false))
+        }
+    }
+
+    static func message(down: Bool, barrier: Bool = false) -> xpc_object_t {
+        let payload = xpc_dictionary_create(nil, nil, 0)
+        if !barrier { xpc_dictionary_set_uint64(payload, "usagePage", 0x0c) }
+        xpc_dictionary_set_uint64(payload, "usageCode", barrier ? 0 : 0x40)
+        xpc_dictionary_set_uint64(payload, "state", down ? 1 : 2)
+        let message = xpc_dictionary_create(nil, nil, 0)
+        xpc_dictionary_set_string(message, "messageType", barrier ? "IndigoKeyboardButtonEvent" : "IndigoButtonEvent")
+        xpc_dictionary_set_string(message, "featureIdentifier", service)
+        xpc_dictionary_set_bool(message, "isBarrier", barrier)
+        xpc_dictionary_set_value(message, "payload", payload)
+        return message
+    }
+
+    private func connect() {
+        typealias Endpoint = @convention(c) (mach_port_t, UInt64, UInt64) -> Unmanaged<AnyObject>?
+        typealias Connection = @convention(c) (xpc_object_t) -> Unmanaged<AnyObject>?
+        typealias Enable = @convention(c) (xpc_connection_t) -> Void
+        lock.lock()
+        let active = !stopped
+        let old = connection
+        connection = nil
+        generation = UUID()
+        let token = generation
+        lock.unlock()
+        if let old { xpc_connection_cancel(old) }
+        guard active else { return }
+        let handle = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let e = dlsym(handle, "xpc_endpoint_create_mach_port_4sim"),
+              let c = dlsym(handle, "xpc_connection_create_from_endpoint"),
+              let enable = dlsym(handle, "xpc_connection_enable_sim2host_4sim") else {
+            legacy = true
+            return
+        }
+        let selector = NSSelectorFromString("lookup:error:")
+        typealias Lookup = @convention(c) (AnyObject, Selector, NSString, AutoreleasingUnsafeMutablePointer<NSError?>) -> mach_port_t
+        guard let method = class_getInstanceMethod(type(of: device), selector) else { legacy = true; return }
+        var error: NSError?
+        let port = unsafeBitCast(method_getImplementation(method), to: Lookup.self)(device, selector, Self.service as NSString, &error)
+        guard port != MACH_PORT_NULL else {
+            let state = device.responds(to: NSSelectorFromString("state")) ? (device.value(forKey: "state") as? NSNumber)?.intValue : nil
+            // 启动中也可能返回 405, 不能因此永久选到旧通道。SimDeviceStateBooted=3。
+            legacy = (state == nil || state == 3) && error?.domain == "com.apple.CoreSimulator.SimError" && error?.code == 405
+            LiveLog.write("Home service lookup: \(String(describing: error)); legacy=\(legacy)")
+            return
+        }
+        // endpoint 接管 lookup 返回的 send right; 两个 create 都返回 +1。
+        guard let endpoint = unsafeBitCast(e, to: Endpoint.self)(port, 0, 0)?.takeRetainedValue() as? xpc_object_t,
+              let peer = unsafeBitCast(c, to: Connection.self)(endpoint)?.takeRetainedValue() as? xpc_connection_t else { return }
+        unsafeBitCast(enable, to: Enable.self)(peer)
+        xpc_connection_set_target_queue(peer, replyQueue)
+        xpc_connection_set_event_handler(peer) { [weak self] event in
+            guard xpc_get_type(event) == XPC_TYPE_ERROR, let self else { return }
+            self.lock.lock()
+            if self.generation == token { self.failed = true }
+            self.lock.unlock()
+        }
+        lock.lock()
+        guard !stopped else { lock.unlock(); xpc_connection_cancel(peer); return }
+        connection = peer
+        failed = false
+        lock.unlock()
+        xpc_connection_resume(peer)
+        let answered = DispatchSemaphore(value: 0)
+        // 只有有效的 barrier 回复才表示 daemon 可用。
+        xpc_connection_send_message_with_reply(peer, Self.message(down: false, barrier: true), replyQueue) { reply in
+            if xpc_get_type(reply) != XPC_TYPE_ERROR { answered.signal() }
+        }
+        let ready = answered.wait(timeout: .now() + .seconds(4)) == .success
+        if ready { usleep(200_000) }
+        lock.lock()
+        let accepted = ready && !stopped && !failed
+        if !accepted { connection = nil }
+        lock.unlock()
+        if !accepted { xpc_connection_cancel(peer) }
+        LiveLog.write("Home dtuhidd ready=\(accepted)")
     }
 }

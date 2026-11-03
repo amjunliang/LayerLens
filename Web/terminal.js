@@ -283,7 +283,12 @@ function termOpenSocket(id, view) {
     termFit(false);
     termSend(view, { t: 'r', c: view.xterm.cols, r: view.xterm.rows });
   };
-  ws.onmessage = (e) => view.xterm.write(new Uint8Array(e.data));
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const value = JSON.parse(e.data);
+      if (value.error) toast(t('终端输入未发送: {0}', value.error), true, true);
+    } else view.xterm.write(new Uint8Array(e.data));
+  };
   // LayerLens 重启时会话已不存在, 列表更新后视图会被移除; 仍在列表中则稍后重连并重新回放
   ws.onclose = () => {
     if (view.ws !== ws) return;
@@ -297,7 +302,11 @@ function termOpenSocket(id, view) {
 }
 
 function termSend(view, message) {
-  if (view.ws?.readyState === WebSocket.OPEN) view.ws.send(JSON.stringify(message));
+  if (view.ws?.readyState !== WebSocket.OPEN) return;
+  if (message.t === 'i' && (new TextEncoder().encode(message.d).length > 512 * 1024 || view.ws.bufferedAmount > 1024 * 1024)) {
+    toast(t('输入过大或终端繁忙, 本次输入未发送'), true, true); return;
+  }
+  view.ws.send(JSON.stringify(message));
 }
 
 function termDisposeView(id, view) {

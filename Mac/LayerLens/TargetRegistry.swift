@@ -53,8 +53,10 @@ struct AppRecord {
     let endpoint: TargetEndpoint
     /// iOS 端 /api/app 的原始内容
     let info: [String: Any]
-    /// 本次扫描端口超时(进程在但不响应), 即 App 在后台被挂起, 沿用上次的信息
+    /// 连续扫描无法响应, 疑似挂起; 不代表系统确认的前后台状态
     var suspended = false
+    var responding = true
+    var scanVersion: UInt64 = 0
 }
 
 /// 定时发现模拟器和集成了 LayerLens 的 App, 所有状态只在 queue 上读写
@@ -67,6 +69,12 @@ final class TargetRegistry {
     private let session: URLSession
     private var timer: DispatchSourceTimer?
     private var simulators: [DeviceRecord] = []
+    private var refreshingSimulators = false
+    private var refreshSimulatorsAgain = false
+    private var simulatorWaiters: [() -> Void] = []
+    private var nextSimulatorRefresh = Date.distantPast
+    private var inventoryFingerprint = Data()
+    var onInventoryChanged: (([String: Any]) -> Void)?
     /// 未启动(或正在启动 / 关闭)的模拟器, 网页列出后可以启动
     private var offlineSimulators: [(record: DeviceRecord, state: String)] = []
     private var usbDevices: [Usbmux.Device] = []
@@ -75,6 +83,9 @@ final class TargetRegistry {
     private var detailsLoading: Set<String> = []
     private var apps: [AppRecord] = []
     private var scanning = false
+    private var stopped = false
+    /// 短暂通信超时不能立即当作挂起; 成功响应或端口移除时重置。
+    private var scanMisses: [String: Int] = [:]
     private var scanWaiters: [() -> Void] = []
     /// 已取到过 USB 设备列表, 之后的扫描才包含真机上的 App
     private var usbListed = false
@@ -94,6 +105,22 @@ final class TargetRegistry {
     private let captureLock = NSLock()
     /// 每次扫描完成后在 queue 上回调当前的 App 列表, 启动前设置
     var onAppsChanged: (([AppRecord]) -> Void)?
+    var onStatesChanged: (([String: Any]) -> Void)?
+    private lazy var stateMonitor: TargetStateMonitor = {
+        let monitor = TargetStateMonitor { [queue] in AppEventStream(queue: queue, handshakeTimeout: 5) }
+        monitor.onChange = { [weak self] states, snapshot in
+            guard let self else { return }
+            self.appStates = states
+            self.onStatesChanged?(snapshot)
+        }
+        return monitor
+    }()
+    private var appStates: [[String: Any]] = []
+
+    func stop() {
+        queue.sync { stopped = true; timer?.cancel(); stateMonitor.stop() }
+        BoundedProcess.stopAll()
+    }
 
     init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -101,8 +128,9 @@ final class TargetRegistry {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: configuration)
         sourceFiles = UserDefaults.standard.dictionary(forKey: Self.sourceFilesKey) as? [String: String] ?? [:]
-        history = UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:]
+        history = TargetHistory.sanitized(UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:])
         backfillHistory()
+        UserDefaults.standard.set(history, forKey: Self.historyKey)
         updateCaptures()
     }
 
@@ -117,7 +145,7 @@ final class TargetRegistry {
         for (deviceId, bundleIds) in saved {
             guard var entry = history[deviceId] else { continue }
             var apps = entry["apps"] as? [String: Any] ?? [:]
-            for bundleId in bundleIds where apps[bundleId] == nil {
+            for bundleId in bundleIds where TargetHistory.validBundleId(bundleId) && apps[bundleId] == nil {
                 apps[bundleId] = ["bundleId": bundleId, "appName": "", "version": ""]
                 changed = true
             }
@@ -195,13 +223,29 @@ final class TargetRegistry {
 
     /// 立即重新获取模拟器列表, 用于启动或关闭模拟器之后
     func refreshSimulatorsNow(completion: @escaping () -> Void) {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let list = Self.listSimulators()
-            self?.queue.async {
-                self?.simulators = list.booted
-                self?.offlineSimulators = list.offline
-                completion()
+        queue.async { [self] in
+            simulatorWaiters.append(completion)
+            if refreshingSimulators { refreshSimulatorsAgain = true; return }
+            refreshSimulators(force: true)
+        }
+    }
+
+    private func publishInventory() {
+        guard ready else { return }
+        snapshot { [weak self] devices, simulators, history in
+            guard let self else { return }
+            let value: [String: Any] = ["devices": devices, "simulators": simulators, "history": history]
+            var topology = value
+            topology["devices"] = devices.map { device -> [String: Any] in
+                var device = device
+                device["apps"] = (device["apps"] as? [[String: Any]] ?? []).map { app in
+                    app.filter { !["foreground", "suspended", "stateConnected", "stateReachable", "stateConnection", "foregroundSource"].contains($0.key) }
+                }
+                return device
             }
+            guard let encoded = try? JSONSerialization.data(withJSONObject: topology, options: [.sortedKeys]), encoded != self.inventoryFingerprint else { return }
+            self.inventoryFingerprint = encoded
+            self.onInventoryChanged?(value)
         }
     }
 
@@ -231,12 +275,10 @@ final class TargetRegistry {
                     .filter { $0.deviceId == device.id }
                     .sorted { ($0.info["appName"] as? String ?? "") < ($1.info["appName"] as? String ?? "") }
                     .map { app -> [String: Any] in
-                        var info = app.info
+                        var info = appStates.first { $0["deviceId"] as? String == app.deviceId && $0["bundleId"] as? String == app.bundleId } ?? app.info
                         info["port"] = app.endpoint.port
                         info["connection"] = app.endpoint.connectionType
-                        if app.suspended {
-                            info["suspended"] = true
-                        }
+                        if info["suspended"] == nil { info["suspended"] = app.suspended }
                         return info
                     }
                 return ["id": device.id, "kind": device.kind.rawValue, "name": device.name, "os": device.os, "model": device.model, "apps": deviceApps]
@@ -286,7 +328,7 @@ final class TargetRegistry {
             guard let id = entry["id"] as? String, !id.isEmpty else { return }
             var current = history[id] ?? entry.filter { $0.key != "apps" }
             var apps = current["apps"] as? [String: Any] ?? [:]
-            for (bundleId, app) in entry["apps"] as? [String: Any] ?? [:] where apps[bundleId] == nil {
+            for (bundleId, app) in TargetHistory.sanitizedApps(entry["apps"] as? [String: Any] ?? [:]) where apps[bundleId] == nil {
                 apps[bundleId] = app
             }
             current["apps"] = apps
@@ -314,6 +356,7 @@ final class TargetRegistry {
     private func saveHistory() {
         UserDefaults.standard.set(history, forKey: Self.historyKey)
         updateCaptures()
+        queue.async { [weak self] in self?.publishInventory() }
     }
 
     // MARK: - Capture
@@ -353,22 +396,35 @@ final class TargetRegistry {
 
     // MARK: - Simulators
 
-    private func refreshSimulators() {
+    private func refreshSimulators(force: Bool = false) {
+        guard !stopped, !refreshingSimulators, force || Date() >= nextSimulatorRefresh else { return }
+        refreshingSimulators = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let list = Self.listSimulators()
-            self?.queue.async {
-                self?.simulators = list.booted
-                self?.offlineSimulators = list.offline
+            self?.queue.async { [weak self] in
+                guard let self, !self.stopped else { return }
+                if let list { self.simulators = list.booted; self.offlineSimulators = list.offline }
+                self.refreshingSimulators = false
+                self.nextSimulatorRefresh = Date().addingTimeInterval(5)
+                if self.refreshSimulatorsAgain {
+                    self.refreshSimulatorsAgain = false
+                    self.refreshSimulators(force: true)
+                    return
+                }
+                let waiters = self.simulatorWaiters
+                self.simulatorWaiters = []
+                waiters.forEach { $0() }
+                self.publishInventory()
             }
         }
     }
 
     /// 解析 `simctl list devices available -j`, 运行时标识形如 com.apple.CoreSimulator.SimRuntime.iOS-26-5
-    private static func listSimulators() -> (booted: [DeviceRecord], offline: [(record: DeviceRecord, state: String)]) {
-        guard let data = run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "-j"]),
+    private static func listSimulators() -> (booted: [DeviceRecord], offline: [(record: DeviceRecord, state: String)])? {
+        guard let data = BoundedProcess.run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "-j"], timeout: 5),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let runtimes = json["devices"] as? [String: [[String: Any]]] else {
-            return ([], [])
+            return nil
         }
         var booted: [DeviceRecord] = []
         var offline: [(record: DeviceRecord, state: String)] = []
@@ -460,11 +516,15 @@ final class TargetRegistry {
     // MARK: - Apps
 
     private func findApp(deviceId: String, bundleId: String) -> AppRecord? {
-        apps.first { $0.deviceId == deviceId && $0.bundleId == bundleId }
+        guard let app = apps.first(where: { $0.deviceId == deviceId && $0.bundleId == bundleId }) else { return nil }
+        guard let state = appStates.first(where: { $0["deviceId"] as? String == deviceId && $0["bundleId"] as? String == bundleId }) else { return app }
+        return AppRecord(deviceId: app.deviceId, bundleId: app.bundleId, endpoint: app.endpoint, info: state,
+                         suspended: state["suspended"] as? Bool ?? app.suspended, responding: app.responding)
     }
 
     /// 并发请求端口范围内每个端口的 /api/app; 扫描进行中时合并到同一次扫描
     private func scanApps(completion: (() -> Void)?) {
+        guard !stopped else { completion?(); return }
         if let completion {
             scanWaiters.append(completion)
         }
@@ -476,6 +536,7 @@ final class TargetRegistry {
         // 连接成功但没有响应的端口, 即挂起的 App; 明确拒绝表示 App 已退出
         var transientPorts: Set<String> = []
         let devices = usbDevices
+        let scanVersion = stateMonitor.observationVersion
         let complete = usbListed
         for device in devices {
             for port in Self.appPorts {
@@ -484,7 +545,7 @@ final class TargetRegistry {
                     defer { group.leave() }
                     lock.lock()
                     defer { lock.unlock() }
-                    guard let info, let bundleId = info["bundleId"] as? String else {
+                    guard let info, let bundleId = info["bundleId"] as? String, TargetHistory.validBundleId(bundleId) else {
                         if !refused {
                             transientPorts.insert("\(device.udid)|\(port)")
                         }
@@ -507,7 +568,7 @@ final class TargetRegistry {
                 }
                 guard (response as? HTTPURLResponse)?.statusCode == 200,
                       let data, let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let bundleId = info["bundleId"] as? String,
+                      let bundleId = info["bundleId"] as? String, TargetHistory.validBundleId(bundleId),
                       let udid = info["simulatorUDID"] as? String, !udid.isEmpty else {
                     return
                 }
@@ -517,8 +578,11 @@ final class TargetRegistry {
             }.resume()
         }
         group.notify(queue: queue) { [self] in
-            found = Self.uniqueInstances(found)
+            guard !stopped else { scanning = false; scanWaiters = []; return }
+            found = Self.uniqueInstances(found).map { app in var value = app; value.scanVersion = scanVersion; return value }
+            scanMisses = scanMisses.filter { transientPorts.contains($0.key) }
             apps = found + suspendedApps(found: found, devices: devices, transientPorts: transientPorts)
+            stateMonitor.update(apps)
             rememberSourceFiles()
             onAppsChanged?(apps)
             scanning = false
@@ -526,6 +590,7 @@ final class TargetRegistry {
             scanWaiters = []
             waiters.forEach { $0() }
             if complete { markReady() }
+            publishInventory()
         }
     }
 
@@ -564,7 +629,10 @@ final class TargetRegistry {
                 return nil
             }
             var app = app
-            app.suspended = true
+            let misses = (scanMisses[key] ?? 0) + 1
+            scanMisses[key] = misses
+            app.suspended = misses >= 3
+            app.responding = false
             return app
         }
     }
@@ -599,20 +667,7 @@ final class TargetRegistry {
     // MARK: - Helpers
 
     static func run(_ path: String, _ arguments: [String]) -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? data : nil
+        BoundedProcess.run(path, arguments, timeout: 10)
     }
 
     /// 与 run 相同, 但失败时返回错误输出, 用于向网页说明原因

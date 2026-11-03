@@ -15,18 +15,27 @@ final class AppEventStream {
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var closed = false
+    private let handshakeTimeout: TimeInterval?
+    private var handshakeTimer: DispatchWorkItem?
+    var onOpen: (() -> Void)?
     var onEvent: ((_ name: String, _ payload: Data) -> Void)?
     /// status 为 0 表示连接失败或中途断开
     var onClose: ((_ status: Int) -> Void)?
     private(set) var lastReceive = Date()
 
-    init(queue: DispatchQueue) {
+    init(queue: DispatchQueue, handshakeTimeout: TimeInterval? = nil) {
         self.queue = queue
+        self.handshakeTimeout = handshakeTimeout
     }
 
     func start(endpoint: TargetEndpoint, path: String) {
         let request = HTTPClient.request(method: "GET", path: path, host: "127.0.0.1:\(endpoint.port)")
         lastReceive = Date()
+        if let handshakeTimeout {
+            let timer = DispatchWorkItem { [weak self] in self?.finish(0) }
+            self.handshakeTimer = timer
+            queue.asyncAfter(deadline: .now() + handshakeTimeout, execute: timer)
+        }
         AppRequest.open(endpoint, queue: queue) { [weak self] connection in
             guard let self else {
                 connection?.cancel()
@@ -47,6 +56,7 @@ final class AppEventStream {
 
     func cancel() {
         closed = true
+        handshakeTimer?.cancel(); handshakeTimer = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
@@ -105,6 +115,9 @@ final class AppEventStream {
                 }
                 buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                 headerDone = true
+                self.handshakeTimer?.cancel(); self.handshakeTimer = nil
+                self.onOpen?()
+                if self.closed { return }
             }
             if headerDone {
                 while let range = buffer.range(of: Data("\n\n".utf8)) {
@@ -138,6 +151,19 @@ final class AppEventStream {
     }
 }
 
+/// 由请求所属队列操作。取消后, 尚在建立的 USB 连接也会在回调时立即关闭。
+final class AppRequestTask {
+    private(set) var cancelled = false
+    private var connection: NWConnection?
+    func attach(_ connection: NWConnection) -> Bool {
+        guard !cancelled else { connection.cancel(); return false }
+        self.connection = connection
+        return true
+    }
+    func cancel() { cancelled = true; connection?.cancel(); connection = nil }
+    func finish() { connection = nil }
+}
+
 /// 对 App 内接口的单次请求
 enum AppRequest {
     /// 本机返回未启动的连接, 真机返回 usbmuxd 已建立的连接
@@ -152,14 +178,18 @@ enum AppRequest {
         }
     }
 
-    static func send(_ endpoint: TargetEndpoint, method: String = "GET", path: String, body: Data? = nil, timeout: TimeInterval, queue: DispatchQueue, completion: @escaping (HTTPClient.Response?) -> Void) {
+    @discardableResult
+    static func send(_ endpoint: TargetEndpoint, method: String = "GET", path: String, body: Data? = nil, timeout: TimeInterval, queue: DispatchQueue, completion: @escaping (HTTPClient.Response?) -> Void) -> AppRequestTask {
+        let task = AppRequestTask()
         let request = HTTPClient.request(method: method, path: path, host: "127.0.0.1:\(endpoint.port)", body: body)
         open(endpoint, queue: queue) { connection in
-            guard let connection else {
-                completion(nil)
-                return
+            guard let connection else { if !task.cancelled { completion(nil) }; return }
+            guard task.attach(connection) else { return }
+            HTTPClient.exchange(request, on: connection, queue: queue, timeout: timeout) { response in
+                task.finish()
+                if !task.cancelled { completion(response) }
             }
-            HTTPClient.exchange(request, on: connection, queue: queue, timeout: timeout, completion: completion)
         }
+        return task
     }
 }

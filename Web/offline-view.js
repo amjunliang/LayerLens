@@ -1,7 +1,7 @@
 'use strict';
 
-// 选中未连接的 App 且还没有层级时, 画布中央说明状态, 并提供查看本机保存的日志和抓包的入口;
-// 设备在线时可直接启动. 连上后整页刷新或原地更新, 这里随状态隐藏
+// 2D / 3D / 实时共用离线提示。App 目标提供已保存的日志和网络记录；设备目标说明重连状态。
+// 设备在线时的实时画面独立于 App 是否已接入，不被 App 离线提示遮挡。
 let offlineViewShown = false;
 let offlineViewKey = '';
 // 未启动的模拟器: 点「启动 App」先开机, 开机后打开 App; 开机期间切到同一设备的其他 App 再点, 以最后一次为准
@@ -26,17 +26,22 @@ function settleBootLaunch() {
 }
 
 function syncOfflineView() {
-  const show = appState.value === 'offline' && appState.blank && !!targets.bundleId;
+  const gone = !!targets.deviceId && currentDeviceGone();
+  const hasApp = !!targets.bundleId;
+  const show = gone || (state.mode !== 'live' && appState.value === 'offline' && appState.blank && hasApp);
   if (!show) {
-    if (!offlineViewShown) return;
+    if (!offlineViewShown) return false;
     offlineViewShown = false;
     $('emptyState').hidden = true;
     $('emptyIntegration').hidden = false;
-    document.body.classList.remove('has-empty');
-    return;
+    $('emptyState').classList.remove('offline-state');
+    document.body.classList.remove('has-empty', 'has-offline-state');
+    if (!hasApp && targets.deviceId && currentDevice()) {
+      showEmptyState(t('请选择 App 查看视图层级'), t('也可以切换到实时查看设备画面'));
+    }
+    return false;
   }
-  const name = targetHistory[targets.deviceId]?.apps?.[targets.bundleId]?.appName || targets.bundleId;
-  const gone = currentDeviceGone();
+  const name = hasApp ? targetAppName(targets.deviceId, targets.bundleId) : '';
   const simulator = gone ? (targets.simulators || []).find((sim) => sim.id === targets.deviceId) : null;
   const deviceName = currentDevice()?.name || simulator?.name || targetHistory[targets.deviceId]?.name || t('设备');
   const booting = !!simulator && simPending.has(simulator.id);
@@ -44,12 +49,20 @@ function syncOfflineView() {
   const queued = booting && bootLaunch?.deviceId === targets.deviceId && bootLaunch.bundleId === targets.bundleId;
   const launching = pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId;
   // 菜单每次刷新都会调用, 内容不变时不重建, 避免按钮在鼠标下闪动
-  const key = [name, deviceName, gone, !!simulator, booting, queued, launching, !!currentDevice()].join('|');
-  if (offlineViewShown && key === offlineViewKey) return;
+  const key = [targets.deviceId, targets.bundleId, name, deviceName, gone, !!simulator, booting, queued, launching, !!currentDevice()].join('|');
+  if (offlineViewShown && key === offlineViewKey) return true;
   const body = simulator ? t('模拟器 {0} 未启动, 启动后自动连接', deviceName)
     : gone ? t('设备 {0} 已断开, 重新连接后自动恢复', deviceName)
     : t('{0} 上没有运行, 启动后自动连接', deviceName);
-  showEmptyState(t('{0} 未连接', name), body + '. ' + t('可以先查看本机保存的日志和抓包'));
+  const title = hasApp ? t('{0} 未连接', name) : simulator
+    ? (booting ? `${deviceName} · ${t('启动中…')}` : t('{0} 未启动', deviceName))
+    : t('{0} 已断开', deviceName);
+  const detail = hasApp ? body + (LANG === 'en' ? '. ' : '。') + t('可以先查看本机保存的日志和抓包') : body;
+  showEmptyState(title, detail);
+  $('emptyState').classList.add('offline-state');
+  document.body.classList.add('has-offline-state');
+  $('liveGuide').hidden = true;
+  $('liveLoading').hidden = true;
   offlineViewShown = true;
   offlineViewKey = key;
   $('emptyIntegration').hidden = true;
@@ -61,19 +74,20 @@ function syncOfflineView() {
     });
     return button;
   };
-  actions.append(paneButton(t('查看日志'), 'log'), paneButton(t('查看网络'), 'net'));
+  if (hasApp) actions.append(paneButton(t('查看日志'), 'log'), paneButton(t('查看网络'), 'net'));
   if (simulator) {
-    const boot = el('button', 'offline-action primary', queued ? t('启动中…') : t('启动 App'));
-    boot.disabled = queued;
-    boot.title = booting ? t('模拟器正在启动, 完成后打开这个 App') : t('先启动模拟器, 再打开这个 App');
-    boot.addEventListener('click', () => bootAndLaunch(simulator, targets.bundleId, name));
+    const boot = el('button', 'offline-action primary', (hasApp ? queued : booting) ? t('启动中…') : hasApp ? t('启动 App') : t('启动'));
+    boot.disabled = hasApp ? queued : booting;
+    if (hasApp) boot.title = booting ? t('模拟器正在启动, 完成后打开这个 App') : t('先启动模拟器, 再打开这个 App');
+    boot.addEventListener('click', () => hasApp ? bootAndLaunch(simulator, targets.bundleId, name) : simulatorAction(simulator.id, 'boot', false));
     actions.append(boot);
-  } else if (!gone && currentDevice()) {
+  } else if (hasApp && !gone && currentDevice()) {
     const launch = el('button', 'offline-action primary', launching ? t('启动中…') : t('启动 App'));
     launch.disabled = launching;
     launch.addEventListener('click', () => launchAwayApp(targets.deviceId, targets.bundleId, name));
     actions.append(launch);
   }
   $('emptyGuide').replaceChildren(actions);
-  $('emptyGuide').hidden = false;
+  $('emptyGuide').hidden = !actions.childElementCount;
+  return true;
 }

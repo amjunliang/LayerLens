@@ -69,11 +69,9 @@ final class ProxyTunnel {
         client.stateUpdateHandler = closeOnEnd
         upstream.stateUpdateHandler = closeOnEnd
         upstream.send(content: initialData, completion: .contentProcessed { [self] error in
-            if error != nil {
-                close()
-            }
+            if error != nil { close() }
+            else { pump(from: client, to: upstream) }
         })
-        pump(from: client, to: upstream)
         pump(from: upstream, to: client)
     }
 
@@ -82,20 +80,18 @@ final class ProxyTunnel {
             if closed {
                 return
             }
+            if error != nil { close(); return }
+            let sendNext = { [self] in
+                if isComplete {
+                    destination.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { [self] _ in close() })
+                } else { pump(from: source, to: destination) }
+            }
             if let data, !data.isEmpty {
                 destination.send(content: data, completion: .contentProcessed { [self] error in
-                    if error != nil {
-                        close()
-                    }
+                    guard !closed else { return }
+                    if error != nil { close() } else { sendNext() }
                 })
-            }
-            if isComplete || error != nil {
-                destination.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { [self] _ in
-                    close()
-                })
-                return
-            }
-            pump(from: source, to: destination)
+            } else { sendNext() }
         }
     }
 

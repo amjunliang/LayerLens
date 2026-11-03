@@ -8,7 +8,7 @@
 
 import AppKit
 
-/// 通过 AppleScript 让 Xcode 按当前 Scheme 和运行目标运行, 与点击 Xcode 的运行按钮一致.
+/// 按选中 App 的 Bundle ID 验证 Scheme, 再通过 AppleScript 在指定设备上运行.
 /// 由 LayerLens 进程执行, 系统的"自动化"权限归属 LayerLens.
 /// 多个 Xcode(如 Xcode.app 与 Xcode 26.6.app)的 Bundle ID 相同, 按应用路径分别发送脚本, 在打开了对应工作区的那个 Xcode 中运行
 final class XcodeController {
@@ -20,6 +20,9 @@ final class XcodeController {
             /// 尚未询问过用户, 点击运行时会弹出系统授权窗口
             case permissionRequired = "permission_required"
             case scriptFailed = "script_failed"
+            case busy = "xcode_busy"
+            case schemeUnavailable = "xcode_scheme_unverified"
+            case destinationUnavailable = "xcode_destination_unavailable"
         }
 
         let code: Code
@@ -40,20 +43,52 @@ final class XcodeController {
     }
 
     private static let xcodeBundleId = "com.apple.dt.Xcode"
+    private let operationLock = NSLock()
 
-    /// - Parameters:
-    ///   - sourceFile: App 编译时的源文件路径, 用于找到对应的工作区
-    ///   - deviceId: 页面上正在查看的设备 UDID, 运行前把 Xcode 的运行目标切到它; 为空时不切换
-    /// - Returns: 是否切换到了该设备; 找不到对应的运行目标(如 Scheme 不支持该设备)时沿用 Xcode 当前的运行目标
-    func run(sourceFile: String, deviceId: String) -> Result<Bool, Failure> {
-        // 由用户点击触发, 需要时弹出系统授权窗口并等待选择
-        checkPermission(ask: true).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
-            // 运行目标的 device identifier 即模拟器 / 真机的 UDID; Apple 芯片上同一模拟器还有 Rosetta(x86_64) 目标, 优先选原生架构.
-            // Xcode 26 读取 active run destination 会返回 missing value, 但设置有效, 所以不回读确认
-            let script = """
+    struct RunSession {
+        let id: String
+        let xcode: String
+        let path: String
+        let action: String
+        let created: Date
+    }
+    private var sessions: [String: RunSession] = [:]
+
+    /// 精确匹配 Run Action 的 App Bundle ID, 不沿用无关 Scheme / 设备。
+    func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool) -> Result<String, Failure> {
+        guard operationLock.try() else { return .failure(Failure(code: .busy)) }
+        defer { operationLock.unlock() }
+        guard !bundleId.isEmpty, !deviceId.isEmpty else { return .failure(Failure(code: .schemeUnavailable)) }
+        return checkPermission(ask: true).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
+            let metadata = """
             set doc to first workspace document whose path is \(quoted(path))
-            set picked to missing value
-            if \(quoted(deviceId)) is not "" then
+            return (name of active scheme of doc) & linefeed & ((name of schemes of doc) as text)
+            """
+            return execute(metadata, xcode: xcode).flatMap { output in
+                let names = output.components(separatedBy: "\n")
+                let schemes = Array(names.dropFirst()).filter { !$0.isEmpty }
+                let sdk = simulator ? "iphonesimulator" : "iphoneos"
+                let deadline = Date().addingTimeInterval(18)
+                let builder = xcode + "/Contents/Developer/usr/bin/xcodebuild"
+                func settings(_ arguments: [String]) -> [[String: Any]]? {
+                    let remaining = deadline.timeIntervalSinceNow
+                    guard remaining > 0, let result = BoundedProcess.capture(builder,
+                        arguments + ["-showBuildSettings", "-json", "-sdk", sdk, "-disableAutomaticPackageResolution", "-skipPackageUpdates"], timeout: remaining),
+                        !result.timedOut, result.status == 0 else { return nil }
+                    return XcodeRunPlan.decodeSettings(result.data)
+                }
+                let candidates = XcodeRunPlan.candidates(workspace: path, schemes: schemes)
+                guard let plan = XcodeRunPlan.choose(candidates, active: names.first ?? "", bundleId: bundleId, settings: { project, config in
+                    settings(["-project", project, "-alltargets", "-configuration", config])
+                }) else { return .failure(Failure(code: .schemeUnavailable)) }
+                let containerFlag = path.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
+                guard let actual = settings([containerFlag, path, "-scheme", plan.scheme, "-configuration", plan.configuration]),
+                      XcodeRunPlan.matchesBundle(actual, candidate: plan, bundleId: bundleId) else { return .failure(Failure(code: .schemeUnavailable)) }
+                // Scheme 和目标在同一个脚本中设置, 找不到设备时终止, 绝不运行到别的设备。
+                let script = """
+                set doc to first workspace document whose path is \(quoted(path))
+                set active scheme of doc to first scheme of doc whose name is \(quoted(plan.scheme))
+                set picked to missing value
                 repeat with destination in (run destinations of doc)
                     try
                         if (device identifier of (device of destination)) is \(quoted(deviceId)) then
@@ -62,22 +97,34 @@ final class XcodeController {
                         end if
                     end try
                 end repeat
-            end if
-            if picked is not missing value then set active run destination of doc to picked
-            run doc
-            if picked is missing value then return "unchanged"
-            return "switched"
-            """
-            return execute(script, xcode: xcode).map { $0 == "switched" }
+                if picked is missing value then error "layerlens_destination_unavailable"
+                set active run destination of doc to picked
+                set actionResult to run doc
+                return id of actionResult
+                """
+                return execute(script, xcode: xcode, timeout: 5).map { action in
+                    let id = UUID().uuidString
+                    sessions = sessions.filter { Date().timeIntervalSince($0.value.created) < 900 }
+                    if sessions.count >= 16, let oldest = sessions.values.min(by: { $0.created < $1.created }) { sessions.removeValue(forKey: oldest.id) }
+                    sessions[id] = RunSession(id: id, xcode: xcode, path: path, action: action, created: Date())
+                    return id
+                }
+            }
         }
     }
 
-    func status(sourceFile: String) -> Result<RunStatus, Failure> {
-        checkPermission(ask: false).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
+    func status(runId: String) -> Result<RunStatus, Failure> {
+        guard operationLock.try() else { return .failure(Failure(code: .busy)) }
+        defer { operationLock.unlock() }
+        guard let session = sessions[runId], Date().timeIntervalSince(session.created) < 900 else {
+            return .success(RunStatus(status: "cancelled", detail: ""))
+        }
+        return checkPermission(ask: false).flatMap { _ in
             let script = """
-            set doc to first workspace document whose path is \(quoted(path))
+            set doc to first workspace document whose path is \(quoted(session.path))
             set actionResult to last scheme action result of doc
             if actionResult is missing value then return "none"
+            if (id of actionResult) is not \(quoted(session.action)) then return "cancelled"
             set statusText to (status of actionResult) as text
             set detail to ""
             if statusText is "error occurred" then
@@ -88,7 +135,7 @@ final class XcodeController {
             if detail is missing value then set detail to ""
             return statusText & linefeed & detail
             """
-            return execute(script, xcode: xcode).map { output in
+            return execute(script, xcode: session.xcode).map { output in
                 let lines = output.components(separatedBy: "\n")
                 return RunStatus(status: lines.first ?? "", detail: lines.dropFirst().joined(separator: " "))
             }
@@ -175,7 +222,7 @@ final class XcodeController {
 
     /// body 需以 return 返回文本, 列表转文本时以换行连接. 用 osascript 子进程执行, 不阻塞主线程(首次运行等待权限弹窗时也不卡窗口);
     /// 子进程的"自动化"权限仍归属 LayerLens. xcode 为应用路径, 指定发送给哪个 Xcode
-    private func execute(_ body: String, xcode: String) -> Result<String, Failure> {
+    private func execute(_ body: String, xcode: String, timeout: TimeInterval = 3) -> Result<String, Failure> {
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: Self.xcodeBundleId).isEmpty else {
             return .failure(.xcodeNotRunning)
         }
@@ -185,22 +232,15 @@ final class XcodeController {
         \(body)
         end tell
         """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        do {
-            try process.run()
-        } catch {
+        guard let result = BoundedProcess.capture("/usr/bin/osascript", ["-e", source], timeout: timeout) else {
             return .failure(.scriptFailed)
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        let message = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        if result.timedOut {
+            return .failure(Failure(code: .scriptFailed, message: "Xcode did not respond within \(Int(timeout)) seconds"))
+        }
+        let message = String(decoding: result.data, as: UTF8.self)
+        guard result.status == 0 else {
+            if message.contains("layerlens_destination_unavailable") { return .failure(Failure(code: .destinationUnavailable)) }
             // -1743: 未获得自动化权限; -1719 / -1728: 找不到对应的工作区
             if message.contains("-1743") {
                 return .failure(.permissionDenied)
@@ -210,11 +250,138 @@ final class XcodeController {
             }
             return .failure(Failure(code: .scriptFailed, message: message.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
-        let text = String(data: data, encoding: .utf8) ?? ""
+        let text = message
         return .success(text.hasSuffix("\n") ? String(text.dropLast()) : text)
     }
 
     private func quoted(_ text: String) -> String {
         "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
+}
+
+/// Scheme 的 Run Action 决定真正启动哪个 App; Build Action 中的依赖不能作为启动目标。
+enum XcodeRunPlan {
+    struct Candidate: Equatable {
+        let scheme: String
+        let project: String
+        let target: String
+        let configuration: String
+    }
+
+    static func choose(_ candidates: [Candidate], active: String, bundleId: String,
+                       settings: (String, String) -> [[String: Any]]?) -> Candidate? {
+        var cache: [String: [[String: Any]]] = [:]
+        var matches: [Candidate] = []
+        for candidate in candidates.sorted(by: { ($0.scheme == active ? 0 : 1) < ($1.scheme == active ? 0 : 1) }) {
+            let key = candidate.project + "\n" + candidate.configuration
+            if cache[key] == nil {
+                guard let values = settings(candidate.project, candidate.configuration) else { return nil }
+                cache[key] = values
+            }
+            if matchesBundle(cache[key]!, candidate: candidate, bundleId: bundleId) {
+                if candidate.scheme == active { return candidate }
+                matches.append(candidate)
+            }
+        }
+        if let current = matches.first(where: { $0.scheme == active }) { return current }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func matchesBundle(_ values: [[String: Any]], candidate: Candidate, bundleId: String) -> Bool {
+        values.contains { value in
+            guard value["target"] as? String == candidate.target,
+                  let settings = value["buildSettings"] as? [String: Any],
+                  settings["PRODUCT_BUNDLE_IDENTIFIER"] as? String == bundleId,
+                  settings["WRAPPER_EXTENSION"] as? String == "app",
+                  let path = settings["PROJECT_FILE_PATH"] as? String else { return false }
+            return normalized(path) == normalized(candidate.project)
+        }
+    }
+
+    static func decodeSettings(_ data: Data) -> [[String: Any]]? {
+        let text = String(decoding: data, as: UTF8.self)
+        guard let start = text.range(of: #"\[\s*\{"#, options: .regularExpression),
+              let end = text.range(of: "]", options: .backwards), end.upperBound > start.lowerBound else { return nil }
+        return try? JSONSerialization.jsonObject(with: Data(text[start.lowerBound..<end.upperBound].utf8)) as? [[String: Any]]
+    }
+
+    static func candidates(workspace: String, schemes: [String]) -> [Candidate] {
+        let manager = FileManager.default
+        var containers = [normalized(workspace)]
+        var index = 0
+        // 只读取工作区引用的项目, 不递归扫描 Pods 或整个源码目录。
+        while index < containers.count && containers.count < 100 {
+            let container = containers[index]
+            index += 1
+            guard container.hasSuffix(".xcworkspace"),
+                  let xml = try? XMLDocument(contentsOf: URL(fileURLWithPath: container).appendingPathComponent("contents.xcworkspacedata"), options: []) else { continue }
+            for node in (try? xml.nodes(forXPath: "//FileRef")) ?? [] {
+                guard let element = node as? XMLElement, let location = element.attribute(forName: "location")?.stringValue else { continue }
+                var base = (container as NSString).deletingLastPathComponent
+                var groups: [XMLElement] = []
+                var parent = element.parent
+                while let value = parent {
+                    if let group = value as? XMLElement, group.name == "Group" { groups.insert(group, at: 0) }
+                    parent = value.parent
+                }
+                for group in groups {
+                    if let value = group.attribute(forName: "location")?.stringValue { base = resolve(value, base: base, workspace: container) }
+                }
+                let path = resolve(location, base: base, workspace: container)
+                if (path.hasSuffix(".xcodeproj") || path.hasSuffix(".xcworkspace")) && !containers.contains(path) { containers.append(path) }
+            }
+        }
+        var definitions: [String: [Candidate]] = [:]
+        var explicit = Set<String>()
+        for container in containers {
+            let directories = [container + "/xcshareddata/xcschemes", container + "/xcuserdata/" + NSUserName() + ".xcuserdatad/xcschemes"]
+            for directory in directories {
+                for file in ((try? manager.contentsOfDirectory(atPath: directory)) ?? []).filter({ $0.hasSuffix(".xcscheme") }).sorted() {
+                    let name = (file as NSString).deletingPathExtension
+                    guard schemes.contains(name) else { continue }
+                    explicit.insert(name)
+                    guard let xml = try? XMLDocument(contentsOf: URL(fileURLWithPath: directory + "/" + file), options: []),
+                          let action = (try? xml.nodes(forXPath: "/Scheme/LaunchAction"))?.first as? XMLElement,
+                          let config = action.attribute(forName: "buildConfiguration")?.stringValue,
+                          let reference = (try? action.nodes(forXPath: "BuildableProductRunnable/BuildableReference"))?.first as? XMLElement,
+                          let target = reference.attribute(forName: "BlueprintName")?.stringValue,
+                          let location = reference.attribute(forName: "ReferencedContainer")?.stringValue else { continue }
+                    let project = resolve(location, base: (container as NSString).deletingLastPathComponent, workspace: workspace)
+                    let value = Candidate(scheme: name, project: project, target: target, configuration: config)
+                    if !(definitions[name] ?? []).contains(value) { definitions[name, default: []].append(value) }
+                }
+            }
+        }
+        // 未保存的自动 Scheme 与同名 Native App target 对应。编辑过的 Scheme 会有文件,
+        // 不得用自动生成的定义覆盖自定义 executable / Run configuration。
+        for project in containers where project.hasSuffix(".xcodeproj") {
+            guard let data = manager.contents(atPath: project + "/project.pbxproj"),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+                  let objects = plist["objects"] as? [String: [String: Any]] else { continue }
+            for target in objects.values where target["isa"] as? String == "PBXNativeTarget" && target["productType"] as? String == "com.apple.product-type.application" {
+                guard let name = target["name"] as? String, schemes.contains(name), !explicit.contains(name),
+                      let listId = target["buildConfigurationList"] as? String,
+                      let list = objects[listId], let ids = list["buildConfigurations"] as? [String],
+                      ids.contains(where: { objects[$0]?["name"] as? String == "Debug" }) else { continue }
+                definitions[name, default: []].append(Candidate(scheme: name, project: project, target: name, configuration: "Debug"))
+            }
+        }
+        // 同名定义冲突时不能猜 Xcode 会用哪一个。
+        return schemes.compactMap { name in
+            guard let values = definitions[name], values.count == 1 else { return nil }
+            return values[0]
+        }
+    }
+
+    private static func resolve(_ location: String, base: String, workspace: String) -> String {
+        let parts = location.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2 else { return normalized(base + "/" + location) }
+        switch parts[0] {
+        case "absolute": return normalized(parts[1])
+        case "self": return normalized((workspace as NSString).deletingLastPathComponent + "/" + parts[1])
+        case "container": return normalized(base + "/" + parts[1])
+        default: return normalized(base + "/" + parts[1])
+        }
+    }
+    private static func normalized(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path }
 }

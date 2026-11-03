@@ -40,23 +40,27 @@ enum HTTPClient {
     static func exchange(_ request: Data, on connection: NWConnection, queue: DispatchQueue, timeout: TimeInterval, completion: @escaping (Response?) -> Void) {
         var finished = false
         var received = Data()
+        var callback: ((Response?) -> Void)? = completion
         let finish = { (response: Response?) in
             guard !finished else { return }
             finished = true
             connection.stateUpdateHandler = nil
             connection.cancel()
-            completion(response)
+            received = Data()
+            let done = callback
+            callback = nil
+            done?(response)
         }
         func receive() {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { data, _, isComplete, error in
+                guard !finished else { return }
                 if let data {
                     received.append(data)
                 }
-                if isComplete || error != nil {
-                    finish(parse(received))
-                } else {
-                    receive()
-                }
+                if received.count > 64 * 1024 * 1024 + 65536 { finish(nil); return }
+                if let response = parse(received, eof: isComplete && error == nil) { finish(response) }
+                else if isComplete || error != nil { finish(nil) }
+                else { receive() }
             }
         }
         let send = {
@@ -90,15 +94,30 @@ enum HTTPClient {
         }
     }
 
-    private static func parse(_ data: Data) -> Response? {
-        guard let separator = data.range(of: Data("\r\n\r\n".utf8)),
-              let statusLine = String(data: data[..<separator.lowerBound], encoding: .utf8)?.components(separatedBy: "\r\n").first else {
-            return nil
+    /// Only complete HTTP messages are accepted. EOF / reset cannot turn a partial body into success.
+    static func parse(_ data: Data, eof: Bool = false) -> Response? {
+        guard let separator = data.range(of: Data("\r\n\r\n".utf8)), separator.lowerBound <= 65536,
+              let header = String(data: data[..<separator.lowerBound], encoding: .utf8) else { return nil }
+        let lines = header.components(separatedBy: "\r\n")
+        let parts = (lines.first ?? "").split(separator: " ")
+        guard parts.count >= 2, parts[0].hasPrefix("HTTP/1."), let status = Int(parts[1]), (200...599).contains(status) else { return nil }
+        var lengths: [Int] = []
+        for line in lines.dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { return nil }
+            let name = line[..<colon].lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            if name == "transfer-encoding" && value.lowercased() != "identity" { return nil }
+            if name == "content-length" {
+                guard !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }), let length = Int(value), length <= 64 * 1024 * 1024 else { return nil }
+                lengths.append(length)
+            }
         }
-        let parts = statusLine.split(separator: " ")
-        guard parts.count >= 2, let status = Int(parts[1]) else {
-            return nil
-        }
-        return Response(status: status, body: Data(data[separator.upperBound...]))
+        let body = Data(data[separator.upperBound...])
+        if let length = lengths.first {
+            guard lengths.allSatisfy({ $0 == length }), body.count == length else { return nil }
+        } else if status == 204 || status == 304 {
+            guard body.isEmpty else { return nil }
+        } else if !eof { return nil }
+        return Response(status: status, body: body)
     }
 }

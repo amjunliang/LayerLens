@@ -59,6 +59,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateNow
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        registry.stop()
+        server.stopDeviceLive()
+    }
+
     /// 关闭窗口后继续在菜单栏运行, 浏览器仍可访问
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
