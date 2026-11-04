@@ -25,6 +25,7 @@ bash Mac/Tests/run.sh
 | Home 原生消息、旧版双击回退、关闭隔离及服务异常 | `SimHomeButtonTests.swift`、`LiveHomeTests.cjs`、`LiveResumeTests.cjs` |
 | H.264 编码、丢帧与网页解码 | `LiveVideoTests.swift`、`LiveVideoDecoderTests.cjs` |
 | 实时点选定位的像素与 point 换算、缩放旋转及切换目标隔离 | `LiveInspectTests.cjs` |
+| 2D/3D 取消选中、Esc 优先级、子树与窗口隔离 | `CanvasSelectionTests.cjs` |
 | 目标选择、前后台状态、共享订阅与扫描竞争 | `TargetStateHubTests.swift`、`TargetSelectionTests.cjs`、`AutoFollowTests.cjs`、`TargetTaskTests.cjs` |
 | Git 特殊文件名操作 | `GitPathTests.swift` |
 | 发送队列限流、PTY 输入与代理完整性 | `StreamAndPTYTests.swift`、`ProxyTunnelTests.swift` |

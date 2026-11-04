@@ -19,6 +19,7 @@ const LANG = (() => {
 })();
 
 const EN = {
+  '取消选中（优先关闭菜单或弹窗）': 'Clear selection (close menus or dialogs first)',
   // 抓包开关与保存的启动
   '正在抓包, 记录保存在本机. 点击关闭': 'Capturing, records are saved on this Mac. Click to stop',
   '开启抓包: 请求记录保存在本机, App 息屏或退出后仍可查看': 'Start capture: requests are saved on this Mac and stay viewable after the app sleeps or quits',

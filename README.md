@@ -37,9 +37,13 @@ The Mac app's window is the web UI. You can also open `http://127.0.0.1:9523` in
 2. Enter `https://github.com/amjunliang/LayerLens.git`.
 3. For now, select **Branch: master** (the existing `0.7.0` tag does not contain the package manifest).
 4. Add the **LayerLens** product to the App target you want to inspect. No dynamic framework embedding is needed.
-5. In the App target's **Build Settings > Excluded Source File Names**, add `LayerLens.o` for **Release** only, preserving existing values. Leave Debug unchanged, and apply the exclusion to any other shipping configurations as well.
+5. In the App target's **Build Settings > Excluded Source File Names**, use either of these equivalent options for **Release** only:
+   - Add two entries: `LayerLens.o` and `LayerLensCore.o`.
+   - Add one wildcard entry: `LayerLens*.o`, which matches both modules.
 
-Run the app in Debug; startup is automatic, with no initialization call or extra `-ObjC` flag. UIKit and SwiftUI use the same integration. Wrap both imports and logging API calls in Debug conditions:
+   Preserve existing values. Leave Debug unchanged, and apply the exclusion to any other shipping configurations as well.
+
+Run the app in Debug; startup is automatic, with no initialization call or extra `-ObjC` flag. Wrap both imports and logging API calls in Debug conditions:
 
 ```swift
 #if DEBUG
@@ -54,7 +58,7 @@ LayerLens.log("Debug message")
 
 For Objective-C, wrap `@import LayerLens;` and API calls in `#if DEBUG` as well.
 
-Choose either SPM or CocoaPods; do not integrate both into the same app. Xcode links this product into the app as `LayerLens.o` by default. The Release exclusion above keeps the SDK implementation out of the final executable without manually removing the dependency before each release. SPM may still resolve, download and compile the SDK. Guarding calls or disabling server startup alone does not replace the exclusion.
+Choose either SPM or CocoaPods; do not integrate both into the same app. Xcode links this product into the app as `LayerLens.o` and `LayerLensCore.o` by default. The Release exclusion above keeps the SDK implementation out of the final executable without manually removing the dependency before each release. SPM may still resolve, download and compile the SDK. Guarding calls or disabling server startup alone does not replace the exclusion.
 
 ### CocoaPods
 
@@ -73,6 +77,12 @@ Run `pod install`, then run the app in the Debug configuration. No code is neede
 - Ports start at 9527 and go up to 9536 when taken, so several apps can run at once.
 - The server listens on the loopback address only, and does not start in non-`DEBUG` builds.
 - No third-party dependencies. Hierarchy collection is based on bundled LookinServer code renamed with a `LayerLens_` prefix, so it does not conflict with a LookinServer already in your project, and the Lookin Mac client keeps working.
+
+### Multiplatform projects
+
+The SPM entry point can be added to a multiplatform target. iOS uses `LayerLensCore` for inspection. Native macOS and other unsupported Apple platforms expose only no-op logging APIs (`logDirectory` returns an empty string), without compiling UIKit code or starting the server. This does not add native Mac app inspection.
+
+Dedicated SwiftUI logical-tree inspection is currently unsupported. Only the UIKit / CALayer hierarchy created by the app is available.
 
 ## 2. Run the Mac app
 

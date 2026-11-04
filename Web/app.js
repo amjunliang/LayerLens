@@ -680,6 +680,7 @@ function updateAppMeta() {
 }
 
 function prepare(roots) {
+  state.selectionWindow = null;
   const isFirst = state.roots.length === 0;
   state.roots = roots;
   state.nodes = new Map();
@@ -704,7 +705,7 @@ function keyWindow() {
 
 function currentWindow() {
   const node = state.nodes.get(state.selected);
-  return node ? node.win : keyWindow();
+  return node ? node.win : (state.roots.includes(state.selectionWindow) ? state.selectionWindow : keyWindow());
 }
 
 function isShown(node) {
@@ -963,6 +964,38 @@ function crumbItem(node, current) {
   const ivar = codeIvars(node)[0];
   if (ivar) item.appendChild(el('span', 'crumb-ivar', ivar.ivar));
   return item;
+}
+
+function clearSelection() {
+  if (state.mode === 'live' || !state.selected) return;
+  // Keep the displayed UIWindow when deselecting a node in a secondary window.
+  state.selectionWindow = currentWindow();
+  state.selected = null;
+  state.hover = null;
+  state.vcFocus = false;
+  state.classTarget = null;
+  state.detail = null;
+  if (state.tabBeforeVC) {
+    setTabButtons(state.tabBeforeVC);
+    state.tabBeforeVC = null;
+  }
+  clearTimeout(select.detailTimer);
+  hideHoverTip();
+  renderTree();
+  if (state.mode === '3d' && state.subtreeOnly) {
+    recenterStage();
+    renderCanvas();
+  } else {
+    updateHighlights();
+    if (state.mode === '3d') updatePivot();
+  }
+  loadDetail();
+}
+
+function canEscapeClearSelection(event) {
+  if (event.defaultPrevented || state.mode === 'live' || picker.on || document.body.classList.contains('log-max')) return false;
+  if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable], .log-pane')) return false;
+  return !document.querySelector('#contextMenu, .popover:not([hidden]):not(.closing), #modal:not([hidden]):not(.closing)');
 }
 
 function select(key, fromTree) {
@@ -1592,6 +1625,7 @@ function setupCanvasEvents() {
     if (!target || !wrap.contains(target)) return;
     const node = nodeAtPoint(e);
     if (node) select(node.key);
+    else clearSelection();
     if (e.pointerType === 'mouse') return;
     // 触屏双击适应窗口
     const now = Date.now();
@@ -5006,6 +5040,7 @@ const SHORTCUT_GROUPS = [
     [['捏合'], '缩放, 也可 ⌘ + 滚轮'],
     [['F'], '放大选中元素'],
     [['0'], '适应窗口'],
+    [['Esc'], '取消选中（优先关闭菜单或弹窗）'],
     [['1', '2', '3'], '实时 / 2D / 3D'],
     [['C'], '取色, 点击复制色值'],
   ]],
@@ -8167,6 +8202,7 @@ function setup() {
     // 终端中的按键全部交给 shell, 如 vim 的 Esc
     if (e.target instanceof Element && e.target.closest('.xterm')) return;
     if (e.key === 'Escape') {
+      if (canEscapeClearSelection(e)) clearSelection();
       if (document.body.classList.contains('log-max') && $('modal').hidden) setLogMax(false);
       setColorPicker(false);
       hideMenu();

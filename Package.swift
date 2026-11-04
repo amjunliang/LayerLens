@@ -5,12 +5,22 @@ let package = Package(
     name: "LayerLens",
     platforms: [.iOS(.v15)],
     products: [
-        // Xcode links this product as LayerLens.o; Release consumers can exclude it.
+        // Exclude LayerLens.o and LayerLensCore.o in shipping Xcode configurations.
         .library(name: "LayerLens", targets: ["LayerLens"])
     ],
     targets: [
         .target(
             name: "LayerLens",
+            dependencies: [
+                .target(name: "LayerLensCore", condition: .when(platforms: [.iOS, .macCatalyst]))
+            ],
+            path: "SPM",
+            exclude: ["CoreInclude"],
+            sources: ["Entry"],
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "LayerLensCore",
             path: ".",
             exclude: [
                 "Mac", "Example", "Web", "docs",
@@ -18,7 +28,7 @@ let package = Package(
                 "LICENSE", "LayerLens.podspec", "Pod/Classes/Vendor/Lookin/LICENSE"
             ],
             sources: ["Pod/Classes"],
-            publicHeadersPath: "SPM/include",
+            publicHeadersPath: "SPM/CoreInclude",
             cSettings: [
                 .define("DEBUG", to: "1", .when(configuration: .debug)),
                 .headerSearchPath("Pod/Classes"),

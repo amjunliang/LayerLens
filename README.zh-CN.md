@@ -37,9 +37,13 @@ Mac App 的窗口就是这个网页, 也可以在浏览器中打开 `http://127.
 2. 输入 `https://github.com/amjunliang/LayerLens.git`。
 3. 当前先选择 **Branch: master**（已有的 `0.7.0` 标签尚不包含 SPM 配置）。
 4. 将 **LayerLens** 产品添加到需要调试的 App target，无需嵌入动态框架。
-5. 在 App target 的 **Build Settings > Excluded Source File Names** 中，仅为 **Release** 添加 `LayerLens.o`，保留已有值；Debug 不添加。使用其他发布配置时也需要对它们设置。
+5. 在 App target 的 **Build Settings > Excluded Source File Names** 中，仅为 **Release** 设置以下任一种方式，效果相同：
+   - 分别添加两项：`LayerLens.o` 和 `LayerLensCore.o`。
+   - 添加一项通配符：`LayerLens*.o`，同时匹配这两个模块。
 
-以 Debug 配置运行 App 即可自动启动，无需调用初始化方法，也无需额外添加 `-ObjC`。UIKit 和 SwiftUI 使用相同的接入方式。需要使用日志 API 时，导入和调用都放在 Debug 条件中：
+   保留已有值；Debug 不添加。使用其他发布配置时也需要对它们设置。
+
+以 Debug 配置运行 App 即可自动启动，无需调用初始化方法，也无需额外添加 `-ObjC`。需要使用日志 API 时，导入和调用都放在 Debug 条件中：
 
 ```swift
 #if DEBUG
@@ -54,7 +58,7 @@ LayerLens.log("调试信息")
 
 Objective-C 同样用 `#if DEBUG` 包住 `@import LayerLens;` 和 API 调用。
 
-SPM 与 CocoaPods 二选一，不要在同一个 App 中重复集成。Xcode 默认将此产品以 `LayerLens.o` 链入 App；上面的 Release 排除设置让 SDK 实现不进入最终可执行文件，无需在每次发布前手动移除依赖。SPM 仍可能解析、下载和编译 SDK。仅包住调用或禁用服务启动并不能替代这个排除设置。
+SPM 与 CocoaPods 二选一，不要在同一个 App 中重复集成。Xcode 默认将此产品以 `LayerLens.o` 和 `LayerLensCore.o` 链入 App；上面的 Release 排除设置让 SDK 实现不进入最终可执行文件，无需在每次发布前手动移除依赖。SPM 仍可能解析、下载和编译 SDK。仅包住调用或禁用服务启动并不能替代这个排除设置。
 
 ### CocoaPods
 
@@ -73,6 +77,12 @@ pod 'LayerLens', :git => 'https://github.com/amjunliang/LayerLens.git', :configu
 - 端口从 9527 开始, 被占用时依次尝试到 9536, 多个 App 可以同时运行.
 - 服务只监听本机回环地址; 非 `DEBUG` 编译时不会启动.
 - 没有第三方依赖. 层级采集基于内置的 LookinServer 代码, 已改为 `LayerLens_` 前缀, 与项目中原有的 LookinServer 互不影响, Lookin 的 Mac 客户端照常可用.
+
+### 多平台项目
+
+SPM 的公共入口可用于多平台 target。iOS 使用 `LayerLensCore` 提供实际检查能力；原生 macOS 和其他未支持的 Apple 平台仅提供空日志接口，不启动服务、不会编译 UIKit 实现。`logDirectory` 在这些平台返回空字符串。这不代表支持原生 Mac App 的层级检查。
+
+暂不支持 SwiftUI 逻辑视图树检查，仅展示 App 实际生成的 UIKit / CALayer 层级。
 
 ## 2. 运行 Mac App
 

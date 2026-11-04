@@ -73,7 +73,7 @@ swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift 
 
 for file in \
   GitViewStateTests.cjs GitInteractionTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs TargetTaskTests.cjs AutoFollowTests.cjs LiveVideoDecoderTests.cjs NetworkAsyncStateTests.cjs \
-  NetworkCaptureActionTests.cjs NetworkViewerWebTests.cjs XcodeRunTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs; do
+  NetworkCaptureActionTests.cjs NetworkViewerWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"
 done
