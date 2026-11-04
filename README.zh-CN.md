@@ -17,7 +17,7 @@
 
 | 部分 | 位置 | 作用 |
 |---|---|---|
-| iOS Pod | `Pod/` | 在 Debug 包内运行一个很小的 HTTP 服务, 提供层级、属性、截图等接口 |
+| iOS SDK | `Pod/` | 在 Debug 包内运行一个很小的 HTTP 服务, 提供层级、属性、截图等接口 |
 | Mac App | `Mac/` | 自动发现模拟器和 USB 真机上的 App, 提供网页和实时画面, 驱动 Xcode 运行 |
 | 网页 | `Web/` | 原生 HTML/CSS/JS, 无构建步骤, 不依赖 CDN, 支持中英文和深色模式 |
 
@@ -25,11 +25,38 @@ Mac App 的窗口就是这个网页, 也可以在浏览器中打开 `http://127.
 
 ## 环境要求
 
-- iOS 15+, CocoaPods
+- iOS 15+, Swift Package Manager 或 CocoaPods
 - macOS 14+, Xcode (实时画面使用 Xcode 自带的模拟器框架)
 - 浏览器访问时使用 Chrome 或 Safari (实时画面需要 WebCodecs)
 
-## 1. 集成 Pod
+## 1. 集成 iOS SDK
+
+### Swift Package Manager
+
+1. 在 Xcode 中选择 **File > Add Package Dependencies…**。
+2. 输入 `https://github.com/amjunliang/LayerLens.git`。
+3. 当前先选择 **Branch: master**（已有的 `0.7.0` 标签尚不包含 SPM 配置）。
+4. 将 **LayerLens** 产品添加到需要调试的 App target，无需嵌入动态框架。
+5. 在 App target 的 **Build Settings > Excluded Source File Names** 中，仅为 **Release** 添加 `LayerLens.o`，保留已有值；Debug 不添加。使用其他发布配置时也需要对它们设置。
+
+以 Debug 配置运行 App 即可自动启动，无需调用初始化方法，也无需额外添加 `-ObjC`。UIKit 和 SwiftUI 使用相同的接入方式。需要使用日志 API 时，导入和调用都放在 Debug 条件中：
+
+```swift
+#if DEBUG
+import LayerLens
+#endif
+
+// 在需要记录日志的位置：
+#if DEBUG
+LayerLens.log("调试信息")
+#endif
+```
+
+Objective-C 同样用 `#if DEBUG` 包住 `@import LayerLens;` 和 API 调用。
+
+SPM 与 CocoaPods 二选一，不要在同一个 App 中重复集成。Xcode 默认将此产品以 `LayerLens.o` 链入 App；上面的 Release 排除设置让 SDK 实现不进入最终可执行文件，无需在每次发布前手动移除依赖。SPM 仍可能解析、下载和编译 SDK。仅包住调用或禁用服务启动并不能替代这个排除设置。
+
+### CocoaPods
 
 只加到 `Debug` 配置, 调试工具不能进入正式包:
 

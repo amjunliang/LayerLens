@@ -5,3 +5,5 @@ build/
 Example/Pods/
 *.xcworkspace/xcuserdata/
 Mac/Local.xcconfig
+.build/
+.swiftpm/

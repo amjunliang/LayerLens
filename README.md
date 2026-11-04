@@ -17,7 +17,7 @@ Inspect, edit and explore your iOS view hierarchy, in the LayerLens Mac app or i
 
 | Part | Location | Role |
 |---|---|---|
-| iOS pod | `Pod/` | Runs a tiny HTTP server inside your debug build that serves the hierarchy, attributes and screenshots |
+| iOS SDK | `Pod/` | Runs a tiny HTTP server inside your debug build that serves the hierarchy, attributes and screenshots |
 | Mac app | `Mac/` | Discovers apps on simulators and USB devices, serves the web UI and live screen, and drives Xcode |
 | Web UI | `Web/` | Plain HTML/CSS/JS, no build step, no CDN; English and Chinese, light and dark |
 
@@ -25,11 +25,38 @@ The Mac app's window is the web UI. You can also open `http://127.0.0.1:9523` in
 
 ## Requirements
 
-- iOS 15+, CocoaPods
+- iOS 15+, Swift Package Manager or CocoaPods
 - macOS 14+, Xcode (the live screen uses Xcode's simulator frameworks)
 - Chrome or Safari when using a browser (the live screen needs WebCodecs)
 
-## 1. Add the pod
+## 1. Add the iOS SDK
+
+### Swift Package Manager
+
+1. In Xcode, choose **File > Add Package Dependencies…**.
+2. Enter `https://github.com/amjunliang/LayerLens.git`.
+3. For now, select **Branch: master** (the existing `0.7.0` tag does not contain the package manifest).
+4. Add the **LayerLens** product to the App target you want to inspect. No dynamic framework embedding is needed.
+5. In the App target's **Build Settings > Excluded Source File Names**, add `LayerLens.o` for **Release** only, preserving existing values. Leave Debug unchanged, and apply the exclusion to any other shipping configurations as well.
+
+Run the app in Debug; startup is automatic, with no initialization call or extra `-ObjC` flag. UIKit and SwiftUI use the same integration. Wrap both imports and logging API calls in Debug conditions:
+
+```swift
+#if DEBUG
+import LayerLens
+#endif
+
+// At the logging call site:
+#if DEBUG
+LayerLens.log("Debug message")
+#endif
+```
+
+For Objective-C, wrap `@import LayerLens;` and API calls in `#if DEBUG` as well.
+
+Choose either SPM or CocoaPods; do not integrate both into the same app. Xcode links this product into the app as `LayerLens.o` by default. The Release exclusion above keeps the SDK implementation out of the final executable without manually removing the dependency before each release. SPM may still resolve, download and compile the SDK. Guarding calls or disabling server startup alone does not replace the exclusion.
+
+### CocoaPods
 
 Add it to the `Debug` configuration only, so it never ships in a release build:
 
