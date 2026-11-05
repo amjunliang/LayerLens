@@ -165,6 +165,8 @@ const EN = {
   '也可以切换到实时查看设备画面': 'Or switch to Live to view the device screen',
   '当前浏览器不支持 WebCodecs, 请使用 Chrome 或 Safari': 'This browser does not support WebCodecs, please use Chrome or Safari',
   '实时画面连接已断开': 'Live view disconnected',
+  '设备视频输出已暂停，恢复画面后可继续操作': 'Device video output paused. You can continue when the picture resumes.',
+  '设备视频输出已恢复': 'Device video output resumed',
   '模拟器未运行': 'Simulator is not running',
   '修复实时画面黑屏': 'Fix Black Live View',
   '打开日志文件夹': 'Open Logs Folder',

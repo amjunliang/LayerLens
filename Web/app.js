@@ -1706,6 +1706,7 @@ const live = {
   connected: false,
   suspended: false,
   hasFrame: false,
+  mediaState: '',
   pendingFrame: null,
   inspect: false,
   altHeld: false,
@@ -1824,6 +1825,7 @@ function liveStart() {
         toast(t('无法唤醒设备，请重试。'));
       }
       if (message.type === 'rotation-result') liveRotationResult(message);
+      if (message.type === 'video-state') applyLiveVideoState(message);
       if (message.type === 'geometry') {
         if (live.real) live.sourceGeometry = message;
         live.screen = [message.width, message.height]; live.orientation = message.orientation; layoutLive();
@@ -1848,6 +1850,20 @@ function liveStart() {
     showLiveGuide(live.error || (wasConnected ? t('实时画面连接已断开') : ''));
     if (!(live.real && live.error)) live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
   };
+}
+
+// 原生视频输出状态只做非阻塞提示；设备静止但链路正常时不改变画面可操作性。
+function applyLiveVideoState(message) {
+  const active = message.active === true;
+  const previous = live.mediaState;
+  if (active) {
+    live.mediaState = '';
+    if (previous) toast(t('设备视频输出已恢复'));
+    return;
+  }
+  const state = ['stalled', 'paused', 'suspended'].includes(message.state) ? message.state : 'stalled';
+  live.mediaState = state;
+  if (!previous) toast(t('设备视频输出已暂停，恢复画面后可继续操作'));
 }
 
 // 离开实时页或失焦只释放输入，保留传输和解码状态。
@@ -1881,6 +1897,7 @@ function liveStop() {
   live.pendingFrame?.close?.();
   live.pendingFrame = null;
   live.hasFrame = false;
+  live.mediaState = '';
   clearTimeout(live.retryTimer);
   clearTimeout(live.startTimer);
   if (live.ws) {
@@ -1986,6 +2003,7 @@ function feedLiveFrame(buf) {
     if (live.ws !== socket) { frame.close?.(); return; }
     clearTimeout(live.startTimer);
     live.hasFrame = true;
+    live.mediaState = '';
     live.error = '';
     live.pendingFrame?.close?.();
     live.pendingFrame = null;
@@ -3946,7 +3964,14 @@ function setupLiveEvents() {
       feedbackTimer = setTimeout(() => button.classList.remove('click-feedback'), 700);
     });
   }
-  $('liveRetry').addEventListener('click', () => { liveStop(); live.error = ''; showLiveGuide(); liveStart(); });
+  $('liveRetry').addEventListener('click', () => {
+    live.error = '';
+    if (live.real) {
+      liveRestart();
+      return;
+    }
+    liveStop(); showLiveGuide(); liveStart();
+  });
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
   $('sandboxBtn').addEventListener('click', openSandbox);

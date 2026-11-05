@@ -131,6 +131,7 @@ extern int layerlens_native_service_ids(xrc_t,uint64_t *,uint64_t *);
 - (void)close;
 - (void)finish;
 - (void)emit:(uint8_t)kind data:(NSData *)data;
+- (void)emitVideoState:(NSString *)state active:(BOOL)active;
 - (void)receive:(CMSampleBufferRef)sample;
 - (void)handle:(NSDictionary *)message;
 - (BOOL)wakeDisplayIfNeeded:(NSString **)error;
@@ -179,6 +180,11 @@ static void installNativeSink(void){
 - (void)fail:(NSString *)reason {
     if(!_failure){ _failure=reason; [self emit:255 data:[reason dataUsingEncoding:NSUTF8StringEncoding]]; }
     [self close];
+}
+- (void)emitVideoState:(NSString *)state active:(BOOL)active {
+    if(atomic_load(&stopped)) return;
+    NSDictionary *result=@{@"type":@"video-state",@"state":state,@"active":@(active)};
+    [self emit:8 data:[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]];
 }
 - (void)hold:(xrc_t)remote {
     if(remote) [_connections addObject:(__bridge_transfer id)remote];
@@ -383,12 +389,15 @@ static void installNativeSink(void){
 }
 - (void)didStall:(BOOL)stalled {
     [self emit:254 data:[[NSString stringWithFormat:@"device video output stalled=%@",stalled?@"YES":@"NO"] dataUsingEncoding:NSUTF8StringEncoding]];
+    [self emitVideoState:@"stalled" active:!stalled];
 }
 - (void)didPause:(BOOL)paused {
     [self emit:254 data:[[NSString stringWithFormat:@"device video output paused=%@",paused?@"YES":@"NO"] dataUsingEncoding:NSUTF8StringEncoding]];
+    [self emitVideoState:@"paused" active:!paused];
 }
 - (void)didSuspend:(BOOL)suspended {
     [self emit:254 data:[[NSString stringWithFormat:@"device video output suspended=%@",suspended?@"YES":@"NO"] dataUsingEncoding:NSUTF8StringEncoding]];
+    [self emitVideoState:@"suspended" active:!suspended];
 }
 - (void)didInvalidate {
     if(!atomic_load(&stopped)) [self fail:@"Device video output invalidated"];
@@ -525,7 +534,10 @@ static void installNativeSink(void){
         NSString *type=message[@"type"];
         BOOL needsWake=NO;
         @synchronized(self){ needsWake=ipbDisplayNeedsWake(self->display); }
-        if(needsWake && ([type isEqual:@"touch1-down"] || [type isEqual:@"button"] || [type isEqual:@"key"] || [type isEqual:@"paste"])){
+        BOOL explicitSleepWake=[type isEqual:@"button"] && [message[@"button"] isEqual:@"sleep-wake"];
+        BOOL userInput=[type isEqual:@"touch1-down"] || [type isEqual:@"key"] || [type isEqual:@"paste"] ||
+            ([type isEqual:@"button"] && !explicitSleepWake);
+        if(needsWake && userInput){
             // Device control stays on nativeWork. The serial input queue waits for
             // that transition so touch-down/up ordering is preserved.
             __block BOOL awake=NO;
