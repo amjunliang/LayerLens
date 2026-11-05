@@ -1019,6 +1019,13 @@ function gitDiscardButton(group, file) {
   return button;
 }
 
+function gitCloseDiff() {
+  git.selected = null;
+  git.diffText = null;
+  gitRenderFiles();
+  gitRenderDiff();
+}
+
 function gitRenderDiff() {
   const box = $('gitDiff');
   const selected = git.selected;
@@ -1029,14 +1036,10 @@ function gitRenderDiff() {
   }
   const head = el('div', 'git-diff-head');
   const back = el('button', 'icon-btn git-diff-back');
-  back.title = t('返回');
-  back.append(icon('chevron'));
-  back.addEventListener('click', () => {
-    git.selected = null;
-    git.diffText = null;
-    gitRenderFiles();
-    gitRenderDiff();
-  });
+  back.title = t('关闭');
+  back.setAttribute('aria-label', t('关闭'));
+  back.append(icon('close'));
+  back.addEventListener('click', gitCloseDiff);
   const items = selected.items;
   const commits = selected.kind === 'commits';
   let name;
@@ -1066,6 +1069,7 @@ function gitRenderDiff() {
   head.append(back);
   if (badge) head.append(badge);
   let title = el('span', 'git-diff-title', name);
+  title.title = name;
   if (message) {
     // 单个提交按原始提交信息多行显示
     head.classList.add('message');

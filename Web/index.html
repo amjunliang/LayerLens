@@ -134,6 +134,7 @@
       </div>
       <div class="float-group">
         <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
+        <button class="icon-btn toggle live-only pixel-zoom" id="livePixelZoom" title="原始像素 1:1" aria-label="原始像素 1:1">1:1</button>
         <button class="icon-btn flat-only toggle" id="colorPick" title="取色 (C)" aria-label="取色" aria-pressed="false"><svg class="icon"><use href="#i-picker"/></svg></button>
         <button class="icon-btn three-only toggle" id="subtreeOnly" title="只看选中子树" aria-label="只看选中子树" aria-pressed="false"><svg class="icon"><use href="#i-focus"/></svg></button>
       </div>
@@ -177,6 +178,7 @@
     </div>
     <div class="live-wrap" id="liveWrap" hidden>
       <canvas class="live-canvas" id="liveCanvas" tabindex="0"></canvas>
+      <div class="live-pixel-hint" id="livePixelHint" role="status" aria-live="polite" hidden></div>
       <div class="live-guide" id="liveGuide" hidden>
         <div class="live-loading" id="liveLoading" role="status" aria-label="Loading" hidden></div>
         <div class="live-guide-title" id="liveGuideTitle">正在连接实时画面…</div>

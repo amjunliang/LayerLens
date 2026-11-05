@@ -190,6 +190,7 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 @keyframes icon-spin { to { transform: rotate(360deg); } }
 .icon-btn.active, .icon-btn.toggle.on { color: var(--accent); }
 .icon-btn.toggle.on { background: var(--accent); color: #fff; }
+.pixel-zoom { font: 600 10px/1 var(--mono); letter-spacing: -0.04em; }
 /* 工具栏的开关只用强调色, 与筛选等按钮一致 */
 .toolbar .icon-btn.toggle.on { background: none; color: var(--accent); }
 
@@ -583,6 +584,8 @@ body.log-max .live-home-dock { visibility: hidden; }
 .live-home-dock .icon-btn.click-feedback { background: color-mix(in srgb, var(--stage-text) 8%, transparent); }
 /* 细线勾出设备边缘 */
 .live-canvas { flex: none; display: block; background: #000; cursor: default; outline: none; box-shadow: var(--screen-shadow); }
+.live-pixel-hint { position: absolute; top: 14px; left: 50%; z-index: 4; transform: translateX(-50%); padding: 4px 9px; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); box-shadow: var(--float-shadow); color: var(--stage-text-2); font: 11px/1.4 var(--mono); white-space: nowrap; pointer-events: none; }
+body.log-max .live-pixel-hint { visibility: hidden; }
 .live-wrap.inspecting .live-canvas { cursor: crosshair; }
 /* 取色: 放大镜跟随指针, 中心格为取到的像素 */
 .picking .stage-wrap, .picking .live-canvas { cursor: crosshair; }
@@ -1298,20 +1301,28 @@ body.log-open .log-pane { display: flex; }
 
 /* 小屏: 触屏窄屏, 或桌面窗口窄到工具栏放不下 */
 @media (max-width: 760px) and (pointer: coarse), (max-width: 600px) {
-  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main"; }
-  .pane { grid-area: main; display: none; }
-  body[data-view="tree"] .tree-pane,
-  body[data-view="canvas"] .canvas-pane,
-  body[data-view="detail"] .detail-pane,
-  body[data-view="log"] .log-pane { display: flex; }
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 0 0; grid-template-areas: "canvas" "s4" "log"; }
+  body.log-open .layout { grid-template-rows: minmax(0, 1fr) 0 0; }
+  .canvas-pane { display: flex; }
+  .tree-pane, .detail-pane { display: none; position: absolute; top: 0; bottom: 0; width: min(340px, calc(100% - 32px)); z-index: 42; box-shadow: var(--shadow); }
+  .tree-pane { left: 0; }
+  .detail-pane { right: 0; }
+  body.log-open .tree-pane, body.log-open .detail-pane { bottom: calc(min(var(--log-h, 240px), 100% - 32px) + 8px); }
+  body[data-view="tree"] .tree-pane, body[data-view="detail"] .detail-pane { display: flex; }
+  .log-pane { display: none; }
+  body.log-open .log-pane { display: flex; }
+  body.log-open:not(.logs-window):not(.log-max) .log-pane { position: absolute; grid-area: 1 / 1 / -1 / -1; left: 0; right: 0; bottom: 0; height: min(var(--log-h, 240px), calc(100% - 32px)); z-index: 42; border: 1px solid var(--border); border-radius: 0; box-shadow: var(--shadow); }
+  body.log-open:not(.logs-window):not(.log-max) .splitter[data-split="s4"] { position: absolute; grid-area: 1 / 1 / -1 / -1; left: 0; right: 0; bottom: calc(min(var(--log-h, 240px), 100% - 32px) - 1px); z-index: 43; }
   .net-detail { position: absolute; inset: 0; width: auto; z-index: 3; }
-  /* 窄屏: 文件列表占满, 选中文件后 diff 覆盖列表, 左上角返回 */
+  /* 窄屏差异覆盖底部面板上方的画布, 文件列表保持可见。 */
   .git-side { width: auto; max-width: none; min-width: 0; flex: 1; }
   .git-diff { position: absolute; inset: 0; z-index: 3; }
+  body:not(.logs-window):not(.log-max) .git-diff { position: fixed; top: auto; left: 0; right: 0; bottom: min(var(--log-h, 240px), 100vh - 77px); height: max-content; max-height: max(0px, calc(100vh - min(var(--log-h, 240px), 100vh - 77px) - 117px)); z-index: 20; border: 1px solid var(--border); border-bottom: 0; border-radius: 0; overflow: hidden; box-shadow: var(--shadow); }
   .git-body:not(.has-diff) .git-diff { display: none; }
-  .git-diff-back { display: inline-flex; }
+  .git-diff-back { display: inline-flex; transform: none; order: 1; }
   .net-splitter { display: none; }
-  .splitter { display: none !important; }
+  .splitter { display: none; }
+  body.log-open .splitter[data-split="s4"] { display: block; }
   /* 两侧不小于内容宽度, 放不下时模式切换偏离中心也不与左侧重叠; 收紧间距, 快捷键入口(可按 ?)不显示 */
   .toolbar { padding: 0 6px; gap: 8px; grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr); }
   #modeSeg button { min-width: 38px; padding: 2px 6px; }

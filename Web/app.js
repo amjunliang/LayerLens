@@ -1707,6 +1707,7 @@ const live = {
   suspended: false,
   hasFrame: false,
   mediaState: '',
+  sourcePixels: null,
   pendingFrame: null,
   inspect: false,
   altHeld: false,
@@ -1898,6 +1899,7 @@ function liveStop() {
   live.pendingFrame = null;
   live.hasFrame = false;
   live.mediaState = '';
+  live.sourcePixels = null;
   clearTimeout(live.retryTimer);
   clearTimeout(live.startTimer);
   if (live.ws) {
@@ -2054,10 +2056,55 @@ function paintLive(frame) {
     }
     if (native) canvas.getContext('2d').drawImage(frame, 0, 0, width, height);
     else canvas.getContext('2d').drawImage(frame, 0, 0);
+    live.sourcePixels = [width, height];
+    updateLivePixelStatus();
   } finally {
     // 包括绘制失败、失焦以及已断开的帧, 都必须归还解码/GPU 资源。
     frame.close?.();
   }
+}
+
+function livePixelRatio(sourceWidth, cssWidth, dpr = window.devicePixelRatio || 1) {
+  return sourceWidth > 0 && cssWidth > 0 && dpr > 0 ? cssWidth * dpr / sourceWidth : 0;
+}
+
+function livePixelZoomTarget(sourceWidth, displayWidth, fitScale, dpr = window.devicePixelRatio || 1) {
+  if (!(sourceWidth > 0 && displayWidth > 0 && fitScale > 0 && dpr > 0)) return null;
+  return sourceWidth / (displayWidth * fitScale * dpr);
+}
+
+function updateLivePixelStatus() {
+  const canvas = $('liveCanvas');
+  const hint = $('livePixelHint');
+  const button = $('livePixelZoom');
+  const sourceWidth = live.sourcePixels?.[0] || 0;
+  const ratio = livePixelRatio(sourceWidth, canvas.offsetWidth);
+  const atSource = ratio > 0 && Math.abs(ratio - 1) <= 0.01;
+  if (button) {
+    button.classList.toggle('on', atSource);
+    button.setAttribute('aria-pressed', String(atSource));
+  }
+  if (!hint) return;
+  hint.hidden = !(ratio > 1.01);
+  if (!hint.hidden) hint.textContent = t('{0}× 原始像素 · 无更多细节', ratio.toFixed(2));
+}
+
+// 把画布调整到设备源像素与屏幕物理像素 1:1，避免额外插值。
+function zoomLivePixels() {
+  const wrap = $('liveWrap');
+  const [sw, sh] = live.screen;
+  const sourceWidth = live.sourcePixels?.[0] || 0;
+  if (!sw || !sh || !wrap.clientWidth || !sourceWidth) return;
+  const [width, height] = contentSize(wrap);
+  const deg = LIVE_ROTATION[live.orientation] || 0;
+  const [fw, fh] = Math.abs(deg) === 90 ? [sh, sw] : [sw, sh];
+  const fitScale = Math.min(width / fw, height / fh) * planFitRatio();
+  const target = livePixelZoomTarget(sourceWidth, sw, fitScale);
+  if (target === null) return;
+  state.zoom = Math.max(0.2, Math.min(6, target));
+  state.panX = 0;
+  state.panY = 0;
+  layoutLive();
 }
 
 function layoutLive() {
@@ -2072,6 +2119,7 @@ function layoutLive() {
   const scale = Math.min(width / fw, height / fh) * planFitRatio() * state.zoom;
   canvas.style.width = sw * scale + 'px';
   canvas.style.height = sh * scale + 'px';
+  updateLivePixelStatus();
   // 模拟器尺寸为 point，真机尺寸为像素：将同一圆角半径换算到各自坐标单位。
   const cornerScale = live.real ? (live.sourceGeometry?.pointScale || 1) : 1;
   canvas.style.borderRadius = LIVE_CORNER * cornerScale * scale + 'px';
@@ -5639,13 +5687,13 @@ const logs = {
 
 function logVisible() {
   if (logs.window) return true;
-  return isNarrow() ? document.body.dataset.view === 'log' : logs.open;
+  return logs.open;
 }
 
 function syncLogPanel() {
   const visible = logVisible();
-  document.body.classList.toggle('log-open', !logs.window && !isNarrow() && logs.open);
-  if (!logs.open || isNarrow()) setLogMax(false);
+  document.body.classList.toggle('log-open', !logs.window && logs.open);
+  if (!logs.open) setLogMax(false);
   $('logToggle').classList.toggle('on', visible);
   $('logToggle').setAttribute('aria-pressed', String(visible));
   if (visible && !logs.active) {
@@ -5669,10 +5717,6 @@ function syncLogPanel() {
 }
 
 function toggleLogPanel() {
-  if (isNarrow()) {
-    toggleView('log');
-    return;
-  }
   logs.open = !logs.open;
   try {
     localStorage.setItem(LOG_OPEN_KEY, logs.open ? '1' : '0');
@@ -6267,8 +6311,7 @@ function openLocalLog(file) {
 
 // read(offset, length) 返回 { data, total }; 滚动接近底部时加载下一段
 function openLogFile(name, total, read) {
-  if (isNarrow()) setView('log');
-  else if (!logs.open) toggleLogPanel();
+  if (!logs.open) toggleLogPanel();
   logDisconnect();
   logs.source = 'file';
   logs.file = { name, total, read, offset: 0, decoder: new TextDecoder(), rest: '', loading: false, done: false, plain: null };
@@ -6428,8 +6471,7 @@ function openLogWindow() {
     toast(t('无法打开新窗口, 请允许弹出窗口'), true);
     return;
   }
-  if (isNarrow()) setView('canvas');
-  else if (logs.open) toggleLogPanel();
+  if (logs.open) toggleLogPanel();
 }
 
 // 独立窗口停靠回主窗口: 通知打开它的主窗口显示面板并切到同一页, 然后关闭自己.
@@ -6459,8 +6501,7 @@ function listenLogDock() {
     if (data?.type !== LOG_DOCK_MESSAGE) return;
     if (!fromOpener && (data.device !== targets.deviceId || data.app !== targets.bundleId)) return;
     setPaneTab(data.tab);
-    if (isNarrow()) setView('log');
-    else if (!logs.open) toggleLogPanel();
+    if (!logs.open) toggleLogPanel();
     window.focus();
   };
   window.addEventListener('message', (e) => {
@@ -8192,6 +8233,7 @@ function setup() {
   $('spacingBtn').addEventListener('click', () => togglePopover('spacingPop'));
   $('treeFilterBtn').addEventListener('click', () => togglePopover('treeFilterPop'));
   $('zoomFit').addEventListener('click', fitView);
+  $('livePixelZoom').addEventListener('click', zoomLivePixels);
   $('themeSeg').addEventListener('click', (e) => {
     const theme = e.target.dataset.theme;
     if (theme) applyTheme(theme, true);
@@ -8227,6 +8269,13 @@ function setup() {
     // 终端中的按键全部交给 shell, 如 vim 的 Esc
     if (e.target instanceof Element && e.target.closest('.xterm')) return;
     if (e.key === 'Escape') {
+      if (isNarrow() && logVisible() && net.tab === 'git' && git.selected && $('modal').hidden &&
+          !(e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) &&
+          !document.querySelector('.context-menu:not([hidden]), .popover:not([hidden])')) {
+        e.preventDefault();
+        gitCloseDiff();
+        return;
+      }
       if (canEscapeClearSelection(e)) clearSelection();
       if (document.body.classList.contains('log-max') && $('modal').hidden) setLogMax(false);
       setColorPicker(false);

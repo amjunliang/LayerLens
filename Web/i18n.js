@@ -167,6 +167,8 @@ const EN = {
   '实时画面连接已断开': 'Live view disconnected',
   '设备视频输出已暂停，恢复画面后可继续操作': 'Device video output paused. You can continue when the picture resumes.',
   '设备视频输出已恢复': 'Device video output resumed',
+  '原始像素 1:1': 'Original pixels (1:1)',
+  '{0}× 原始像素 · 无更多细节': '{0}× source pixels · no additional detail',
   '模拟器未运行': 'Simulator is not running',
   '修复实时画面黑屏': 'Fix Black Live View',
   '打开日志文件夹': 'Open Logs Folder',
