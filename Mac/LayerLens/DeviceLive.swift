@@ -218,12 +218,10 @@ private final class DeviceLiveSession {
               width.isFinite, height.isFinite, width > 0, height > 0 else { return }
         encoding = true; framePending = false
         let keyFrame = forceKeyFrame; forceKeyFrame = false
-        let target = video.targetSize
-        let ratio = target.map { max($0.width / width, $0.height / height) } ?? 1
-        let scale = min((ratio * 16).rounded(.up) / 16, 1)
+        // 真机始终保留有效画面的原始分辨率, 避免小窗口下采样影响清晰度。
         captureQueue.async { [self] in
             if keyFrame { encoder.requestKeyFrame() }
-            encoder.encode(pixels, scale: scale, contentSize: CGSize(width: width, height: height)) { [weak self] in
+            encoder.encode(pixels, contentSize: CGSize(width: width, height: height)) { [weak self] in
                 self?.queue.async { [weak self] in
                     guard let self else { return }
                     self.encoding = false; self.encodePending()

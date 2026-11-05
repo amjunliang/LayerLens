@@ -30,7 +30,12 @@ typedef struct {
     double pointScale;
     uint64_t displayID;
     int deviceQuarter, contentQuarter;
+    BOOL backlightKnown, backlightOn;
 } IPBDisplayInfo;
+
+static inline BOOL ipbDisplayNeedsWake(IPBDisplayInfo display) {
+    return display.backlightKnown && !display.backlightOn;
+}
 
 static inline BOOL ipbParseDisplayInfo(NSDictionary *result, IPBDisplayInfo *out) {
     if (![result isKindOfClass:NSDictionary.class]) return NO;
@@ -51,6 +56,9 @@ static inline BOOL ipbParseDisplayInfo(NSDictionary *result, IPBDisplayInfo *out
     value.deviceQuarter=ipbDeviceQuarter(orientation[@"currentDeviceOrientation"]);
     if (value.deviceQuarter<0) value.deviceQuarter=ipbDeviceQuarter(orientation[@"currentDeviceNonFlatOrientation"]);
     value.contentQuarter=ipbDisplayQuarter(primary[@"currentOrientation"]);
+    NSString *backlight=result[@"backlightState"];
+    value.backlightKnown=[backlight isKindOfClass:NSString.class];
+    value.backlightOn=[backlight isEqual:@"activeOn"];
     // The verified iPhone primary display has rot0 native axes. Do not invent a
     // correction for a different native coordinate system without a capture.
     if (ipbDisplayQuarter(primary[@"nativeOrientation"])!=0 || value.deviceQuarter<0 || value.contentQuarter<0 ||

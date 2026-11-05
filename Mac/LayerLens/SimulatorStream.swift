@@ -49,8 +49,6 @@ final class SimulatorStream {
     private var pendingSurface: IOSurface?
     private var encoding = false
     private var captureGeneration = 0
-    /// 按观看者中最大的显示尺寸编码, nil 时为原始分辨率
-    private var targetSize: (width: Double, height: Double)?
 
     init(udid: String) {
         self.udid = udid
@@ -79,7 +77,6 @@ final class SimulatorStream {
                 return
             }
             video.add(socket)
-            updateTargetSize()
             socket.sendText(orientationMessage)
         }
     }
@@ -113,7 +110,6 @@ final class SimulatorStream {
 
     private func remove(_ id: ObjectIdentifier) {
         video.remove(id)
-        updateTargetSize()
         touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
         guard video.isEmpty, running else { return }
         running = false
@@ -191,7 +187,8 @@ final class SimulatorStream {
         guard screen != nil, let surface = pendingSurface else { encoding = false; return }
         pendingSurface = nil
         let generation = captureGeneration
-        encoder.encode(surface, scale: encodeScale(of: surface)) { [weak self] in
+        // 模拟器也始终保留原始分辨率, 避免小窗口下采样影响文字和细节清晰度。
+        encoder.encode(surface) { [weak self] in
             self?.captureQueue.async { [weak self] in
                 guard let self, generation == self.captureGeneration else { return }
                 self.encoding = false
@@ -203,33 +200,10 @@ final class SimulatorStream {
         }
     }
 
-    /// 编码比例按 1/16 取整(向上), 缩放画面时不会每一点变化都重建编码器
-    private func encodeScale(of surface: IOSurface) -> Double {
-        guard let targetSize else { return 1 }
-        let width = Double(IOSurfaceGetWidth(surface))
-        let height = Double(IOSurfaceGetHeight(surface))
-        guard width > 0, height > 0 else { return 1 }
-        let ratio = max(targetSize.width / width, targetSize.height / height)
-        return min((ratio * 16).rounded(.up) / 16, 1)
-    }
-
     // MARK: - Size
 
     private func setSize(_ size: (width: Double, height: Double), of id: ObjectIdentifier) {
         video.setSize(size, of: id)
-        updateTargetSize()
-    }
-
-    /// 取所有观看者中最大的显示尺寸; 有未上报的观看者时用原始分辨率. 变化后立即重编当前画面, 画面静止时也能更新
-    private func updateTargetSize() {
-        let target = video.targetSize
-        captureQueue.async { [self] in
-            let changed = targetSize?.width != target?.width || targetSize?.height != target?.height
-            targetSize = target
-            if changed, let surface = screen?.surface() {
-                capture(surface, trailing: false)
-            }
-        }
     }
 
     // MARK: - Orientation

@@ -375,6 +375,24 @@ static void installNativeSink(void){
 - (void)streamDidStop:(id)stream { if(!atomic_load(&stopped)) [self fail:@"Video stream stopped"]; }
 - (void)vcMediaStreamDidStop:(id)stream { [self streamDidStop:stream]; }
 - (void)streamDidServerDie:(id)stream { [self streamDidStop:stream]; }
+- (void)vcMediaStreamDidRTPTimeOut:(id)stream {
+    if(!atomic_load(&stopped)) [self fail:@"Device video stream timed out"];
+}
+- (void)vcMediaStreamDidRTCPTimeOut:(id)stream {
+    [self emit:254 data:[@"device media RTCP timed out" dataUsingEncoding:NSUTF8StringEncoding]];
+}
+- (void)didStall:(BOOL)stalled {
+    [self emit:254 data:[[NSString stringWithFormat:@"device video output stalled=%@",stalled?@"YES":@"NO"] dataUsingEncoding:NSUTF8StringEncoding]];
+}
+- (void)didPause:(BOOL)paused {
+    [self emit:254 data:[[NSString stringWithFormat:@"device video output paused=%@",paused?@"YES":@"NO"] dataUsingEncoding:NSUTF8StringEncoding]];
+}
+- (void)didSuspend:(BOOL)suspended {
+    [self emit:254 data:[[NSString stringWithFormat:@"device video output suspended=%@",suspended?@"YES":@"NO"] dataUsingEncoding:NSUTF8StringEncoding]];
+}
+- (void)didInvalidate {
+    if(!atomic_load(&stopped)) [self fail:@"Device video output invalidated"];
+}
 - (void)didReceiveSampleBuffer:(CMSampleBufferRef)sample { [self receive:sample]; }
 - (void)streamOutput:(id)output didReceiveSampleBuffer:(CMSampleBufferRef)sample { [self receive:sample]; }
 - (void)receive:(CMSampleBufferRef)sample {
@@ -505,6 +523,28 @@ static void installNativeSink(void){
     dispatch_async(_inputWork,^{ @autoreleasepool {
         if(atomic_load(&self->stopped) || !self->input) return;
         NSString *type=message[@"type"];
+        BOOL needsWake=NO;
+        @synchronized(self){ needsWake=ipbDisplayNeedsWake(self->display); }
+        if(needsWake && ([type isEqual:@"touch1-down"] || [type isEqual:@"button"] || [type isEqual:@"key"] || [type isEqual:@"paste"])){
+            // Device control stays on nativeWork. The serial input queue waits for
+            // that transition so touch-down/up ordering is preserved.
+            __block BOOL awake=NO;
+            __block NSString *wakeError=nil;
+            dispatch_semaphore_t done=dispatch_semaphore_create(0);
+            dispatch_async(nativeWork(),^{ @autoreleasepool {
+                awake=[self wakeDisplayIfNeeded:&wakeError];
+                if(awake) @synchronized(self){ self->display.backlightKnown=YES;self->display.backlightOn=YES; }
+                dispatch_semaphore_signal(done);
+            }});
+            dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC));
+            if(!awake || atomic_load(&self->stopped)){
+                if(!atomic_load(&self->stopped) && wakeError){
+                    NSDictionary *result=@{@"type":@"input-error",@"detail":@"wake-unavailable",@"message":wakeError};
+                    [self emit:8 data:[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]];
+                }
+                return;
+            }
+        }
         if([type hasPrefix:@"touch1-"]){
             double width=[message[@"width"] doubleValue],height=[message[@"height"] doubleValue];
             if(width<=0 || height<=0) return;

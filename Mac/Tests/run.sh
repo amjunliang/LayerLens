@@ -51,6 +51,11 @@ xcrun clang -fobjc-arc -fblocks -framework Foundation -I Pod/Classes/Network \
   Pod/Classes/Network/LayerLensNetworkHooks.m Mac/Tests/NetworkHooksTests.m -o "$run_dir/network-hooks"
 "$run_dir/network-hooks"
 
+printf '[Objective-C] display-geometry\n'
+xcrun clang -fobjc-arc -fblocks -framework Foundation -framework CoreGraphics \
+  -I Mac/DeviceBridge/Sources Mac/Tests/DisplayGeometryTests.m -o "$run_dir/display-geometry"
+"$run_dir/display-geometry"
+
 swift_test home-button Mac/LayerLens/SimulatorBridge.swift Mac/Tests/SimHomeButtonTests.swift
 swift_test live-video Mac/LayerLens/LiveVideo.swift Mac/Tests/LiveVideoTests.swift
 swift_test target-history Mac/LayerLens/TargetHistory.swift Mac/Tests/TargetHistoryTests.swift
