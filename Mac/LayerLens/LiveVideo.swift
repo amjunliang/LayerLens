@@ -241,6 +241,79 @@ final class LiveVideoEncoder {
     }
 }
 
+/// 全局实时画面额度: 最近聚焦的两个观看者保持推流, 其余连接保留但暂停视频。
+/// 所有观看者可能来自不同设备和不同浏览器, 因此顺序必须由 Mac 端统一维护。
+final class LiveViewerBudget {
+    static let shared = LiveViewerBudget(limit: 2)
+
+    private final class Entry {
+        var active = false
+        let onChange: (Bool) -> Void
+        init(_ onChange: @escaping (Bool) -> Void) { self.onChange = onChange }
+    }
+
+    private let lock = NSLock()
+    private let limit: Int
+    private var order: [ObjectIdentifier] = []
+    private var entries: [ObjectIdentifier: Entry] = [:]
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    /// 新连接先按最旧处理, 页面确认焦点后再移到最近位置, 避免后台重连抢走额度。
+    /// 返回它当前是否获得额度; 已有观看者的变化通过回调通知。
+    @discardableResult
+    func join(_ id: ObjectIdentifier, onChange: @escaping (Bool) -> Void) -> Bool {
+        lock.lock()
+        order.removeAll { $0 == id }
+        order.insert(id, at: 0)
+        entries[id] = Entry(onChange)
+        let changes = rebalanceLocked(excluding: id)
+        let active = entries[id]?.active == true
+        lock.unlock()
+        deliver(changes)
+        return active
+    }
+
+    /// 页面获得焦点后移到队首对应的最近位置。
+    func focus(_ id: ObjectIdentifier) {
+        lock.lock()
+        guard entries[id] != nil else { lock.unlock(); return }
+        order.removeAll { $0 == id }
+        order.append(id)
+        let changes = rebalanceLocked(excluding: nil)
+        lock.unlock()
+        deliver(changes)
+    }
+
+    func leave(_ id: ObjectIdentifier) {
+        lock.lock()
+        guard entries.removeValue(forKey: id) != nil else { lock.unlock(); return }
+        order.removeAll { $0 == id }
+        let changes = rebalanceLocked(excluding: nil)
+        lock.unlock()
+        deliver(changes)
+    }
+
+    private func rebalanceLocked(excluding excluded: ObjectIdentifier?) -> [(Bool, () -> Void)] {
+        let active = Set(order.suffix(limit))
+        var changes: [(Bool, () -> Void)] = []
+        for id in order {
+            guard let entry = entries[id] else { continue }
+            let next = active.contains(id)
+            guard entry.active != next else { continue }
+            entry.active = next
+            if id != excluded { changes.append((next, { entry.onChange(next) })) }
+        }
+        return changes
+    }
+
+    private func deliver(_ changes: [(Bool, () -> Void)]) {
+        for (_, action) in changes { action() }
+    }
+}
+
 /// Both capture sources use this H.264 WebSocket protocol and recovery policy.
 /// All methods and callbacks run on the supplied session queue.
 final class LiveVideoBroadcaster {
@@ -254,12 +327,16 @@ final class LiveVideoBroadcaster {
 
     private final class Viewer {
         let socket: WebSocketConnection
+        var active: Bool
         var inFlight = 0
         var waitingKeyFrame = true
         var recovering = false
         var sentConfig: Data?
         var size: (width: Double, height: Double)?
-        init(_ socket: WebSocketConnection) { self.socket = socket }
+        init(_ socket: WebSocketConnection, active: Bool) {
+            self.socket = socket
+            self.active = active
+        }
     }
 
     init(queue: DispatchQueue, onKeyFrame: @escaping () -> Void) {
@@ -268,24 +345,43 @@ final class LiveVideoBroadcaster {
     }
 
     var isEmpty: Bool { viewers.isEmpty }
+    var hasActiveViewers: Bool { viewers.values.contains { $0.active } }
     var targetSize: (width: Double, height: Double)? {
-        guard !viewers.isEmpty else { return nil }
         var target = (width: 0.0, height: 0.0)
         for viewer in viewers.values {
+            guard viewer.active else { continue }
             guard let size = viewer.size else { return nil }
             target = (max(target.width, size.width), max(target.height, size.height))
         }
-        return target
+        return target.width > 0 && target.height > 0 ? target : nil
     }
 
-    func add(_ socket: WebSocketConnection) {
-        let viewer = Viewer(socket)
+    func add(_ socket: WebSocketConnection, active: Bool = true) {
+        let viewer = Viewer(socket, active: active)
         viewers[ObjectIdentifier(socket)] = viewer
-        sendConfig(to: viewer)
-        requestKeyFrame()
+        if active {
+            sendConfig(to: viewer)
+            requestKeyFrame()
+        }
     }
 
     func remove(_ id: ObjectIdentifier) { viewers[id] = nil }
+
+    func isActive(_ id: ObjectIdentifier) -> Bool { viewers[id]?.active == true }
+
+    func setActive(_ active: Bool, of id: ObjectIdentifier) {
+        guard let viewer = viewers[id], viewer.active != active else { return }
+        viewer.active = active
+        viewer.waitingKeyFrame = true
+        viewer.sentConfig = nil
+        guard active else { return }
+        if viewer.inFlight == 0 {
+            sendConfig(to: viewer)
+            requestKeyFrame()
+        } else {
+            viewer.recovering = true
+        }
+    }
 
     func setSize(_ size: (width: Double, height: Double), of id: ObjectIdentifier) {
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
@@ -309,6 +405,7 @@ final class LiveVideoBroadcaster {
             guard data != config else { return }
             config = data
             for viewer in viewers.values {
+                guard viewer.active else { continue }
                 viewer.waitingKeyFrame = true
                 if !viewer.recovering && viewer.inFlight < Self.maxInFlight { sendConfig(to: viewer) }
                 else { viewer.recovering = true }
@@ -317,6 +414,7 @@ final class LiveVideoBroadcaster {
         }
         let packet = Data([type]) + data
         for viewer in viewers.values {
+            guard viewer.active else { continue }
             // Once a delta is skipped, never send more deltas before a fresh keyframe.
             guard !viewer.recovering else { continue }
             if viewer.inFlight >= Self.maxInFlight {
@@ -352,7 +450,7 @@ final class LiveVideoBroadcaster {
                       self.viewers[ObjectIdentifier(viewer.socket)] === viewer else { return }
                 viewer.inFlight = max(0, viewer.inFlight - 1)
                 if !success { viewer.socket.close(); return }
-                if viewer.recovering && viewer.inFlight == 0 {
+                if viewer.recovering && viewer.inFlight == 0 && viewer.active {
                     viewer.recovering = false
                     self.requestKeyFrame()
                 }
@@ -361,7 +459,7 @@ final class LiveVideoBroadcaster {
     }
 
     func requestKeyFrame() {
-        guard !viewers.isEmpty, keyFrameRequest == nil else { return }
+        guard hasActiveViewers, keyFrameRequest == nil else { return }
         let wait = lastKeyFrameRequest + 0.5 - CFAbsoluteTimeGetCurrent()
         if wait > 0 {
             let work = DispatchWorkItem { [weak self] in

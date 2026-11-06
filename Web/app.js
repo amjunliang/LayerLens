@@ -418,7 +418,7 @@ function hideMenu() {
   hideLayer(menu, 120, () => menu.remove());
 }
 
-// 失焦时暂停层级与舞台刷新；实时连接保留，解码后只保留最新一帧。
+// 失焦时暂停层级与舞台刷新；实时流继续解码和绘制，只释放当前触摸。
 const pageActivity = { active: false, ready: false, pending: false, controller: null, generation: 0 };
 
 function pageHasFocus() {
@@ -438,11 +438,12 @@ function setupPageActivity() {
       ++refreshSeq;
       pageActivity.controller?.abort();
       resetImages();
-      liveSuspend(true);
+      liveSuspend();
       if (stage3D.frame) cancelAnimationFrame(stage3D.frame);
       stage3D.frame = 0;
       return;
     }
+    liveRequestFocus();
     if (pageActivity.ready) resumePageActivity();
   };
   window.addEventListener('pagehide', () => { cancelSwitch(); liveStop(); });
@@ -1705,6 +1706,8 @@ const live = {
   retryTimer: 0,
   connected: false,
   suspended: false,
+  budgetActive: true,
+  budgetPaused: false,
   hasFrame: false,
   mediaState: '',
   sourcePixels: null,
@@ -1797,6 +1800,7 @@ function liveStart() {
     live.connected = true;
     live.suspended = false;
     liveReportSize(true);
+    liveRequestFocus();
     if (live.restartOnOpen) {
       live.restartOnOpen = false;
       liveSend({ type: 'restart' });
@@ -1827,6 +1831,7 @@ function liveStart() {
       }
       if (message.type === 'rotation-result') liveRotationResult(message);
       if (message.type === 'video-state') applyLiveVideoState(message);
+      if (message.type === 'video-budget') applyLiveVideoBudget(message.active === true);
       if (message.type === 'geometry') {
         if (live.real) live.sourceGeometry = message;
         live.screen = [message.width, message.height]; live.orientation = message.orientation; layoutLive();
@@ -1877,7 +1882,8 @@ function liveSuspend(wakeOnResume = false) {
 
 function liveResume() {
   layoutLive();
-  if (!pageActivity.active || state.mode !== 'live') return;
+  if (state.mode !== 'live') return;
+  liveRequestFocus();
   if (live.suspended && live.ws?.readyState === WebSocket.OPEN) {
     live.suspended = false;
     if (live.real) liveSend({ type: 'resume' });
@@ -1889,6 +1895,24 @@ function liveResume() {
   }
   if (live.hasFrame) $('liveGuide').hidden = true;
   else showLiveGuide(live.error || undefined);
+}
+
+function liveRequestFocus() {
+  if (pageHasFocus()) liveSend({ type: 'viewer-focus' });
+}
+
+// Mac 端按最近聚焦顺序只向前两个观看者推流; 降级窗口保留最后一帧, 聚焦后自动恢复。
+function applyLiveVideoBudget(active) {
+  live.budgetActive = active;
+  live.budgetPaused = !active;
+  if (!active) {
+    live.pendingFrame?.close?.();
+    live.pendingFrame = null;
+    showLiveGuide(t('实时画面已在其他窗口暂停, 聚焦后恢复'));
+    return;
+  }
+  live.hasFrame = false;
+  showLiveGuide(t('正在恢复实时画面…'));
 }
 
 function liveStop() {
@@ -1998,6 +2022,7 @@ function configureLiveDecoder(payload, onFrame) {
 }
 
 function feedLiveFrame(buf) {
+  if (live.budgetPaused) return;
   const type = buf[0];
   const payload = buf.slice(1);
   const socket = live.ws;
@@ -2009,7 +2034,7 @@ function feedLiveFrame(buf) {
     live.error = '';
     live.pendingFrame?.close?.();
     live.pendingFrame = null;
-    if (!pageActivity.active || state.mode !== 'live') {
+    if (state.mode !== 'live') {
       live.pendingFrame = frame;
       return;
     }
@@ -2044,7 +2069,7 @@ function feedLiveFrame(buf) {
 // 解码出一帧立即绘制, 不等动画帧回调(否则平均多等半帧); 绘制只需零点几毫秒, 同一刷新周期内多画几次也无妨
 function paintLive(frame) {
   try {
-    if (!live.ws || !pageActivity.active) return;
+    if (!live.ws) return;
     const canvas = $('liveCanvas');
     const w = frame.displayWidth || frame.width;
     const h = frame.displayHeight || frame.height;
@@ -2059,7 +2084,7 @@ function paintLive(frame) {
     live.sourcePixels = [width, height];
     updateLivePixelStatus();
   } finally {
-    // 包括绘制失败、失焦以及已断开的帧, 都必须归还解码/GPU 资源。
+    // 包括绘制失败、暂停以及已断开的帧, 都必须归还解码/GPU 资源。
     frame.close?.();
   }
 }
@@ -2198,6 +2223,7 @@ async function revealLogs() {
 }
 
 function liveSend(message) {
+  if (live.budgetPaused && !['viewer-focus', 'resume', 'release'].includes(message.type)) return;
   if (live.ws && live.ws.readyState === WebSocket.OPEN) live.ws.send(JSON.stringify(message));
 }
 
@@ -3256,6 +3282,11 @@ function resumePendingLaunch() {
   launchAwayApp(deviceId, bundleId, targetHistory[deviceId]?.apps?.[bundleId]?.appName);
 }
 
+// 明确进入后台时保留当前层级快照和选中节点; 退出或断开仍走原有恢复流程。
+function hasCachedBackgroundSelection() {
+  return appState.value === 'background' && !!state.selected && state.nodes.has(state.selected);
+}
+
 function currentAppAway() {
   if (!currentDevice() || targets.pinned || stayingOffline()) return false;
   if (!targets.bundleId) return true;
@@ -3501,13 +3532,15 @@ async function checkForeground() {
         const next = await probeForeground();
         if (targets.deviceId !== deviceId || logTargetKey() !== key || (targets.followRevision || 0) !== revision || !pageActivity.active || !currentAppAway()) continue;
         if (next) {
-          followForeground(next);
+          if (!hasCachedBackgroundSelection()) followForeground(next);
           return;
         }
         // 只有明确后台/已退出才退回设备; 通信超时仍是未知状态。
         const app = currentApp();
         const absent = targets.bundleId && (app ? appInBackground(app) : appState.value === 'offline');
         if (absent) {
+          // 已有选中层级时停在原 App: 后台期间继续展示缓存, 回到前台后原地刷新。
+          if (hasCachedBackgroundSelection()) return;
           if (missingKey !== key) { missingKey = key; missingSince = Date.now(); }
           if (Date.now() - missingSince >= 1000) {
             // 同设备切换保留视频 WebSocket、解码器和当前帧。

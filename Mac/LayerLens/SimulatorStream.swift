@@ -76,7 +76,11 @@ final class SimulatorStream {
                 socket.close()
                 return
             }
-            video.add(socket)
+            let active = LiveViewerBudget.shared.join(id) { [weak self] active in
+                self?.queue.async { self?.setViewerActive(id, active) }
+            }
+            socket.sendText(Self.budgetMessage(active))
+            video.add(socket, active: active)
             socket.sendText(orientationMessage)
         }
     }
@@ -109,6 +113,7 @@ final class SimulatorStream {
     }
 
     private func remove(_ id: ObjectIdentifier) {
+        LiveViewerBudget.shared.leave(id)
         video.remove(id)
         touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
         guard video.isEmpty, running else { return }
@@ -130,6 +135,21 @@ final class SimulatorStream {
     }
 
     private func requestKeyFrame() { video.requestKeyFrame() }
+
+    private static func budgetMessage(_ active: Bool) -> String {
+        "{\"type\":\"video-budget\",\"active\":\(active)}"
+    }
+
+    private func setViewerActive(_ id: ObjectIdentifier, _ active: Bool) {
+        video.forEachSocket { socket in
+            guard ObjectIdentifier(socket) == id else { return }
+            socket.sendText(Self.budgetMessage(active))
+        }
+        video.setActive(active, of: id)
+        if !active {
+            touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
+        }
+    }
 
     private func encodeKeyFrame() {
         guard running else { return }
@@ -184,7 +204,7 @@ final class SimulatorStream {
     }
 
     private func encodePending() {
-        guard screen != nil, let surface = pendingSurface else { encoding = false; return }
+        guard video.hasActiveViewers, screen != nil, let surface = pendingSurface else { encoding = false; return }
         pendingSurface = nil
         let generation = captureGeneration
         // 模拟器也始终保留原始分辨率, 避免小窗口下采样影响文字和细节清晰度。
@@ -295,6 +315,10 @@ final class SimulatorStream {
             queue.async { [weak self] in self?.requestKeyFrame() }
             return
         }
+        if type == "viewer-focus" {
+            queue.async { LiveViewerBudget.shared.focus(id) }
+            return
+        }
         if type == "restart" {
             queue.async { [weak self] in self?.restartCapture() }
             return
@@ -304,6 +328,7 @@ final class SimulatorStream {
             queue.async { [weak self] in self?.setSize((width, height), of: id) }
             return
         }
+        guard video.isActive(id) || ["release", "size"].contains(type) else { return }
         guard let touch else { return }
         switch type {
         case "touch1-down", "touch1-move", "touch1-up":

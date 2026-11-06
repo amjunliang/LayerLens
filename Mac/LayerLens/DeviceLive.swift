@@ -137,7 +137,11 @@ private final class DeviceLiveSession {
             guard socket.accept(head) else { socket.close(); return }
             viewers[id] = socket
             if let geometry { message(geometry, to: socket) }
-            video.add(socket)
+            let active = LiveViewerBudget.shared.join(id) { [weak self] active in
+                self?.queue.async { self?.setViewerActive(id, active) }
+            }
+            sendBudget(active, to: socket)
+            video.add(socket, active: active)
             if resolver == nil && native == nil { start() }
             else if native != nil { write("{\"type\":\"resume\"}") }
         }
@@ -213,7 +217,7 @@ private final class DeviceLiveSession {
     }
     /// Bounded to one encoding submission plus the newest source frame.
     private func encodePending() {
-        guard !stopping, !encoding, framePending, let pixels = latestPixels, let geometry,
+        guard !stopping, video.hasActiveViewers, !encoding, framePending, let pixels = latestPixels, let geometry,
               let width = geometry["width"] as? Double, let height = geometry["height"] as? Double,
               width.isFinite, height.isFinite, width > 0, height > 0 else { return }
         encoding = true; framePending = false
@@ -232,6 +236,18 @@ private final class DeviceLiveSession {
     private func message(_ value: [String: Any], to socket: WebSocketConnection) {
         if let data = try? JSONSerialization.data(withJSONObject: value), let text = String(data: data, encoding: .utf8) { socket.sendText(text) }
     }
+    private func sendBudget(_ active: Bool, to socket: WebSocketConnection) {
+        message(["type": "video-budget", "active": active], to: socket)
+    }
+    private func setViewerActive(_ id: ObjectIdentifier, _ active: Bool) {
+        guard let socket = viewers[id] else { return }
+        sendBudget(active, to: socket)
+        video.setActive(active, of: id)
+        if !active, owner == id {
+            write("{\"type\":\"release\"}")
+            owner = nil
+        }
+    }
     private func fail(_ detail: String) {
         guard !stopping else { return }
         let data = try? JSONSerialization.data(withJSONObject: ["type": "error", "detail": detail])
@@ -245,6 +261,11 @@ private final class DeviceLiveSession {
     private func input(_ text: String, id: ObjectIdentifier) {
         guard text.utf8.count < 1_000_000, let data = text.data(using: .utf8),
               let item = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let type = item["type"] as? String else { return }
+        if type == "viewer-focus" {
+            LiveViewerBudget.shared.focus(id)
+            return
+        }
+        guard video.isActive(id) || ["resume", "release", "size"].contains(type) else { return }
         if type.hasPrefix("touch1-") {
             guard ["x", "y", "width", "height"].allSatisfy({ key in
                 (item[key] as? NSNumber)?.doubleValue.isFinite == true
@@ -281,6 +302,7 @@ private final class DeviceLiveSession {
         write(text)
     }
     private func remove(_ id: ObjectIdentifier) {
+        LiveViewerBudget.shared.leave(id)
         viewers[id] = nil; video.remove(id)
         framePending = latestPixels != nil; encodePending()
         if owner == id { write("{\"type\":\"release\"}"); owner = nil }
@@ -294,6 +316,7 @@ private final class DeviceLiveSession {
     private func stop() {
         guard !stopping else { return }
         stopping = true; idleStop?.cancel(); startupTimer?.cancel(); latestPixels = nil
+        for id in viewers.keys { LiveViewerBudget.shared.leave(id) }
         video.reset()
         captureQueue.async { [self] in encoder.invalidate() }
         if let resolver {

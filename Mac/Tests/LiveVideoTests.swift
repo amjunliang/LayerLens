@@ -20,10 +20,34 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
 
 @main enum LiveVideoTests {
     static func main() {
+        viewerBudget()
         broadcastRecovery()
         encoderBackpressure()
         encodeAndCrop()
         print("PASS shared H.264 pipeline checks")
+    }
+
+    static func viewerBudget() {
+        let budget = LiveViewerBudget(limit: 2)
+        let a = NSObject(), b = NSObject(), c = NSObject()
+        var state: [ObjectIdentifier: Bool] = [:]
+        let idA = ObjectIdentifier(a), idB = ObjectIdentifier(b), idC = ObjectIdentifier(c)
+        let activeA = budget.join(idA) { state[idA] = $0 }
+        let activeB = budget.join(idB) { state[idB] = $0 }
+        state[idA] = activeA; state[idB] = activeB
+        let activeC = budget.join(idC) { state[idC] = $0 }
+        require(activeA && activeB, "First two viewers must start active")
+        require(state[idA] == true && state[idB] == true && !activeC,
+                "Background reconnects must not steal an active slot")
+        state[idC] = activeC
+        budget.focus(idC)
+        require(state[idA] == true && state[idB] == false && state[idC] == true,
+                "Focus must promote the newest viewer and pause the oldest")
+        budget.leave(idC)
+        require(state[idA] == true && state[idB] == true,
+                "Closing a viewer must restore the next most recently focused viewer")
+        budget.leave(idB); budget.leave(idC)
+        print("PASS global viewer budget: recent focus order, two active slots and close promotion")
     }
 
     static func broadcastRecovery() {
@@ -58,7 +82,16 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
             let count2 = joined.packets.count
             video.broadcast(3, Data([0x41]))
             require(joined.packets.count == count2, "Config change did not wait for keyframe")
-            video.remove(ObjectIdentifier(slow)); video.remove(ObjectIdentifier(joined)); video.reset()
+            let paused = WebSocketConnection()
+            video.add(paused, active: false)
+            video.broadcast(2, Data([0x65])); video.broadcast(3, Data([0x41]))
+            require(paused.packets.isEmpty, "Paused viewer must not receive video frames")
+            video.setActive(true, of: ObjectIdentifier(paused))
+            require(paused.packets.map { $0[0] } == [1], "Promoted viewer must receive the latest config")
+            video.broadcast(2, Data([0x65]))
+            require(paused.packets.map { $0[0] } == [1, 2], "Promoted viewer must resume from a keyframe")
+            video.remove(ObjectIdentifier(slow)); video.remove(ObjectIdentifier(joined))
+            video.remove(ObjectIdentifier(paused)); video.reset()
         }
         print("PASS bounded sends, slow-client recovery, late join and changed configuration")
     }

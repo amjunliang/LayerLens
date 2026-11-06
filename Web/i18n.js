@@ -466,6 +466,8 @@ const EN = {
   'Xcode 正忙, 请稍后再试': 'Xcode is busy. Please try again shortly',
   '请在系统弹窗中允许 LayerLens 控制 Xcode': 'Allow LayerLens to control Xcode in the system dialog',
   '正在连接实时画面…': 'Connecting live view…',
+  '实时画面已在其他窗口暂停, 聚焦后恢复': 'Live view is paused while other windows are active; focus this window to resume',
+  '正在恢复实时画面…': 'Restoring live view…',
   '无法加载 Xcode 的模拟器框架': 'Unable to load Xcode simulator frameworks',
   '请确认已安装 Xcode, 并用 xcode-select 选中它': 'Make sure Xcode is installed and selected with xcode-select',
   '可用': 'Available',

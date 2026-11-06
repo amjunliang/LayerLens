@@ -14,11 +14,11 @@ class Decoder {
   close() { assert.notEqual(this.state, 'closed'); this.state = 'closed'; }
   decode(chunk) { assert.equal(this.state, 'configured'); this.chunks.push(chunk); this.options.output({close() {}}); }
 }
-const live = {ws: {}, hasFrame: false};
+const live = {ws: {}, hasFrame: false, budgetPaused: false};
 const context = vm.createContext({
   live, VideoDecoder: Decoder, EncodedVideoChunk: class {constructor(value) {Object.assign(this, value);}},
   performance: {now: () => 1000}, clearTimeout() {}, Uint8Array,
-  pageActivity: {active: true}, state: {mode: 'live'}, console: {warn() {}},
+  pageActivity: {active: false}, state: {mode: 'live'}, console: {warn() {}},
   liveSend: item => sent.push(item), paintLive: frame => painted.push(frame),
   showLiveGuide: message => errors.push(message), $: () => ({hidden: false}),
 });
@@ -54,4 +54,10 @@ assert.equal(live.decoder, null);
 feed([2,0x65]);
 assert.equal(painted.length, 4, 'Recreate failed decoder from cached avcC at next keyframe');
 assert.equal(errors.length, 0);
-console.log('PASS shared web decoder: initial keyframe, backlog, recovery, reconfiguration and decoder failure');
+live.budgetPaused = true;
+feed([1,1,100,0,42]); feed([2,0x65]);
+assert.equal(painted.length, 4, 'Paused viewers must not decode incoming video');
+live.budgetPaused = false;
+feed([1,1,100,0,42]); feed([2,0x65]);
+assert.equal(painted.length, 5, 'A promoted viewer resumes decoding at the next keyframe');
+console.log('PASS shared web decoder: unfocused painting, budget pause, keyframes, backlog, recovery, reconfiguration and decoder failure');

@@ -10,22 +10,24 @@ const sent = [], guide = { hidden: false };
 const c = { live: { real: true, suspended: false, ws: { readyState: 1 }, hasFrame: true },
   pageActivity: { active: true }, state: { mode: 'live' }, WebSocket: { OPEN: 1 },
   layoutLive() {}, paintLive() {}, showLiveGuide() {}, clearTimeout() {}, $: () => guide,
+  pageHasFocus: () => false,
   liveSend: message => sent.push(message.type) };
 vm.createContext(c);
 vm.runInContext(source.slice(source.indexOf('function liveSuspend('), source.indexOf('function liveStop()')), c);
 c.liveResume(); c.liveResume(); assert.deepEqual(sent, [], 'Normal layout updates never wake');
 c.liveSuspend(); c.liveResume(); assert.deepEqual(sent, ['release'], 'App-follow input release must not undo manual lock'); sent.length = 0;
 c.liveSuspend(true); assert(c.live.suspended);
-c.pageActivity.active = false; c.liveResume(); assert(c.live.suspended);
-c.pageActivity.active = true; c.state.mode = '2d'; c.liveResume(); assert(c.live.suspended);
+c.pageActivity.active = false; c.liveResume();
+assert.deepEqual(sent, ['release', 'resume'], 'Video resume does not depend on page focus');
+c.state.mode = '2d'; c.liveSuspend(true); c.liveResume(); assert(c.live.suspended);
 c.state.mode = 'live'; c.liveResume(); c.liveResume();
-assert.deepEqual(sent, ['release', 'resume'], 'Resume checks once after returning to visible Live');
+assert.deepEqual(sent, ['release', 'resume', 'release', 'resume'], 'Live mode transition resumes once');
 c.live.real = false; c.liveSuspend(true); c.liveResume();
-assert.deepEqual(sent, ['release', 'resume', 'release'], 'Simulator does not receive device wake commands');
+assert.deepEqual(sent, ['release', 'resume', 'release', 'resume', 'release'], 'Simulator does not receive device wake commands');
 c.live.real = true; c.live.ws.readyState = 0; c.liveSuspend(true); c.liveResume();
 assert(c.live.suspended, 'A connecting socket does not consume a resume transition');
 c.live.ws.readyState = 1; c.liveResume(); assert.equal(sent.at(-1), 'resume');
-console.log('PASS live resume transitions: inactive/mode guards, coalescing, connecting sockets and simulator isolation');
+console.log('PASS live resume transitions: focus independence, mode guards, coalescing, connecting sockets and simulator isolation');
 
 // Run the actual native wake method against deterministic device/HID boundaries.
 const native = fs.readFileSync(path.join(root, 'Mac/DeviceBridge/Sources/native_bridge.m'), 'utf8');

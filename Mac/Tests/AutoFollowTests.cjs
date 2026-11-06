@@ -17,8 +17,9 @@ function create(bundleId = '') {
   states.set('phone|a', a); states.set('phone|b', b);
   const targets = {devices: [phone, {id: 'other', apps: [{bundleId: 'c', foreground: true, stateConnected: true}]}], deviceId: 'phone', bundleId, pinned: false, followRevision: 0, hadDevice: true};
   const appState = {value: 'online', connected: !!bundleId};
+  const state = {selected: null, nodes: new Map()};
   const ctx = {
-    targets, appState, targetStateHub: {ready: true, epoch: 'one', revision: 1, states},
+    targets, appState, state, targetStateHub: {ready: true, epoch: 'one', revision: 1, states},
     currentDevice: () => targets.devices.find(d => d.id === targets.deviceId),
     currentApp: () => ctx.currentDevice()?.apps.find(a => a.bundleId === targets.bundleId),
     stayingOffline: () => false, pendingSwitch: null, pageActivity: {active: true},
@@ -34,7 +35,7 @@ function create(bundleId = '') {
   };
   vm.createContext(ctx);
   vm.runInContext(section('function appInBackground(app)', '// 选择在后台的 App') +
-    section('function currentAppAway()', 'function switchTargetInPlace(') +
+    section('function hasCachedBackgroundSelection()', 'function switchTargetInPlace(') +
     section('async function probeForeground()', '// 只有 App 明确返回的前后台状态') +
     section('const foregroundCheck = ', '// 定时刷新设备列表') +
     section('function targetBundleId(', '// 地址参数指定的'), ctx);
@@ -81,6 +82,18 @@ function create(bundleId = '') {
   assert(desktop.fallback[0].at >= 1000, 'A short transition must not flicker to device-only');
   assert.equal(desktop.targets.deviceId, 'phone', 'Other foreground devices never steal selection');
 
+  const cached = create('a'); cached.ctx.state.selected = 'label'; cached.ctx.state.nodes.set('label', {});
+  cached.a.foreground = false; cached.b.foreground = true; cached.appState.value = 'background';
+  await cached.ctx.checkForeground();
+  assert.equal(cached.targets.bundleId, 'a', 'A background app stays selected when it has a cached hierarchy');
+  assert.deepEqual(cached.follows, [], 'A cached selection is not replaced by another foreground app');
+  assert.deepEqual(cached.fallback, [], 'A cached selection is not cleared by falling back to device-only');
+
+  const exited = create('a'); exited.ctx.state.selected = 'label'; exited.ctx.state.nodes.set('label', {});
+  exited.a.foreground = false; exited.appState.value = 'offline'; exited.appState.connected = false;
+  await exited.ctx.checkForeground(); await exited.settle();
+  assert.equal(exited.fallback.length, 1, 'A cache from an exited app still falls back to device-only');
+
   const unknown = create('a'); unknown.a.foreground = undefined; unknown.appState.connected = false;
   await unknown.ctx.checkForeground(); assert.equal(unknown.fallback.length, 0, 'Timeout alone is not background evidence');
   const oldSDK = create(); oldSDK.a.foreground = undefined;
@@ -114,5 +127,5 @@ function create(bundleId = '') {
   assert.equal(malformed.ctx.savedTarget().pinned, false);
   malformed.ctx.localStorage.getItem = () => JSON.stringify({deviceId:'phone', bundleId:'com.valid-app_1', pinned:true});
   assert.equal(malformed.ctx.savedTarget().bundleId, 'com.valid-app_1');
-  console.log('PASS auto-follow: device association, pin persistence/resume, desktop grace, device isolation, unknown states and stale probes');
+  console.log('PASS auto-follow: device association, pin persistence/resume, cached background selection, desktop grace, device isolation, unknown states and stale probes');
 })().catch(error => { console.error(error); process.exitCode = 1; });
