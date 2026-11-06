@@ -90,6 +90,16 @@
     </div>
     <div class="toolbar-actions">
       <button class="icon-btn has-live-only" id="xcodeRun" title="在 Xcode 中运行" aria-label="在 Xcode 中运行"><svg class="icon"><use href="#i-play"/></svg></button>
+      <div class="popover-anchor run-mode-anchor">
+        <button class="icon-btn" id="runModeBtn" title="运行方式" aria-label="运行方式" aria-haspopup="menu" aria-expanded="false"><svg class="icon"><use href="#i-chevron-down"/></svg></button>
+        <div class="popover menu run-mode-menu" id="runModeMenu" role="menu" hidden>
+          <div class="run-menu-heading">Xcode 版本</div>
+          <div id="xcodeVersionItems"><button class="menu-item run-mode-item" role="menuitemradio" data-xcode-path="" aria-checked="true"><span>系统默认</span><span class="run-mode-check" aria-hidden="true">✓</span></button></div>
+          <div class="run-menu-heading">运行方式</div>
+          <button class="menu-item run-mode-item" role="menuitemradio" data-run-mode="command" aria-checked="true"><span>命令行运行</span><span class="run-mode-check" aria-hidden="true">✓</span></button>
+          <button class="menu-item run-mode-item" role="menuitemradio" data-run-mode="xcode" aria-checked="false"><span>在 Xcode 中运行</span><span class="run-mode-check" aria-hidden="true">✓</span></button>
+        </div>
+      </div>
       <button class="icon-btn" id="refreshBtn" title="刷新 (R)" aria-label="刷新"><svg class="icon"><use href="#i-refresh"/></svg></button>
     </div>
   </div>
@@ -102,6 +112,7 @@
     <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
 </header>
+<div id="runProgress" class="run-progress" role="status" hidden></div>
 
 <div class="popover-anchor event-anchor"><div class="popover event-pop" id="eventPop" hidden></div></div>
 
@@ -389,6 +400,10 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<div class="run-error" id="runError" role="alert" hidden>
+  <div class="run-error-text" id="runErrorText"></div>
+  <button class="icon-btn run-error-close" id="runErrorClose" title="关闭" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+</div>
 <script src="/assets/i18n.js"></script>
 <script src="/assets/select-guard.js"></script>
 <script src="/assets/net-columns.js"></script>

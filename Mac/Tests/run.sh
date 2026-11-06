@@ -63,6 +63,7 @@ swift_test target-state Mac/LayerLens/TargetStateHub.swift Mac/Tests/TargetState
 swift_test git-paths Mac/LayerLens/GitController.swift Mac/Tests/GitPathTests.swift
 swift_test streams-pty Mac/LayerLens/BoundedStreamWriter.swift Mac/LayerLens/PTYInputWriter.swift Mac/Tests/StreamAndPTYTests.swift
 swift_test proxy Mac/LayerLens/HTTPMessage.swift Mac/LayerLens/ProxyTunnel.swift Mac/Tests/ProxyTunnelTests.swift
+swift_test command-run Mac/LayerLens/CommandRunController.swift Mac/LayerLens/XcodeController.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/CommandRunTests.swift
 swift_test run-plan Mac/LayerLens/XcodeController.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/XcodeRunPlanTests.swift
 swift_test process-capture Mac/LayerLens/BoundedProcess.swift Mac/Tests/ProcessCaptureTests.swift
 swift_test lifecycle "${common[@]}" Mac/LayerLens/AppLogRecorder.swift Mac/Tests/ConnectionLifecycleTests.swift
@@ -78,7 +79,7 @@ swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift 
 
 for file in \
   GitViewStateTests.cjs GitInteractionTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs TargetTaskTests.cjs AutoFollowTests.cjs LiveVideoDecoderTests.cjs NetworkAsyncStateTests.cjs \
-  NetworkCaptureActionTests.cjs NetworkViewerWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LivePixelZoomTests.cjs; do
+  NetworkCaptureActionTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LivePixelZoomTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"
 done

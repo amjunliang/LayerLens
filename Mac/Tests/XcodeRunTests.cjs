@@ -5,11 +5,12 @@ const assert = require('node:assert/strict');
 const source = fs.readFileSync(path.join(__dirname, '../../Web/app.js'), 'utf8');
 const code = source.slice(source.indexOf('const RUN_POLL_MS ='), source.indexOf('function setLiveInspect(on)'));
 function create(ignoreAbort = false) {
-  const timers = new Map(), requests = [], states = [], notices = [];
+  const timers = new Map(), requests = [], states = [], notices = [], modes = [];
   let serial = 0;
   const ctx = {
     AbortController, TypeError, targets: { deviceId: 'phone-a', bundleId: 'app-a' }, appState: { connected: true }, currentApp: () => ({foreground: true}), appInBackground: app => app.foreground === false,
     $: () => ({ classList: { toggle() {} } }), t: text => text,
+    setMode: mode => modes.push(mode),
     setAppState: state => { states.push(state); ctx.appState.value = state; }, toast: text => notices.push(text),
     setTimeout: (callback, delay) => { timers.set(++serial, { callback, delay }); return serial; },
     clearTimeout: id => timers.delete(id),
@@ -20,7 +21,7 @@ function create(ignoreAbort = false) {
   };
   vm.createContext(ctx); vm.runInContext(code, ctx);
   return {
-    ctx, requests, states, notices, timers,
+    ctx, requests, states, notices, timers, modes,
     run: () => ctx.xcodeRun(), stop: () => ctx.setRunning(false),
     running: () => vm.runInContext('xcode.running', ctx),
     reply: (index, data, ok = true) => requests[index].resolve({ ok, status: ok ? 200 : 400, json: async () => data }),
@@ -96,6 +97,14 @@ function create(ignoreAbort = false) {
   const failure = background.fire(1000);
   background.reply(1, {status: 'failed', detail: 'build failed'}); await failure;
   assert.equal(background.states.at(-1), 'background', 'Failed run must not mark background app online');
+  const switchOnBuild = create(), pendingSwitch = switchOnBuild.run();
+  assert.deepEqual(switchOnBuild.modes, [], 'Xcode lookup must not switch the view');
+  switchOnBuild.reply(0, {runId: 'accepted'}); await pendingSwitch;
+  assert.deepEqual(switchOnBuild.modes, ['live'], 'Accepted Xcode run switches to live');
+  switchOnBuild.stop();
+  const lookupFailure = create(), failedLookup = lookupFailure.run();
+  lookupFailure.reply(0, {error: 'project_not_open'}, false); await failedLookup;
+  assert.deepEqual(lookupFailure.modes, [], 'Xcode lookup failure must not switch the view');
   const missing = create(), missingRun = missing.run();
   missing.reply(0, {switched: false}); await missingRun;
   assert.equal(missing.running(), false, 'Unverified run must never enter status polling');

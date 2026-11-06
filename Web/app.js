@@ -1418,7 +1418,7 @@ function positionHoverTip() {
     return;
   }
   const pane = $('canvasPane').getBoundingClientRect();
-  const top = $('crumbs').getBoundingClientRect().bottom - pane.top;
+  const top = 0;
   const arrow = 5;
   const w = tip.offsetWidth;
   const h = tip.offsetHeight;
@@ -2896,12 +2896,12 @@ async function runTargetTask(job) {
   }
 }
 
-function activateSelectedAppLater(deviceId, bundleId, appName, action = 'switch') {
+function activateSelectedAppLater(deviceId, bundleId, appName, action = 'switch', ensureLive = true) {
   // 选择动作刚创建、尚未发出的任务可直接配置; 重试则创建全新任务。
   const job = targetTask && taskCurrent(targetTask) && targetTask.action === 'connect' && targetTask.phase === 'ready' ? targetTask : beginTargetTask(deviceId, bundleId, appName);
   job.appName = appName;
   job.action = action;
-  if (liveAvailable()) setMode('live');
+  if (ensureLive && liveAvailable()) setMode('live');
   pendingSwitch = job;
   setTaskPhase(job, 'queued');
   job.promise = new Promise(resolve => {
@@ -2942,6 +2942,8 @@ function switchTarget(deviceId, bundleId, activating = false, appName = '') {
   appState.connected = false;
   targets.deviceId = deviceId;
   targets.bundleId = '';
+  if (typeof reportCommandSelection === 'function') reportCommandSelection(deviceId, '');
+  if (typeof syncCommandRun === 'function') syncCommandRun();
   targets.deviceOnly = !bundleId;
   targets.idle = false;
   targets.hadDevice = !!currentDevice();
@@ -3143,6 +3145,8 @@ function targetAppRow(deviceId, app, background) {
   row.title = !away ? `${app.bundleId} · ${t('端口 {0}', app.port)}` : live ? `${app.bundleId} · ${t('已挂起或退出, 点击启动或切到前台')}` : `${app.bundleId} · ${t('设备未连接, 连上后自动恢复')}`;
   row.addEventListener('click', async () => {
     hidePopovers();
+    if (typeof reportCommandSelection === 'function') reportCommandSelection(deviceId, app.bundleId);
+    if (typeof protectCommandTargetChoice === 'function') protectCommandTargetChoice(deviceId, app.bundleId);
     // 已选中且在线时没有新目标; 保留正在加载的详情、截图和层级。
     if (current && !inBackground && !away && !pendingSwitch) {
       if (!appState.connected) watchApp();
@@ -3263,8 +3267,40 @@ function currentAppAway() {
   return !appState.connected && !!app && appInBackground(app);
 }
 
+const COMMAND_FOLLOW_GUARD_KEY = 'layerlens_command_follow_guard';
+function commandFollowGuard(device = targets.deviceId) {
+  try { return JSON.parse(sessionStorage.getItem(COMMAND_FOLLOW_GUARD_KEY) || '{}')[device] || null; } catch (e) { return null; }
+}
+function saveCommandFollowGuard(value, device = value?.device || targets.deviceId) {
+  try {
+    const guards = JSON.parse(sessionStorage.getItem(COMMAND_FOLLOW_GUARD_KEY) || '{}');
+    if (value) guards[device] = value;
+    else delete guards[device];
+    if (Object.keys(guards).length) sessionStorage.setItem(COMMAND_FOLLOW_GUARD_KEY, JSON.stringify(guards));
+    else sessionStorage.removeItem(COMMAND_FOLLOW_GUARD_KEY);
+  } catch (e) { /* ignore */ }
+}
+function protectCommandTargetChoice(device, app) {
+  const guard = commandFollowGuard(device);
+  if (guard && guard.app === app) saveCommandFollowGuard(null, device);
+  if (typeof commandRuns === 'undefined' || !targets.deviceId || !targets.bundleId) return;
+  const job = commandRuns.get(commandKey(targets.deviceId, targets.bundleId));
+  if (job && (device !== job.device || app !== job.app)) saveCommandFollowGuard({device: job.device, app: job.app, pending: true});
+}
+function finishCommandFollowGuard(job) {
+  const guard = commandFollowGuard(job.device);
+  if (guard && guard.app === job.app) {
+    guard.pending = false;
+    saveCommandFollowGuard(guard);
+  }
+}
 function followForeground(next) {
   if (targets.pinned || next[0] !== targets.deviceId) return;
+  const guard = commandFollowGuard(next[0]);
+  if (guard) {
+    if (guard.app === next[1] && guard.app !== targets.bundleId) return;
+    if (!guard.pending && guard.app !== next[1]) saveCommandFollowGuard(null, next[0]);
+  }
   const app = targets.devices.find((d) => d.id === next[0])?.apps.find((a) => a.bundleId === next[1]);
   switchTargetInPlace(next[1]);
   toast(t('已切换到前台 App {0}', app?.appName || next[1]));
@@ -3309,6 +3345,8 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
   }
   rememberTarget(targets.deviceId, bundleId);
   targets.bundleId = bundleId;
+  if (typeof reportCommandSelection === 'function') reportCommandSelection(targets.deviceId, bundleId);
+  if (typeof syncCommandRun === 'function') syncCommandRun();
   targets.deviceOnly = !bundleId;
   ++appInfoSeq;
   renderTargetLabel();
@@ -3714,6 +3752,8 @@ function showGuide() {
 const RUN_POLL_MS = 1000;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
 const xcode = { running: false, timer: null, job: null };
+let selectedXcodePath = '';
+try { selectedXcodePath = localStorage.getItem('layerlens_xcode_path') || ''; } catch (e) { /* ignore */ }
 
 // 由 LayerLens 驱动 Xcode, 它按 App 上报过的源文件路径找到对应的工作区
 function currentRun(job) {
@@ -3729,7 +3769,7 @@ async function callXcode(command, job) {
   try {
     const run = encodeURIComponent(job.runId || '');
     const res = command === 'run'
-      ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: job.bundleId, device: job.deviceId }), signal: controller.signal })
+      ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: job.bundleId, device: job.deviceId, ...(job.xcodePath ? {xcodePath: job.xcodePath} : {}) }), signal: controller.signal })
       : await fetch(`/api/hub/run-status?run=${run}`, { cache: 'no-store', signal: controller.signal });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -3744,6 +3784,7 @@ async function callXcode(command, job) {
 function runErrorText(e) {
   const messages = {
     xcode_not_running: t('Xcode 未打开'),
+    xcode_unavailable: t('所选 Xcode 不可用，请重新选择'),
     project_not_open: t('Xcode 中未打开本项目'),
     permission_denied: t('没有控制 Xcode 的权限, 请在 系统设置 › 隐私与安全性 › 自动化 中允许'),
     permission_required: t('需要允许 LayerLens 控制 Xcode'),
@@ -3788,7 +3829,7 @@ async function xcodeRun() {
     endRun();
     return;
   }
-  const job = { deviceId: targets.deviceId, bundleId: targets.bundleId, controller: new AbortController(), hint: null };
+  const job = { deviceId: targets.deviceId, bundleId: targets.bundleId, xcodePath: selectedXcodePath, controller: new AbortController(), hint: null };
   xcode.job = job;
   setRunning(true);
   try {
@@ -3799,6 +3840,7 @@ async function xcodeRun() {
       if (!currentRun(job)) return;
       if (!runId) throw new Error('xcode_scheme_unverified');
       job.runId = runId;
+      setMode('live');
     } finally {
       clearTimeout(job.hint);
     }
@@ -3838,6 +3880,166 @@ function setLiveInspect(on) {
   $('liveInspect').setAttribute('aria-pressed', String(on));
   syncLiveCursor();
 }
+
+// 命令行任务由 Mac 端按设备排队; 切换目标不终止其他设备任务。
+const commandRuns = new Map();
+const COMMAND_OWNER_KEY = 'layerlens_command_run_owner';
+let commandRunSession = null;
+try { commandRunSession = JSON.parse(sessionStorage.getItem(COMMAND_OWNER_KEY) || 'null'); } catch (e) { /* ignore */ }
+const commandRunOwner = typeof commandRunSession?.owner === 'string' && commandRunSession.owner ? commandRunSession.owner : crypto.randomUUID();
+let commandRunOrder = Number.isSafeInteger(commandRunSession?.order) && commandRunSession.order >= 0 ? commandRunSession.order : 0;
+function nextCommandRunOrder() {
+  commandRunOrder++;
+  try { sessionStorage.setItem(COMMAND_OWNER_KEY, JSON.stringify({owner: commandRunOwner, order: commandRunOrder})); } catch (e) { /* ignore */ }
+  return commandRunOrder;
+}
+let lastCommandSelectionOrder = 0;
+function reportCommandSelection(device, app) {
+  const order = nextCommandRunOrder();
+  lastCommandSelectionOrder = order;
+  const body = JSON.stringify({owner: commandRunOwner, device: device || '', app: app || '', order});
+  const send = (attempt) => fetch('/api/hub/command-run-selection', {method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true})
+    .then((response) => { if (!response.ok) throw new Error('selection update failed'); })
+    .catch(() => { if (attempt < 3 && lastCommandSelectionOrder === order) setTimeout(() => send(attempt + 1), 500); });
+  send(0);
+}
+let runMode = 'command';
+try { runMode = localStorage.getItem('layerlens_run_mode') || 'command'; } catch (e) { /* ignore */ }
+if (!['command', 'xcode'].includes(runMode)) runMode = 'command';
+function showCommandRunError(detail) {
+  $('runErrorText').textContent = t('运行失败: {0}', detail);
+  $('runError').hidden = false;
+}
+function commandKey(device, app) { return device + '|' + app; }
+function syncCommandRun() {
+  if (runMode !== 'command') return;
+  const job = commandRuns.get(commandKey(targets.deviceId, targets.bundleId));
+  const active = !!job;
+  $('xcodeRun').classList.toggle('loading', active);
+  $('xcodeRun').title = active ? t('正在运行… 点击取消') : t('命令行运行');
+  $('xcodeRun').setAttribute('aria-label', $('xcodeRun').title);
+  const progress = $('runProgress');
+  progress.hidden = !active;
+  if (active) progress.textContent = t(job.label || '等待运行') + (job.progress ? ' · ' + job.progress : '');
+}
+let commandRunsRevision = 0;
+const commandRunDeviceRevision = new Map();
+function restoreSelectedAfterCommand(job, result) {
+  const guard = commandFollowGuard(job.device);
+  if (result !== 'succeeded' || !pageActivity.active || !guard || guard.app !== job.app || targets.deviceId !== job.device || !targets.bundleId || targets.bundleId === job.app) return;
+  const app = currentApp();
+  if (app && currentDevice()) activateSelectedAppLater(job.device, targets.bundleId, app.appName || targets.bundleId, 'switch', false);
+}
+function trackCommandRun(job) {
+  if (job.polling) return;
+  job.polling = true;
+  const key = commandKey(job.device, job.app);
+  const current = () => commandRuns.get(key) === job;
+  const poll = async () => {
+    if (!current()) return;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      let response, result;
+      try {
+        response = await fetch('/api/hub/command-run-status?run=' + encodeURIComponent(job.id), {cache: 'no-store', signal: controller.signal});
+        if (!current()) return;
+        if (response.status === 404) {
+          commandRuns.delete(key); finishCommandFollowGuard(job); syncCommandRun(); return;
+        }
+        result = await response.json();
+      } finally { clearTimeout(timeout); }
+      if (!current()) return;
+      if (!response.ok) throw new Error(result.error || '运行状态不可用');
+      if (result.buildStarted && !job.liveSwitched && job.device === targets.deviceId && job.app === targets.bundleId) {
+        job.liveSwitched = true;
+        setMode('live');
+      }
+      if (['succeeded', 'failed', 'cancelled', 'superseded', 'skipped'].includes(result.status)) {
+        commandRuns.delete(key);
+        restoreSelectedAfterCommand(job, result.status);
+        const guard = commandFollowGuard(job.device);
+        if (result.status === 'skipped' && guard?.app === job.app) saveCommandFollowGuard(null, job.device);
+        else finishCommandFollowGuard(job);
+        syncCommandRun();
+        if (job.device === targets.deviceId && job.app === targets.bundleId && result.status === 'failed') showCommandRunError(result.detail);
+        return;
+      }
+      const labels = {queued: '等待运行', resolving: '正在查找项目', validating: '正在验证项目', building: '正在编译', installing: '正在安装', launching: '正在启动'};
+      job.label = labels[result.status] || '正在运行';
+      job.progress = ['resolving', 'building'].includes(result.status) ? result.detail || '' : '';
+      if (job.device === targets.deviceId && job.app === targets.bundleId && runMode === 'command') syncCommandRun();
+      setTimeout(poll, 1000);
+    } catch (error) {
+      // 一次网络错误不能当成任务结束；提示重连并继续查询。
+      if (current()) {
+        job.label = '正在重新连接运行状态'; job.progress = '';
+        if (job.device === targets.deviceId && job.app === targets.bundleId) syncCommandRun();
+        setTimeout(poll, 1000);
+      }
+    }
+  };
+  setTimeout(poll, 1000);
+}
+async function restoreCommandRuns(attempt = 0) {
+  const revision = commandRunsRevision;
+  try {
+    const response = await fetch('/api/hub/command-runs', {cache: 'no-store'});
+    if (!response.ok) throw new Error('运行状态不可用');
+    const data = await response.json();
+    if (!Array.isArray(data.runs)) throw new Error('运行状态不可用');
+    for (const entry of data.runs) {
+      if (!entry.runId || !entry.device || !entry.app || (commandRunDeviceRevision.get(entry.device) || 0) > revision) continue;
+      const key = commandKey(entry.device, entry.app);
+      if ([...commandRuns.values()].some((job) => job.device === entry.device)) continue;
+      if (targets.deviceId === entry.device && targets.bundleId && targets.bundleId !== entry.app) {
+        saveCommandFollowGuard({device: entry.device, app: entry.app, pending: true});
+      }
+      const job = {device: entry.device, app: entry.app, id: entry.runId, liveSwitched: !!entry.buildStarted};
+      commandRuns.set(key, job);
+      trackCommandRun(job);
+    }
+    const guard = commandFollowGuard();
+    if (guard?.pending && !data.runs.some((job) => job.device === guard.device && job.app === guard.app)) {
+      guard.pending = false; saveCommandFollowGuard(guard);
+    }
+    syncCommandRun();
+  } catch (e) {
+    if (attempt < 3) setTimeout(() => restoreCommandRuns(attempt + 1), 1500);
+  }
+}
+async function commandRun() {
+  const device = targets.deviceId, app = targets.bundleId;
+  if (!device || !app) return;
+  commandRunsRevision++;
+  commandRunDeviceRevision.set(device, commandRunsRevision);
+  const key = commandKey(device, app), existing = commandRuns.get(key);
+  if (existing) {
+    existing.cancelled = true;
+    if (existing.id) fetch('/api/hub/command-run-cancel', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({run: existing.id})}).catch(() => {});
+    commandRuns.delete(key); finishCommandFollowGuard(existing); syncCommandRun(); return;
+  }
+  const guard = commandFollowGuard(device);
+  if (guard) saveCommandFollowGuard(null, device);
+  for (const [oldKey, oldJob] of commandRuns) {
+    if (oldJob.device === device) commandRuns.delete(oldKey);
+  }
+  const job = {device, app, cancelled: false, order: nextCommandRunOrder()};
+  commandRuns.set(key, job); syncCommandRun();
+  const current = () => commandRuns.get(key) === job;
+  try {
+    const path = typeof selectedXcodePath === 'undefined' ? '' : selectedXcodePath;
+    const res = await fetch('/api/hub/command-run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, app, owner: commandRunOwner, order: job.order, ...(path ? {xcodePath: path} : {})})});
+    const result = await res.json();
+    if (!res.ok || !result.runId) throw new Error(result.error || '运行失败');
+    job.id = result.runId;
+    if (job.cancelled) { await fetch('/api/hub/command-run-cancel', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({run: job.id})}); return; }
+    if (current()) trackCommandRun(job);
+  } catch (error) {
+    if (current()) { commandRuns.delete(key); finishCommandFollowGuard(job); syncCommandRun(); showCommandRunError(error.message); }
+  }
+}
+function runSelected() { if (runMode === 'xcode') xcodeRun(); else commandRun(); }
 
 function syncLiveCursor() {
   $('liveWrap').classList.toggle('inspecting', canInspect() && (live.inspect || live.altHeld));
@@ -4026,8 +4228,67 @@ function setupLiveEvents() {
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
   $('menuHeal').addEventListener('click', () => openPanel('heal'));
-  $('xcodeRun').addEventListener('click', xcodeRun);
-  $('appBannerRun').addEventListener('click', xcodeRun);
+  $('runErrorClose').addEventListener('click', () => { $('runError').hidden = true; });
+  const syncRunModeMenu = () => {
+    $('runModeMenu').querySelectorAll('[data-run-mode]').forEach(item => item.setAttribute('aria-checked', String(item.dataset.runMode === runMode)));
+    $('runModeMenu').querySelectorAll('[data-xcode-path]').forEach(item => item.setAttribute('aria-checked', String(item.dataset.xcodePath === selectedXcodePath)));
+  };
+  let xcodeMenuRevision = 0;
+  const refreshXcodeMenu = async () => {
+    const revision = ++xcodeMenuRevision;
+    try {
+      const response = await fetch('/api/hub/xcodes', {cache: 'no-store'});
+      if (!response.ok) return;
+      const data = await response.json();
+      if (revision !== xcodeMenuRevision || !Array.isArray(data.xcodes)) return;
+      const menu = $('xcodeVersionItems');
+      menu.replaceChildren();
+      const versions = data.xcodes;
+      const defaultVersion = versions.find(x => x.path === data.defaultPath)?.version;
+      const defaultItem = document.createElement('button');
+      defaultItem.className = 'menu-item run-mode-item'; defaultItem.dataset.xcodePath = '';
+      defaultItem.setAttribute('role', 'menuitemradio');
+      defaultItem.append(el('span', null, defaultVersion ? t('系统默认（{0}）', defaultVersion) : t('系统默认')), el('span', 'run-mode-check', '✓'));
+      menu.append(defaultItem);
+      if (selectedXcodePath && !versions.some(x => x.path === selectedXcodePath)) {
+        const missing = document.createElement('button');
+        missing.className = 'menu-item run-mode-item'; missing.dataset.xcodePath = selectedXcodePath;
+        missing.setAttribute('role', 'menuitemradio'); missing.title = selectedXcodePath;
+        missing.append(el('span', null, t('所选 Xcode 不可用，请重新选择')), el('span', 'run-mode-check', '✓'));
+        menu.append(missing);
+      }
+      versions.forEach(x => {
+        const item = document.createElement('button');
+        item.className = 'menu-item run-mode-item'; item.dataset.xcodePath = x.path;
+        item.setAttribute('role', 'menuitemradio'); item.title = x.path;
+        const duplicate = versions.filter(other => other.version === x.version).length > 1;
+        item.append(el('span', null, `Xcode ${x.version}` + (duplicate ? ` (${x.name})` : '')), el('span', 'run-mode-check', '✓'));
+        menu.append(item);
+      });
+      syncRunModeMenu();
+    } catch (e) { /* keep the existing menu on connection errors */ }
+  };
+  syncRunModeMenu();
+  syncCommandRun();
+  $('runModeBtn').addEventListener('click', () => {
+    togglePopover('runModeMenu');
+    if (!$('runModeMenu').hidden) refreshXcodeMenu();
+    $('runModeBtn').setAttribute('aria-expanded', String(!$('runModeMenu').hidden && !$('runModeMenu').classList.contains('closing')));
+  });
+  $('runModeMenu').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-run-mode], [data-xcode-path]');
+    if (!item) return;
+    hidePopovers();
+    if (Object.hasOwn(item.dataset, 'xcodePath')) selectedXcodePath = item.dataset.xcodePath;
+    else runMode = item.dataset.runMode;
+    $('runProgress').hidden = true;
+    if (runMode === 'xcode') $('xcodeRun').setAttribute('aria-label', t('在 Xcode 中运行'));
+    try { localStorage.setItem('layerlens_run_mode', runMode); localStorage.setItem('layerlens_xcode_path', selectedXcodePath); } catch (e) { /* ignore */ }
+    syncRunModeMenu();
+    syncCommandRun();
+  });
+  $('xcodeRun').addEventListener('click', runSelected);
+  $('appBannerRun').addEventListener('click', runSelected);
   $('emptyGuide').addEventListener('click', (e) => {
     const value = e.target.closest('.live-copy')?.dataset.copy;
     if (value) copyText(value, '复制');
@@ -4939,6 +5200,7 @@ function togglePopover(id) {
 
 function hidePopovers() {
   document.querySelectorAll('.popover').forEach((p) => hideLayer(p, 120));
+  document.getElementById('runModeBtn')?.setAttribute('aria-expanded', 'false');
 }
 
 // 浮层显示时由 CSS 播放进入动画; 隐藏时先加 closing 播放退出动画, 结束后再设置 hidden(或执行 done)
@@ -8353,6 +8615,8 @@ async function start() {
   pageActivity.ready = true;
   migrateTargetHistory();
   pickTarget();
+  reportCommandSelection(targets.deviceId, targets.bundleId);
+  restoreCommandRuns();
   const device = currentDevice();
   targets.hadDevice = !!device;
   renderTargetMenu();

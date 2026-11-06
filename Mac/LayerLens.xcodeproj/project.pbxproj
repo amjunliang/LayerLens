@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A17B00000000000000000001 /* CommandRunController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17B00000000000000000002 /* CommandRunController.swift */; };
 		AB680FEC14FD4489A1F01401 /* TargetHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01402 /* TargetHistory.swift */; };
 		AB680FEC14FD4489A1F01305 /* PTYInputWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */; };
 		AB680FEC14FD4489A1F01303 /* BoundedStreamWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */; };
@@ -46,6 +47,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A17B00000000000000000002 /* CommandRunController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandRunController.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01402 /* TargetHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetHistory.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01306 /* PTYInputWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYInputWriter.swift; sourceTree = "<group>"; };
 		AB680FEC14FD4489A1F01304 /* BoundedStreamWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedStreamWriter.swift; sourceTree = "<group>"; };
@@ -147,6 +149,7 @@
 				A8A5E293AB236D76F2865CE7 /* WebSocketConnection.swift */,
 				7BD19405B2FDC9FD18D3B5DF /* WindowFrameStore.swift */,
 				8BEB09D7814382476662F06E /* XcodeController.swift */,
+				A17B00000000000000000002 /* CommandRunController.swift */,
 			);
 			path = LayerLens;
 			sourceTree = "<group>";
@@ -288,6 +291,7 @@
 				0222D62A394604CBF572D393 /* WebSocketConnection.swift in Sources */,
 				217C92BE894BC97978F9F94C /* WindowFrameStore.swift in Sources */,
 				5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */,
+				A17B00000000000000000001 /* CommandRunController.swift in Sources */,
 				2DD9BFD52FB292F43357B5B1 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

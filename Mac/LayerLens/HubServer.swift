@@ -23,6 +23,7 @@ final class HubServer {
     let queue = DispatchQueue(label: "com.layerlens.hub")
     let registry: TargetRegistry
     private let xcode = XcodeController()
+    private let commandRun = CommandRunController()
     private let live = SimulatorLive()
     private let deviceLive = DeviceLive()
     private let appLogs = AppLogRecorder()
@@ -30,7 +31,7 @@ final class HubServer {
     private let git = GitController()
     private let targetStates = TargetStateBroadcaster()
     let terminal = TerminalController()
-    func stopDeviceLive() { deviceLive.shutdown(); appLogs.stop(); network.stop() }
+    func stopDeviceLive() { commandRun.shutdown(); deviceLive.shutdown(); appLogs.stop(); network.stop() }
     /// AppleScript 与 simctl 较慢, 不占用服务队列
     private let workQueue = DispatchQueue(label: "com.layerlens.hub.work", attributes: .concurrent)
     /// 同一设备的 App 激活必须串行; 运行中的命令结束后只执行排队目标中的最后一个
@@ -248,6 +249,17 @@ final class HubServer {
         case "/api/hub/app-logs/stream":
             // 日志面板的事件流, 连接交给日志记录持有, 网页断开时释放
             appLogs.subscribe(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "", connection: connection.detach())
+        case "/api/hub/xcodes":
+            workQueue.async {
+                let versions = XcodeController.installedXcodes().map { ["path": $0.path, "version": $0.version, "name": $0.name] }
+                connection.respond(.json(["xcodes": versions, "defaultPath": XcodeController.defaultXcodePath() ?? ""]))
+            }
+        case "/api/hub/command-runs":
+            connection.respond(.json(["runs": commandRun.currentRuns()]))
+        case "/api/hub/command-run-status":
+            if let state = commandRun.status(id: head.query["run"] ?? "") {
+                connection.respond(.json(["status": state.0, "detail": state.1, "buildStarted": state.2]))
+            } else { connection.respond(.error(404, "Run not found")) }
         case "/api/hub/run-status":
             let runId = head.query["run"] ?? ""
             workQueue.async { [self] in
@@ -325,6 +337,25 @@ final class HubServer {
     private func handlePost(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
         switch head.path {
+        case "/api/hub/command-run":
+            let bundle = json["app"] as? String ?? ""
+            let device = json["device"] as? String ?? ""
+            guard !bundle.isEmpty, !device.isEmpty else { connection.respond(.error(400, "Invalid target")); return }
+            let source = registry.sourceFile(bundleId: bundle)
+            registry.deviceKind(deviceId: device) { [self] kind in
+                guard let kind else { connection.respond(.error(404, "Device not found")); return }
+                let id = commandRun.start(device: device, bundle: bundle, source: source, simulator: kind == .simulator, owner: json["owner"] as? String ?? "", order: json["order"] as? Int ?? 0, xcodePath: json["xcodePath"] as? String ?? "")
+                connection.respond(.json(["runId": id]))
+            }
+        case "/api/hub/command-run-selection":
+            guard let owner = json["owner"] as? String, !owner.isEmpty,
+                  let device = json["device"] as? String, let app = json["app"] as? String,
+                  let order = json["order"] as? Int, order > 0 else { connection.respond(.error(400, "Invalid selection")); return }
+            commandRun.selectTarget(owner: owner, device: device, bundle: app, order: order)
+            connection.respond(.json(["ok": true]))
+        case "/api/hub/command-run-cancel":
+            commandRun.cancel(id: json["run"] as? String ?? "")
+            connection.respond(.json(["ok": true]))
         case "/api/hub/run":
             let bundleId = json["app"] as? String ?? ""
             let deviceId = json["device"] as? String ?? ""
@@ -335,7 +366,7 @@ final class HubServer {
                     return
                 }
                 workQueue.async { [self] in
-                    switch xcode.run(sourceFile: sourceFile, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator) {
+                    switch xcode.run(sourceFile: sourceFile, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator, xcodePath: json["xcodePath"] as? String ?? "") {
                     case .success(let runId):
                         connection.respond(.json(["ok": true, "switched": true, "runId": runId]))
                     case .failure(let failure):

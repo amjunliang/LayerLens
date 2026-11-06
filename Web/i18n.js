@@ -19,6 +19,20 @@ const LANG = (() => {
 })();
 
 const EN = {
+  '运行方式': 'Run Mode',
+  'Xcode 版本': 'Xcode Version',
+  '系统默认': 'System Default',
+  '系统默认（{0}）': 'System Default ({0})',
+  '命令行运行': 'Run from Command Line',
+  '等待运行': 'Waiting to Run',
+  '正在查找项目': 'Finding Project',
+  '正在验证项目': 'Checking Project',
+  '正在重新连接运行状态': 'Reconnecting Run Status',
+  '正在编译': 'Building',
+  '正在安装': 'Installing',
+  '正在启动': 'Launching',
+  '正在运行': 'Running',
+  '正在运行… 点击取消': 'Running… Click to Cancel',
   '取消选中（优先关闭菜单或弹窗）': 'Clear selection (close menus or dialogs first)',
   // 抓包开关与保存的启动
   '正在抓包, 记录保存在本机. 点击关闭': 'Capturing, records are saved on this Mac. Click to stop',
@@ -92,6 +106,8 @@ const EN = {
   '未连接': 'Not connected',
   '实时': 'Live',
   '在 Xcode 中运行': 'Run in Xcode',
+  '在 Xcode {0} 中运行': 'Run in Xcode {0}',
+  '所选 Xcode 不可用，请重新选择': 'Selected Xcode is unavailable; choose another',
   '刷新 (R)': 'Refresh (R)',
   '刷新': 'Refresh',
   '设置': 'Settings',

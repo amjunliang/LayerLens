@@ -15,6 +15,7 @@ final class XcodeController {
     struct Failure: Error {
         enum Code: String {
             case xcodeNotRunning = "xcode_not_running"
+            case xcodeUnavailable = "xcode_unavailable"
             case projectNotOpen = "project_not_open"
             case permissionDenied = "permission_denied"
             /// 尚未询问过用户, 点击运行时会弹出系统授权窗口
@@ -55,11 +56,14 @@ final class XcodeController {
     private var sessions: [String: RunSession] = [:]
 
     /// 精确匹配 Run Action 的 App Bundle ID, 不沿用无关 Scheme / 设备。
-    func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool) -> Result<String, Failure> {
+    func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool, xcodePath: String = "") -> Result<String, Failure> {
         guard operationLock.try() else { return .failure(Failure(code: .busy)) }
         defer { operationLock.unlock() }
         guard !bundleId.isEmpty, !deviceId.isEmpty else { return .failure(Failure(code: .schemeUnavailable)) }
-        return checkPermission(ask: true).flatMap { workspace(for: sourceFile) }.flatMap { xcode, path in
+        let selected = xcodePath.isEmpty ? Self.defaultXcodePath() : URL(fileURLWithPath: xcodePath).resolvingSymlinksInPath().path
+        guard let selected, Self.installedXcodes().contains(where: { $0.path == selected }) else { return .failure(Failure(code: .xcodeUnavailable)) }
+        guard runningXcodePaths().contains(where: { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == selected }) else { return .failure(.xcodeNotRunning) }
+        return checkPermission(ask: true).flatMap { workspace(for: sourceFile, xcodePath: selected) }.flatMap { xcode, path in
             let metadata = """
             set doc to first workspace document whose path is \(quoted(path))
             return (name of active scheme of doc) & linefeed & ((name of schemes of doc) as text)
@@ -147,10 +151,32 @@ final class XcodeController {
     /// 优先选择所在目录包含源文件的工作区(取最深的); 没有时(如 Pod 以本地路径引入)选与源文件公共路径最长且唯一的;
     /// 不知道源文件(App 从未连接过)时, 只有一个打开的工作区才使用它. 知道源文件却匹配不到时不运行其他项目.
     /// 汇总所有运行中 Xcode 打开的工作区一起匹配, 返回匹配到的 Xcode 应用路径和工作区路径
-    private func workspace(for sourceFile: String) -> Result<(xcode: String, path: String), Failure> {
+    static func installedXcodes() -> [(path: String, version: String, name: String)] {
+        var seen = Set<String>()
+        var urls = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: xcodeBundleId)
+        for directory in [URL(fileURLWithPath: "/Applications", isDirectory: true), FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)] {
+            urls += (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.filter { $0.pathExtension.lowercased() == "app" } ?? []
+        }
+        return urls.compactMap { url in
+            let path = url.resolvingSymlinksInPath().path
+            guard seen.insert(path).inserted, let bundle = Bundle(path: path), bundle.bundleIdentifier == xcodeBundleId,
+                  FileManager.default.isExecutableFile(atPath: path + "/Contents/Developer/usr/bin/xcodebuild") else { return nil }
+            return (path, bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?", URL(fileURLWithPath: path).lastPathComponent)
+        }.sorted { $0.version.localizedStandardCompare($1.version) == .orderedDescending }
+    }
+
+    static func defaultXcodePath() -> String? {
+        guard let result = BoundedProcess.capture("/usr/bin/xcode-select", ["-p"], timeout: 3), result.status == 0,
+              let output = String(data: result.data, encoding: .utf8) else { return nil }
+        let developer = URL(fileURLWithPath: output.trimmingCharacters(in: .whitespacesAndNewlines)).resolvingSymlinksInPath()
+        guard developer.lastPathComponent == "Developer", developer.deletingLastPathComponent().lastPathComponent == "Contents" else { return nil }
+        return developer.deletingLastPathComponent().deletingLastPathComponent().path
+    }
+
+    private func workspace(for sourceFile: String, xcodePath: String = "") -> Result<(xcode: String, path: String), Failure> {
         var owners: [(xcode: String, path: String)] = []
         var lastFailure: Failure?
-        for xcode in runningXcodePaths() {
+        for xcode in runningXcodePaths() where xcodePath.isEmpty || URL(fileURLWithPath: xcode).resolvingSymlinksInPath().path == URL(fileURLWithPath: xcodePath).resolvingSymlinksInPath().path {
             switch execute("return (path of workspace documents) as text", xcode: xcode) {
             case .success(let output):
                 output.components(separatedBy: "\n").filter { !$0.isEmpty }.forEach { owners.append((xcode, $0)) }

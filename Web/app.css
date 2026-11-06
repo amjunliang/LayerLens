@@ -229,6 +229,15 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 .toolbar-center { display: flex; align-items: center; gap: 8px; }
 /* 与模式切换同款外框, 高度一致 */
 .toolbar-actions { display: inline-flex; padding: 2px; background: none; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--border-strong); }
+.run-progress { position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 45; box-sizing: border-box; width: max-content; max-width: calc(100vw - 24px); padding: 4px 10px; border: 1px solid #484c54; border-radius: 6px; background: #2c2f35; box-shadow: var(--shadow); color: #fff; font-size: 14px; text-align: center; overflow-wrap: anywhere; pointer-events: none; }
+.run-progress[hidden] { display: none; }
+.toolbar-actions #runModeBtn { width: 22px; }
+.run-mode-menu { min-width: 168px; right: -28px; }
+.run-menu-heading { padding: 7px 12px 3px; color: var(--muted); font-size: 11px; }
+.menu-item.run-mode-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.run-mode-check { visibility: hidden; color: var(--accent); }
+.run-mode-item[aria-checked="true"] .run-mode-check { visibility: visible; }
+.run-mode-item:hover .run-mode-check { color: inherit; }
 .toolbar-actions .icon-btn { width: 32px; height: 24px; border-radius: 999px; color: var(--muted); }
 .toolbar-actions .icon-btn:hover { color: var(--text); }
 .toolbar-actions .icon-btn.loading { color: var(--accent); }
@@ -309,7 +318,7 @@ body:not(.mode-live) .live-only { display: none !important; }
 body.mode-3d .flat-only { display: none !important; }
 body:not(.has-live) .has-live-only { display: none; }
 /* 只选了设备时没有可运行的 App */
-body:not(.has-app) #xcodeRun { display: none; }
+body:not(.has-app) #xcodeRun, body:not(.has-app) .run-mode-anchor { display: none; }
 
 /* popover / menu (浮层圆角 6px) */
 .popover-anchor { position: relative; display: inline-flex; }
@@ -491,7 +500,7 @@ body.log-open .splitter[data-split="s4"] { display: block; }
 /* canvas */
 .canvas-pane { background: var(--stage-bg); position: relative; overflow: hidden; }
 .crumbs {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 2px;
   height: 26px;
@@ -755,6 +764,11 @@ table.ivars td:nth-child(2) { width: 24%; color: var(--text-2); }
 }
 .toast.show { opacity: 1; transform: translateX(-50%); }
 .toast.error { background: var(--danger); }
+.run-error { position: fixed; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 201; display: flex; gap: 8px; align-items: flex-start; box-sizing: border-box; width: min(640px, calc(100vw - 32px)); max-height: min(45vh, 400px); padding: 10px 8px 10px 12px; border-radius: var(--r-float); background: var(--danger); color: #fff; box-shadow: var(--shadow); }
+.run-error[hidden] { display: none; }
+.run-error-text { flex: 1; min-width: 0; max-height: calc(min(45vh, 400px) - 20px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.run-error-close { flex: none; color: inherit; }
+
 
 
 /* App 重启中或未运行: 画布顶部提示条, 右侧面板置灰 */
@@ -851,6 +865,11 @@ body.log-open .log-pane { display: flex; }
 .log-head { display: flex; align-items: center; gap: 2px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: var(--panel-head); }
 .log-head .icon-btn { width: 26px; height: 24px; flex: none; }
 .log-head .icon-btn.toggle.on { background: none; color: var(--accent); }
+@media (max-width: 1100px) {
+  .log-head { position: relative; flex-wrap: wrap; padding-right: 36px; }
+  .log-head #logClose { position: absolute; top: 4px; right: 6px; }
+  .log-head .net-session { max-width: min(260px, 100%); }
+}
 .log-search { flex: 1; min-width: 80px; margin-right: 4px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); }
 .log-search.invalid { box-shadow: inset 0 0 0 1px var(--danger); }
 .log-search input { padding: 3px 0; font: 13px var(--mono); }

@@ -9,6 +9,7 @@ function section(from, to) {
 }
 function create(bundleId = '') {
   let now = 0, stored = '', url = '', checks = 0;
+  const session = new Map();
   const follows = [], fallback = [], states = new Map();
   const a = {bundleId: 'a', appName: 'A', foreground: true, stateConnected: true};
   const b = {bundleId: 'b', appName: 'B', foreground: false, stateConnected: true};
@@ -29,7 +30,7 @@ function create(bundleId = '') {
     switchTarget: (device, bundle) => { fallback.push({device, bundle, at: now}); targets.deviceId = device; targets.bundleId = bundle; targets.followRevision++; appState.value = 'online'; appState.connected = false; },
     toast() {}, t: text => text, renderTargetMenu: () => checks++,
     TARGET_KEY: 'target', STAY_OFFLINE_KEY: 'offline', localStorage: {setItem: (_, value) => stored = value, getItem: () => stored},
-    sessionStorage: {removeItem() {}}, history: {replaceState: (_, __, value) => url = value}, location: {search: ''},
+    sessionStorage: {getItem: key => session.get(key) || null, setItem: (key, value) => session.set(key, value), removeItem: key => session.delete(key)}, history: {replaceState: (_, __, value) => url = value}, location: {search: ''},
   };
   vm.createContext(ctx);
   vm.runInContext(section('function appInBackground(app)', '// 选择在后台的 App') +
@@ -58,6 +59,20 @@ function create(bundleId = '') {
   device.ctx.setTargetPinned(false); await device.settle();
   assert.equal(device.stored().pinned, false); assert(!device.url().includes('pin='));
   assert.equal(device.follows.at(-1), 'a', 'Resume following immediately associates current app');
+
+  const running = create('a');
+  running.ctx.commandRuns = new Map([['phone|a', {device: 'phone', app: 'a'}]]);
+  running.ctx.commandKey = (device, app) => device + '|' + app;
+  running.ctx.protectCommandTargetChoice('phone', 'b');
+  running.targets.bundleId = 'b'; running.b.foreground = false; running.a.foreground = true; running.appState.value = 'background';
+  await running.ctx.checkForeground();
+  assert.deepEqual(running.follows, [], 'A running app must not pull the user away from their new selection');
+  running.ctx.finishCommandFollowGuard({device: 'phone', app: 'a'});
+  await running.ctx.checkForeground();
+  assert.deepEqual(running.follows, [], 'A just-launched app must stay suppressed after its run finishes');
+  running.ctx.protectCommandTargetChoice('phone', 'a');
+  await running.ctx.checkForeground();
+  assert.deepEqual(running.follows, ['a'], 'Explicitly choosing the running app releases the guard');
 
   const desktop = create('a'); desktop.a.foreground = false; desktop.appState.value = 'background';
   await desktop.ctx.checkForeground(); await desktop.settle();
