@@ -30,6 +30,8 @@ final class HubServer {
     private let network: NetworkRecorder
     private let git = GitController()
     private let targetStates = TargetStateBroadcaster()
+    private var pendingTargetState: [String: Any]?
+    private var targetStateFlush: DispatchWorkItem?
     let terminal = TerminalController()
     func stopDeviceLive() { commandRun.shutdown(); deviceLive.shutdown(); appLogs.stop(); network.stop() }
     /// AppleScript 与 simctl 较慢, 不占用服务队列
@@ -67,11 +69,12 @@ final class HubServer {
         }
         webRoot = Self.locateWebRoot()
         registry.onStatesChanged = { [weak self] state in
-            self?.queue.async { [weak self] in self?.targetStates.update(state) }
+            self?.queue.async { [weak self] in self?.queueTargetState(state) }
         }
         registry.onInventoryChanged = { [weak self] inventory in
             self?.queue.async { [weak self] in
                 guard let self else { return }
+                self.flushTargetState()
                 var value = inventory
                 value["hub"] = self.hubInfo
                 self.targetStates.updateInventory(value)
@@ -81,6 +84,22 @@ final class HubServer {
             appLogs.update(apps: apps)
             network.update(apps: apps)
         }
+    }
+
+    /// 前后台切换通常会产生两条相邻事件; 40ms 内只发送最终快照, 让网页一次拿到新前台 App。
+    private func queueTargetState(_ state: [String: Any]) {
+        pendingTargetState = state
+        guard targetStateFlush == nil else { return }
+        let work = DispatchWorkItem { [weak self] in self?.flushTargetState() }
+        targetStateFlush = work
+        queue.asyncAfter(deadline: .now() + .milliseconds(40), execute: work)
+    }
+
+    private func flushTargetState() {
+        targetStateFlush = nil
+        guard let state = pendingTargetState else { return }
+        pendingTargetState = nil
+        targetStates.update(state)
     }
 
     private var hubInfo: [String: Any] {

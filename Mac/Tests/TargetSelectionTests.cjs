@@ -30,6 +30,7 @@ const nodes = {}, state = {mode: 'live'}, appState = {value: 'offline', blank: t
 let saved = {}, requestedMode = '', notice = '', pane = '';
 const context = vm.createContext({
   targets, targetHistory, state, appState, pendingSwitch: null,
+  targetStateHub: {ready: false, foregroundTargets: new Map(), foregroundAmbiguous: new Set()},
   live: {real: true, error: 'stale capture error'}, net: {tab: 'log'},
   savedTarget: () => saved, currentDevice: () => targets.devices.find(d => d.id === targets.deviceId),
   currentDeviceGone: () => !!targets.deviceId && !targets.devices.some(d => d.id === targets.deviceId),
@@ -50,6 +51,15 @@ vm.runInContext(offlineSource + '\n' +
                 section('function showEmptyState(title, body)', '// 没有任何设备时的默认页') +
                 section('function requestMode(mode)', '// 画布视图快捷键'), context);
 assert.equal(context.nextTarget()[1], 'com.example.app', 'Device selection associates the known foreground app');
+targets.deviceId = 'phone'; targets.bundleId = '';
+context.targetStateHub.ready = true;
+context.targetStateHub.foregroundTargets.set('phone', 'com.example.app');
+assert.equal(context.nextTarget()[1], 'com.example.app', 'Mac foreground summary selects without scanning App records');
+context.targetStateHub.foregroundTargets.clear();
+context.targetStateHub.foregroundAmbiguous.add('phone');
+assert.equal(context.nextTarget(), null, 'Ambiguous foreground summaries do not choose arbitrarily');
+context.targetStateHub.ready = false;
+context.targetStateHub.foregroundAmbiguous.clear();
 targets.devices = []; targets.hadDevice = false;
 assert.equal(context.nextTarget(), null, 'Disconnected device choice must remain');
 context.showLiveGuide(); context.requestMode('live');

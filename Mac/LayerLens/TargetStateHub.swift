@@ -151,12 +151,33 @@ final class TargetStateMonitor {
             info["stateConnected"] = entry.connected || (entry.unsupported && entry.app.responding)
             return info
         }
+        let confirmed = Dictionary(grouping: apps) { $0["deviceId"] as? String ?? "" }
+        var foregroundTargets: [String: String] = [:]
+        var foregroundAmbiguous: [String] = []
+        for (deviceId, values) in confirmed {
+            let foreground = values.compactMap { app -> String? in
+                guard app["stateConnected"] as? Bool == true,
+                      app["foreground"] as? Bool == true,
+                      let bundleId = app["bundleId"] as? String else { return nil }
+                return bundleId
+            }
+            if foreground.count == 1 { foregroundTargets[deviceId] = foreground[0] }
+            else if foreground.count > 1 { foregroundAmbiguous.append(deviceId) }
+        }
         let count = entries.values.filter { $0.stream != nil }.count
-        let content: [String: Any] = ["apps": apps, "upstreamCount": count]
+        let content: [String: Any] = [
+            "apps": apps,
+            "upstreamCount": count,
+            "foregroundTargets": foregroundTargets,
+            "foregroundAmbiguous": foregroundAmbiguous.sorted(),
+        ]
         guard let encoded = try? JSONSerialization.data(withJSONObject: content, options: [.sortedKeys]), encoded != previous else { return }
         previous = encoded
         revision += 1
-        onChange?(apps, ["epoch": epoch, "revision": revision, "apps": apps, "upstreamCount": count])
+        var state = content
+        state["epoch"] = epoch
+        state["revision"] = revision
+        onChange?(apps, state)
     }
 
     func stop() {

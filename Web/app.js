@@ -2450,7 +2450,10 @@ function compatibilityWarning(app) {
 }
 
 // 每个窗口只连接 Mac 汇总状态; App 上游订阅由 Mac 统一维护。
-const targetStateHub = { socket: null, timer: 0, epoch: '', revision: -1, inventoryRevision: -1, ready: false, states: new Map() };
+const targetStateHub = {
+  socket: null, timer: 0, epoch: '', revision: -1, inventoryRevision: -1, ready: false,
+  states: new Map(), foregroundTargets: new Map(), foregroundAmbiguous: new Set(),
+};
 const targetStateKey = (device, app) => JSON.stringify([device, app]);
 
 function receiveTargetForeground(deviceId, bundleId, foreground) {
@@ -2488,6 +2491,8 @@ function acceptTargetStates(message) {
     targetStateHub.epoch = message.epoch;
     targetStateHub.revision = -1;
     targetStateHub.inventoryRevision = -1;
+    targetStateHub.foregroundTargets.clear();
+    targetStateHub.foregroundAmbiguous.clear();
   }
   const stateChanged = message.revision > targetStateHub.revision;
   const inventoryChanged = message.inventory && message.inventoryRevision > targetStateHub.inventoryRevision;
@@ -2501,6 +2506,16 @@ function acceptTargetStates(message) {
     for (const entry of message.removed || []) targetStateHub.states.set(targetStateKey(entry.deviceId, entry.bundleId), {...entry, removed: true});
   }
   targetStateHub.ready = true;
+  if (message.replace) {
+    targetStateHub.foregroundTargets.clear();
+    targetStateHub.foregroundAmbiguous.clear();
+  }
+  if (message.foregroundTargets && typeof message.foregroundTargets === 'object') {
+    targetStateHub.foregroundTargets = new Map(Object.entries(message.foregroundTargets));
+  }
+  if (Array.isArray(message.foregroundAmbiguous)) {
+    targetStateHub.foregroundAmbiguous = new Set(message.foregroundAmbiguous);
+  }
   if (inventoryChanged) {
     targetStateHub.inventoryRevision = message.inventoryRevision;
     applyTargetInventory(message.inventory);
@@ -2537,6 +2552,8 @@ function ensureTargetStateSocket() {
     // 同一 revision 的重连快照也需要重新同步。
     targetStateHub.revision = -1;
     targetStateHub.inventoryRevision = -1;
+    targetStateHub.foregroundTargets.clear();
+    targetStateHub.foregroundAmbiguous.clear();
     selectedTargetDisconnected();
     targetStateHub.timer = setTimeout(ensureTargetStateSocket, 2000);
   };
@@ -2674,6 +2691,11 @@ function appInForeground(app) {
 
 // 自动选择时优先前台的 App, 挂起的 App 现在也会留在列表里
 function firstAppId(device) {
+  if (targetStateHub.ready && device) {
+    const advertised = targetStateHub.foregroundTargets.get(device.id);
+    if (advertised && device.apps.some((app) => app.bundleId === advertised)) return advertised;
+    if (targetStateHub.foregroundAmbiguous.has(device.id)) return '';
+  }
   const foreground = device?.apps.filter((app) => app.stateReachable !== false && appInForeground(app)) || [];
   return foreground.length === 1 ? foreground[0].bundleId : '';
 }
@@ -3468,8 +3490,13 @@ function clearHierarchy() {
 async function probeForeground() {
   const device = currentDevice();
   if (!device) return null;
-  const others = device.apps.filter((a) => a.bundleId !== targets.bundleId);
   const epoch = targetStateHub.epoch, revision = targetStateHub.revision;
+  if (targetStateHub.ready) {
+    const advertised = targetStateHub.foregroundTargets.get(device.id);
+    if (advertised) return advertised === targets.bundleId ? null : [device.id, advertised];
+    if (targetStateHub.foregroundAmbiguous.has(device.id)) return null;
+  }
+  const others = device.apps.filter((a) => a.bundleId !== targets.bundleId);
   const found = await Promise.all(others.map(async (a) => {
     const entry = targetStateHub.ready && targetStateHub.states.get(targetStateKey(device.id, a.bundleId));
     if (entry && entry.stateReachable === false) return null;

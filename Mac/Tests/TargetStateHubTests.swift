@@ -41,8 +41,8 @@ final class WebSocketConnection {
         var now = Date()
         let monitor = TargetStateMonitor(now: { now }) { let stream = AppEventStream(); streams.append(stream); return stream }
         monitor.onChange = { _, snapshot in snapshots.append(snapshot) }
-        func app(_ device: String = "phone", instance: String = "one", port: UInt16 = 9527, foreground: Bool = true, responding: Bool = true) -> AppRecord {
-            var app = AppRecord(deviceId: device, bundleId: "test", endpoint: .local(port: port), info: ["bundleId": "test", "instanceId": instance, "foreground": foreground])
+        func app(_ device: String = "phone", bundle: String = "test", instance: String = "one", port: UInt16 = 9527, foreground: Bool = true, responding: Bool = true) -> AppRecord {
+            var app = AppRecord(deviceId: device, bundleId: bundle, endpoint: .local(port: port), info: ["bundleId": bundle, "instanceId": instance, "foreground": foreground])
             app.responding = responding
             return app
         }
@@ -50,6 +50,8 @@ final class WebSocketConnection {
         monitor.update([app()]); assert(streams.count == 1)
         streams[0].onOpen?(); streams[0].foreground(false)
         assert(latestApp()["foreground"] as? Bool == false)
+        assert((snapshots.last!["foregroundTargets"] as? [String: String])?.isEmpty == true,
+               "Background app must not be advertised as a foreground target")
         monitor.update([app()]) // old HTTP response cannot overwrite pushed background
         assert(latestApp()["foreground"] as? Bool == false && streams.count == 1)
         let count = snapshots.count
@@ -66,6 +68,8 @@ final class WebSocketConnection {
         assert(second.messages[0]["revision"] as? Int == snapshots.last!["revision"] as? Int)
         first.drain(); second.drain()
         streams[0].foreground(true); broadcaster.update(snapshots.last!)
+        assert((snapshots.last!["foregroundTargets"] as? [String: String])?["phone"] == "test",
+               "Unique confirmed foreground app must be included in the state summary")
         assert(first.messages.last!["replace"] as? Bool == false)
         assert((first.messages.last!["apps"] as! [[String: Any]])[0]["foreground"] as? Bool == true)
         let sent = first.messages.count
@@ -153,6 +157,21 @@ final class WebSocketConnection {
         let inventoryCount = inventoryViewer.messages.count
         inventoryHub.updateInventory(["devices": [["id": "phone"]], "simulators": [], "history": [:]])
         assert(inventoryViewer.messages.count == inventoryCount, "Unchanged inventory does not broadcast")
+        var summary: [String: Any] = [:]
+        var ambiguousStreams: [AppEventStream] = []
+        let ambiguous = TargetStateMonitor(now: { now }) {
+            let stream = AppEventStream(); ambiguousStreams.append(stream); return stream
+        }
+        ambiguous.onChange = { _, state in summary = state }
+        ambiguous.update([
+            app(bundle: "a", instance: "a", port: 9530),
+            app(bundle: "b", instance: "b", port: 9531),
+        ])
+        ambiguousStreams.forEach { $0.onOpen?() }
+        assert((summary["foregroundAmbiguous"] as? [String]) == ["phone"],
+               "Multiple confirmed foreground apps must be reported as ambiguous")
+        assert((summary["foregroundTargets"] as? [String: String])?.isEmpty == true)
+        ambiguous.stop()
         print("PASS native shared subscriptions, realtime state, scan races, restart, 404, reconnect, latest-only delivery and cleanup")
     }
 }

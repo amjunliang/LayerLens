@@ -19,7 +19,8 @@ function create(bundleId = '') {
   const appState = {value: 'online', connected: !!bundleId};
   const state = {selected: null, nodes: new Map()};
   const ctx = {
-    targets, appState, state, targetStateHub: {ready: true, epoch: 'one', revision: 1, states},
+    targets, appState, state,
+    targetStateHub: {ready: true, epoch: 'one', revision: 1, states, foregroundTargets: new Map(), foregroundAmbiguous: new Set()},
     currentDevice: () => targets.devices.find(d => d.id === targets.deviceId),
     currentApp: () => ctx.currentDevice()?.apps.find(a => a.bundleId === targets.bundleId),
     stayingOffline: () => false, pendingSwitch: null, pageActivity: {active: true},
@@ -84,6 +85,11 @@ function create(bundleId = '') {
   await followed.ctx.checkForeground();
   assert.deepEqual(followed.follows, ['b'], 'Another foreground app still takes over in follow mode');
   assert.equal(followed.targets.bundleId, 'b');
+
+  const advertised = create('a'); advertised.a.foreground = false; advertised.b.foreground = false; advertised.appState.value = 'background';
+  advertised.ctx.targetStateHub.foregroundTargets.set('phone', 'b');
+  await advertised.ctx.checkForeground();
+  assert.deepEqual(advertised.follows, ['b'], 'Mac foreground summary must be used without extra App queries');
 
   const exited = create('a'); exited.ctx.state.selected = 'label'; exited.ctx.state.nodes.set('label', {});
   exited.a.foreground = false; exited.appState.value = 'offline'; exited.appState.connected = false;
