@@ -35,7 +35,7 @@ function create(bundleId = '') {
   };
   vm.createContext(ctx);
   vm.runInContext(section('function appInBackground(app)', '// 选择在后台的 App') +
-    section('function hasCachedBackgroundSelection()', 'function switchTargetInPlace(') +
+    section('function selectedTargetInBackground()', 'function switchTargetInPlace(') +
     section('async function probeForeground()', '// 只有 App 明确返回的前后台状态') +
     section('const foregroundCheck = ', '// 定时刷新设备列表') +
     section('function targetBundleId(', '// 地址参数指定的'), ctx);
@@ -77,17 +77,13 @@ function create(bundleId = '') {
 
   const desktop = create('a'); desktop.a.foreground = false; desktop.appState.value = 'background';
   await desktop.ctx.checkForeground(); await desktop.settle();
-  assert.equal(desktop.fallback.length, 1);
-  assert.equal(desktop.fallback[0].device, 'phone'); assert.equal(desktop.fallback[0].bundle, '');
-  assert(desktop.fallback[0].at >= 1000, 'A short transition must not flicker to device-only');
-  assert.equal(desktop.targets.deviceId, 'phone', 'Other foreground devices never steal selection');
+  assert.equal(desktop.fallback.length, 0, 'Background alone must not change the selected target');
+  assert.equal(desktop.targets.bundleId, 'a', 'The last selected app remains selected without another foreground app');
 
-  const cached = create('a'); cached.ctx.state.selected = 'label'; cached.ctx.state.nodes.set('label', {});
-  cached.a.foreground = false; cached.b.foreground = true; cached.appState.value = 'background';
-  await cached.ctx.checkForeground();
-  assert.equal(cached.targets.bundleId, 'a', 'A background app stays selected when it has a cached hierarchy');
-  assert.deepEqual(cached.follows, [], 'A cached selection is not replaced by another foreground app');
-  assert.deepEqual(cached.fallback, [], 'A cached selection is not cleared by falling back to device-only');
+  const followed = create('a'); followed.a.foreground = false; followed.b.foreground = true; followed.appState.value = 'background';
+  await followed.ctx.checkForeground();
+  assert.deepEqual(followed.follows, ['b'], 'Another foreground app still takes over in follow mode');
+  assert.equal(followed.targets.bundleId, 'b');
 
   const exited = create('a'); exited.ctx.state.selected = 'label'; exited.ctx.state.nodes.set('label', {});
   exited.a.foreground = false; exited.appState.value = 'offline'; exited.appState.connected = false;
@@ -127,5 +123,5 @@ function create(bundleId = '') {
   assert.equal(malformed.ctx.savedTarget().pinned, false);
   malformed.ctx.localStorage.getItem = () => JSON.stringify({deviceId:'phone', bundleId:'com.valid-app_1', pinned:true});
   assert.equal(malformed.ctx.savedTarget().bundleId, 'com.valid-app_1');
-  console.log('PASS auto-follow: device association, pin persistence/resume, cached background selection, desktop grace, device isolation, unknown states and stale probes');
+  console.log('PASS auto-follow: device association, sticky background target, foreground handoff, pin persistence/resume, device isolation, unknown states and stale probes');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -3282,9 +3282,9 @@ function resumePendingLaunch() {
   launchAwayApp(deviceId, bundleId, targetHistory[deviceId]?.apps?.[bundleId]?.appName);
 }
 
-// 明确进入后台时保留当前层级快照和选中节点; 退出或断开仍走原有恢复流程。
-function hasCachedBackgroundSelection() {
-  return appState.value === 'background' && !!state.selected && state.nodes.has(state.selected);
+// 后台状态本身不改变目标; 有另一个前台 App 时仍由自动跟随切换。
+function selectedTargetInBackground() {
+  return appState.value === 'background' && !!targets.bundleId;
 }
 
 function currentAppAway() {
@@ -3532,15 +3532,15 @@ async function checkForeground() {
         const next = await probeForeground();
         if (targets.deviceId !== deviceId || logTargetKey() !== key || (targets.followRevision || 0) !== revision || !pageActivity.active || !currentAppAway()) continue;
         if (next) {
-          if (!hasCachedBackgroundSelection()) followForeground(next);
+          followForeground(next);
           return;
         }
         // 只有明确后台/已退出才退回设备; 通信超时仍是未知状态。
         const app = currentApp();
         const absent = targets.bundleId && (app ? appInBackground(app) : appState.value === 'offline');
         if (absent) {
-          // 已有选中层级时停在原 App: 后台期间继续展示缓存, 回到前台后原地刷新。
-          if (hasCachedBackgroundSelection()) return;
+          // 仅进入后台不切换目标; 没有其他前台 App 时保持当前选择。
+          if (selectedTargetInBackground()) return;
           if (missingKey !== key) { missingKey = key; missingSince = Date.now(); }
           if (Date.now() - missingSince >= 1000) {
             // 同设备切换保留视频 WebSocket、解码器和当前帧。
