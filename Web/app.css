@@ -1260,6 +1260,7 @@ body.log-open .log-pane { display: flex; }
 .net-detail-url-button { flex: none; width: 22px; height: 22px; }
 .net-detail-url-button[hidden], .net-detail-url-copy[hidden] { display: none; }
 .net-detail-url-copy { flex: none; width: 22px; height: 22px; }
+.net-detail-back { display: none; flex: none; width: 26px; height: 24px; }
 .net-detail-head.url-expanded { height: auto; min-height: 36px; align-items: flex-start; padding-top: 7px; padding-bottom: 7px; }
 .net-detail-head.url-expanded .net-detail-title, .net-detail-head.url-expanded .net-detail-url { align-items: flex-start; }
 .net-detail-head.url-expanded .net-detail-url-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 22px; }
@@ -1355,10 +1356,13 @@ body.log-open .log-pane { display: flex; }
   body.log-open:not(.logs-window):not(.log-max) .log-pane { position: absolute; grid-area: 1 / 1 / -1 / -1; left: 0; right: 0; bottom: 0; height: min(var(--log-h, 240px), calc(100% - 32px)); z-index: 42; border: 1px solid var(--border); border-radius: 0; box-shadow: var(--shadow); }
   body.log-open:not(.logs-window):not(.log-max) .splitter[data-split="s4"] { position: absolute; grid-area: 1 / 1 / -1 / -1; left: 0; right: 0; bottom: calc(min(var(--log-h, 240px), 100% - 32px) - 1px); z-index: 43; }
   .net-detail { position: absolute; inset: 0; width: auto; z-index: 3; }
+  .net-body:not(.has-detail) .net-detail { display: none; }
+  .net-detail-back { display: inline-flex; order: 1; }
   /* 窄屏差异覆盖底部面板上方的画布, 文件列表保持可见。 */
   .git-side { width: auto; max-width: none; min-width: 0; flex: 1; }
   .git-diff { position: absolute; inset: 0; z-index: 3; }
   body:not(.logs-window):not(.log-max) .git-diff { position: fixed; top: auto; left: 0; right: 0; bottom: min(var(--log-h, 240px), 100vh - 77px); height: max-content; max-height: max(0px, calc(100vh - min(var(--log-h, 240px), 100vh - 77px) - 117px)); z-index: 20; border: 1px solid var(--border); border-bottom: 0; border-radius: 0; overflow: hidden; box-shadow: var(--shadow); }
+  body:not(.logs-window):not(.log-max) .net-body.has-detail .net-detail { position: fixed; top: auto; left: 0; right: 0; bottom: min(var(--log-h, 240px), 100vh - 77px); height: max-content; max-height: max(0px, calc(100vh - min(var(--log-h, 240px), 100vh - 77px) - 117px)); z-index: 20; border: 1px solid var(--border); border-bottom: 0; border-radius: 0; overflow: hidden; box-shadow: var(--shadow); }
   .git-body:not(.has-diff) .git-diff { display: none; }
   .git-diff-back { display: inline-flex; transform: none; order: 1; }
   .net-splitter { display: none; }

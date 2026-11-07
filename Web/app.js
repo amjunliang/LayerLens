@@ -419,7 +419,8 @@ function hideMenu() {
 }
 
 // 失焦时暂停层级与舞台刷新；实时流继续解码和绘制，只释放当前触摸。
-const pageActivity = { active: false, ready: false, pending: false, controller: null, generation: 0 };
+const FOCUS_REFRESH_MIN_MS = 10 * 60_000;
+const pageActivity = { active: false, ready: false, pending: false, inactiveAt: 0, controller: null, generation: 0 };
 
 function pageHasFocus() {
   return document.visibilityState !== 'hidden' &&
@@ -435,6 +436,7 @@ function setupPageActivity() {
     ++pageActivity.generation;
     if (!active) {
       pageActivity.pending = true;
+      pageActivity.inactiveAt = Date.now();
       ++refreshSeq;
       pageActivity.controller?.abort();
       resetImages();
@@ -455,13 +457,15 @@ function setupPageActivity() {
 
 async function resumePageActivity() {
   const generation = pageActivity.generation;
+  const inactiveAt = pageActivity.inactiveAt;
+  pageActivity.inactiveAt = 0;
   try { await loadTargets(); } catch (_) { /* 下一次轮询再试 */ }
   if (!pageActivity.active || generation !== pageActivity.generation) return;
   renderTargetMenu();
   await reconcileTargets();
   if (state.mode !== 'live' && targets.bundleId && pageActivity.pending) {
     pageActivity.pending = false;
-    refresh();
+    if (inactiveAt && Date.now() - inactiveAt >= FOCUS_REFRESH_MIN_MS) refresh();
   }
 }
 
@@ -7527,6 +7531,7 @@ function netRecordIndex(id) {
 
 function selectNet(id) {
   net.selected = id;
+  $('netBody').classList.toggle('has-detail', !!id);
   scheduleNetRender();
   if (id) loadNetDetail(id);
   else closeNetDetail();
@@ -7603,6 +7608,7 @@ function closeNetDetail() {
   net.selected = 0;
   net.detail = null;
   net.detailToken++;
+  $('netBody').classList.remove('has-detail');
   $('netDetail').removeAttribute('aria-busy');
   $('netDetail').hidden = false;
   $('netSplitter').hidden = false;
@@ -7625,6 +7631,7 @@ async function fetchNetDetail(id) {
 async function loadNetDetail(id) {
   const token = ++net.detailToken;
   const panel = $('netDetail');
+  $('netBody').classList.add('has-detail');
   panel.hidden = false;
   $('netSplitter').hidden = false;
   // 已有详情时保留当前画面, 新数据准备好后一次替换, 避免先清空成加载占位再显示内容
@@ -7724,7 +7731,12 @@ function netDetailHead(record) {
   curl.addEventListener('click', () => copyNetCurl(net.detail?.id));
   curl.disabled = !net.detail;
   tools.appendChild(curl);
-  head.append(...[title, tabs, tools].filter(Boolean));
+  const back = el('button', 'icon-btn net-detail-back');
+  back.title = t('关闭');
+  back.setAttribute('aria-label', t('关闭'));
+  back.append(icon('close'));
+  back.addEventListener('click', closeNetDetail);
+  head.append(...[back, title, tabs, tools].filter(Boolean));
   top.appendChild(head);
   syncControls(top);
   return top;
@@ -8591,6 +8603,13 @@ function setup() {
     // 终端中的按键全部交给 shell, 如 vim 的 Esc
     if (e.target instanceof Element && e.target.closest('.xterm')) return;
     if (e.key === 'Escape') {
+      if (isNarrow() && logVisible() && net.tab === 'net' && net.selected && $('modal').hidden &&
+          !(e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) &&
+          !document.querySelector('.context-menu:not([hidden]), .popover:not([hidden])')) {
+        e.preventDefault();
+        closeNetDetail();
+        return;
+      }
       if (isNarrow() && logVisible() && net.tab === 'git' && git.selected && $('modal').hidden &&
           !(e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) &&
           !document.querySelector('.context-menu:not([hidden]), .popover:not([hidden])')) {
