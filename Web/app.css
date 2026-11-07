@@ -1200,7 +1200,19 @@ body.log-open .log-pane { display: flex; }
 .git-sec-head { display: flex; align-items: center; gap: 6px; height: 28px; margin-bottom: 8px; padding: 0 8px; border-radius: 6px; background: color-mix(in srgb, var(--text) 9%, var(--panel)); font: 600 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: var(--text); cursor: default; -webkit-user-select: none; user-select: none; }
 .git-sec-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-sec-commit > .git-sec-head { color: var(--accent); }
-.git-sec-commit .git-sec-file { margin-left: 12px; }
+.git-sec-commit .git-sec-file { margin-left: 0; }
+/* 一个文件就是一张卡片, 展开只增加同一张卡片内部的内容 */
+.git-sec-file { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--diff-ctx); }
+.git-sec-file > .git-sec-head { height: 32px; margin: 0; padding: 0 10px; border: 0; border-bottom: 1px solid var(--border); border-radius: 5px 5px 0 0; background: var(--panel-head); }
+.git-sec-file:not(.collapsed) > .git-sec-head { position: sticky; top: 0; z-index: 2; }
+.git-sec-file > .git-sec-head:hover { background: color-mix(in srgb, var(--text) 7%, var(--panel-head)); }
+.git-sec-file.collapsed > .git-sec-head { border-bottom: 0; border-radius: 5px; }
+.git-sec-file > .git-sec-body { padding-top: 0; }
+/* 文件内部的 hunk 只是分节, 不再各自形成卡片 */
+.git-sec-file > .git-sec-body > .git-hunk { margin: 0; border: 0; border-radius: 0; background: transparent; }
+.git-sec-file > .git-sec-body > .git-hunk + .git-hunk { border-top: 1px solid var(--border); }
+.git-sec-file > .git-sec-body > .git-hunk > .git-hunk-head { background: color-mix(in srgb, var(--text) 5%, var(--panel)); }
+.git-sec-file.collapsed > .git-sec-body { padding-top: 0; }
 .git-sec.collapsed > .git-sec-body { display: none; }
 .net-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 /* 列宽固定, 地址列占剩余宽度; 窗口放不下时列表可左右滚动, 列头随之滚动并停在顶部 */
