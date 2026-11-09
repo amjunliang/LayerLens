@@ -29,6 +29,36 @@ assert(c.live.suspended, 'A connecting socket does not consume a resume transiti
 c.live.ws.readyState = 1; c.liveResume(); assert.equal(sent.at(-1), 'resume');
 console.log('PASS live resume transitions: focus independence, mode guards, coalescing, connecting sockets and simulator isolation');
 
+// A page reload can finish while focus is on the host window's reload button.
+// The live socket must start immediately instead of waiting for a canvas click.
+const started = [];
+const startLive = {
+  udid: 'sim', real: false, ws: null, error: '', frames: 0, retryTimer: 0, startTimer: 0,
+};
+const startContext = vm.createContext({
+  live: startLive,
+  pageActivity: { active: false },
+  state: { mode: 'live' },
+  targets: { hub: { live: true } },
+  location: { host: '127.0.0.1:9523' },
+  WebSocket: class {
+    static OPEN = 1;
+    constructor(url) { this.url = url; this.readyState = 0; started.push(url); }
+  },
+  VideoDecoder: class {},
+  clearTimeout() {},
+  liveAvailable: () => true,
+  liveSupported: () => true,
+  layoutLive() {},
+  showLiveGuide() {},
+  liveSend() {},
+});
+vm.runInContext(source.slice(source.indexOf('function liveStart()'), source.indexOf('// 原生视频输出状态')), startContext);
+startContext.liveStart();
+assert.match(started[0], /\/sim\/sim\/stream$/, 'Live starts while the host window button owns focus');
+assert.doesNotMatch(source, /async function syncLive\(\) \{\s*if \(!pageActivity\.active\) return;/, 'Target sync must not defer live setup on focus');
+console.log('PASS live startup: page reload does not wait for a canvas click');
+
 // Run the actual native wake method against deterministic device/HID boundaries.
 const native = fs.readFileSync(path.join(root, 'Mac/DeviceBridge/Sources/native_bridge.m'), 'utf8');
 const start = native.indexOf('- (BOOL)wakeDisplayIfNeeded:(NSString **)error {');

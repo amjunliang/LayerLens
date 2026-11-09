@@ -14,7 +14,21 @@ assert.equal(context.livePixelRatio(1179, 800), 1600 / 1179);
 assert.equal(context.livePixelZoomTarget(1179, 1179, 0.5), 1);
 assert.equal(context.livePixelZoomTarget(1206, 402, 0.5), 3);
 assert.equal(context.livePixelZoomTarget(0, 402, 0.5), null);
+
+const doubleStart = source.indexOf('function isLiveBackgroundDoubleClick(');
+const doubleEnd = source.indexOf('function setupLiveEvents(', doubleStart);
+assert(doubleStart >= 0 && doubleEnd > doubleStart);
+const doubleClick = vm.createContext({
+});
+vm.runInContext(source.slice(doubleStart, doubleEnd), doubleClick);
+const background = {};
+const canvas = {};
+assert.equal(doubleClick.isLiveBackgroundDoubleClick({ button: 0, target: background, currentTarget: background }), true);
+assert.equal(doubleClick.isLiveBackgroundDoubleClick({ button: 0, target: canvas, currentTarget: background }), false);
+assert.equal(doubleClick.isLiveBackgroundDoubleClick({ button: 2, target: background, currentTarget: background }), false);
+
 assert(source.includes('live.sourcePixels = [width, height];'));
 assert(source.includes("$('livePixelZoom').addEventListener('click', zoomLivePixels);"));
 assert(source.includes('hint.hidden = !(ratio > 1.01);'));
-console.log('PASS live pixel zoom: one-to-one target, Retina ratio and over-source hint');
+assert(source.includes("wrap.addEventListener('dblclick'"));
+console.log('PASS live pixel zoom: one-to-one target, Retina ratio, over-source hint and background double-click fit');

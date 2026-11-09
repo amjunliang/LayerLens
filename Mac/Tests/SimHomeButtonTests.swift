@@ -36,10 +36,17 @@ final class FailedDevice: NSObject {
             precondition(xpc_dictionary_get_uint64(payload, "state") == (down ? 1 : 2))
         }
         for down in [true, false] {
-            let power = SimHomeButton.message(down: down, usage: 0x30)
+            let power = SimHomeButton.message(down: down, usagePage: 0x0c, usage: 0x30)
             let payload = xpc_dictionary_get_value(power, "payload")!
             precondition(xpc_dictionary_get_uint64(payload, "usagePage") == 12)
             precondition(xpc_dictionary_get_uint64(payload, "usageCode") == 48)
+            precondition(xpc_dictionary_get_uint64(payload, "state") == (down ? 1 : 2))
+        }
+        for down in [true, false] {
+            let switcher = SimHomeButton.message(down: down, usagePage: 0xff01, usage: 0x10)
+            let payload = xpc_dictionary_get_value(switcher, "payload")!
+            precondition(xpc_dictionary_get_uint64(payload, "usagePage") == 0xff01)
+            precondition(xpc_dictionary_get_uint64(payload, "usageCode") == 0x10)
             precondition(xpc_dictionary_get_uint64(payload, "state") == (down ? 1 : 2))
         }
         let barrier = SimHomeButton.message(down: false, barrier: true)
@@ -57,6 +64,10 @@ final class FailedDevice: NSObject {
         }
         precondition(clicks.wait(timeout: .now() + 2) == .success)
         precondition(clicks.wait(timeout: .now() + 2) == .success)
+        legacy.press(usagePage: 0xff01, usage: 0x10, legacyPress: { clicks.signal() }, unavailable: {
+            fatalError("legacy switcher unavailable")
+        })
+        precondition(clicks.wait(timeout: .now() + 2) == .success)
         legacy.stop()
         legacy.press(legacyPress: { fatalError("press after stop") }, unavailable: { fatalError("callback after stop") })
         // 瞬时 lookup 失败不能当成不支持, 否则会静默退回无效的 Indigo。
@@ -71,6 +82,6 @@ final class FailedDevice: NSObject {
             failed.stop()
             }
         }
-        print("PASS Home wire format, legacy double press, stop, booting and operational failure")
+        print("PASS hardware-button wire format, legacy fallback, stop, booting and operational failure")
     }
 }

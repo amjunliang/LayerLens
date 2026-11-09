@@ -1370,6 +1370,8 @@ body.log-open .log-pane { display: flex; }
   .net-detail { position: absolute; inset: 0; width: auto; z-index: 3; }
   .net-body:not(.has-detail) .net-detail { display: none; }
   .net-detail-back { display: inline-flex; order: 1; }
+  /* 小屏详情浮在底部面板上方, 面板全屏会破坏交互层级 */
+  #logMax { display: none; }
   /* 窄屏差异覆盖底部面板上方的画布, 文件列表保持可见。 */
   .git-side { width: auto; max-width: none; min-width: 0; flex: 1; }
   .git-diff { position: absolute; inset: 0; z-index: 3; }

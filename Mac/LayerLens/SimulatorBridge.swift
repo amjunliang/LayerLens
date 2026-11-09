@@ -333,7 +333,7 @@ final class SimTouch {
     }
 }
 
-/// 仅负责 Home: 新模拟器使用 dtuhidd, 不支持该服务的 Xcode 26 保留 Indigo。
+/// 硬件按键: 新模拟器使用 dtuhidd, 不支持该服务的 Xcode 26 保留 Indigo。
 /// 协议参考 facebook/idb 的 DTUHIDModels / SimulatorXPCConnection (MIT)。
 /// https://github.com/facebook/idb/tree/main/FBSimulatorControl/HID
 /// 独立队列预热, 不让服务启动或超时阻塞触摸和画面。
@@ -366,7 +366,13 @@ final class SimHomeButton {
     }
     deinit { stop() }
 
-    func press(usage: UInt64 = 0x40, legacyPress: @escaping () -> Void, unavailable: @escaping () -> Void) {
+    func press(
+        usagePage: UInt64 = 0x0c,
+        usage: UInt64 = 0x40,
+        holdMicroseconds: UInt32 = 30_000,
+        legacyPress: @escaping () -> Void,
+        unavailable: @escaping () -> Void
+    ) {
         lock.lock()
         guard !stopped, pendingPresses < 2 else { lock.unlock(); return }
         pendingPresses += 1
@@ -389,19 +395,24 @@ final class SimHomeButton {
             self.lock.lock()
             defer { self.lock.unlock() }
             guard !self.stopped else { return }
-            // 不补发等待过久的点击, 防止切换目标后突然出现 Home 或连击。
+            // 不补发等待过久的点击, 防止切换目标后突然出现按键或连击。
             guard DispatchTime.now() < deadline else { unavailable(); return }
             if self.legacy { legacyPress(); return }
             guard let connection = self.connection, !self.failed else { unavailable(); return }
-            xpc_connection_send_message(connection, Self.message(down: true, usage: usage))
-            usleep(30_000)
-            xpc_connection_send_message(connection, Self.message(down: false, usage: usage))
+            xpc_connection_send_message(connection, Self.message(down: true, usagePage: usagePage, usage: usage))
+            usleep(holdMicroseconds)
+            xpc_connection_send_message(connection, Self.message(down: false, usagePage: usagePage, usage: usage))
         }
     }
 
-    static func message(down: Bool, barrier: Bool = false, usage: UInt64 = 0x40) -> xpc_object_t {
+    static func message(
+        down: Bool,
+        barrier: Bool = false,
+        usagePage: UInt64 = 0x0c,
+        usage: UInt64 = 0x40
+    ) -> xpc_object_t {
         let payload = xpc_dictionary_create(nil, nil, 0)
-        if !barrier { xpc_dictionary_set_uint64(payload, "usagePage", 0x0c) }
+        if !barrier { xpc_dictionary_set_uint64(payload, "usagePage", usagePage) }
         xpc_dictionary_set_uint64(payload, "usageCode", barrier ? 0 : usage)
         xpc_dictionary_set_uint64(payload, "state", down ? 1 : 2)
         let message = xpc_dictionary_create(nil, nil, 0)

@@ -381,17 +381,33 @@ final class SimulatorStream {
                 }
             })
         case "button" where message["button"] as? String == "app-switcher":
-            // 上滑到屏幕中部时先快后慢(缓出), 末速度接近 0 即被识别为停顿而进入多任务, 不必久停
-            touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
-            let steps = 6
-            for step in 1...steps {
-                usleep(16_000)
-                let progress = Double(step) / Double(steps)
-                let eased = 1 - pow(1 - progress, 3)
-                touch.send(phase: .move, x: 0.5, y: 0.995 - 0.4 * eased, edge: 0x01)
+            // dtuhidd 直接按系统多任务键; 旧版不支持该服务的模拟器改用上滑停顿。
+            let gesture: () -> Void = { [weak self, weak touch] in
+                self?.touchQueue.async { [weak self, weak touch] in
+                    guard let self, let touch, self.touch === touch else { return }
+                    touch.send(phase: .down, x: 0.5, y: 0.995, edge: 0x01)
+                    let steps = 6
+                    for step in 1...steps {
+                        usleep(16_000)
+                        let progress = Double(step) / Double(steps)
+                        let eased = 1 - pow(1 - progress, 3)
+                        touch.send(phase: .move, x: 0.5, y: 0.995 - 0.4 * eased, edge: 0x01)
+                    }
+                    usleep(80_000)
+                    touch.send(phase: .up, x: 0.5, y: 0.595, edge: 0x01)
+                }
             }
-            usleep(80_000)
-            touch.send(phase: .up, x: 0.5, y: 0.595, edge: 0x01)
+            if let homeButton {
+                homeButton.press(
+                    usagePage: 0xff01,
+                    usage: 0x10,
+                    holdMicroseconds: 80_000,
+                    legacyPress: gesture,
+                    unavailable: gesture
+                )
+            } else {
+                gesture()
+            }
         case "key":
             guard let code = message["code"] as? String else { return }
             SimulatorKeyboard.press(code: code, modifiers: message["modifiers"] as? [String] ?? [], on: touch)

@@ -1737,7 +1737,6 @@ function liveSupported() {
 
 // 所有已连接设备都显示实时入口，采集能力由实际连接结果决定。
 async function syncLive() {
-  if (!pageActivity.active) return;
   const device = currentDevice();
   const physical = (device?.kind || targetHistory[targets.deviceId]?.kind) === 'device';
   const udid = device?.id || '';
@@ -1774,7 +1773,6 @@ async function syncLive() {
 }
 
 function liveStart() {
-  if (!pageActivity.active) return;
   if (!liveAvailable()) { showLiveGuide(); return; }
   if (live.ws) { liveResume(); return; }
   clearTimeout(live.retryTimer);
@@ -4143,6 +4141,10 @@ const LIVE_HEAL_WAIT_MS = 600;
 const LIVE_HEAL_STRIKES = 2;
 const LIVE_HEAL_RECOVER_MS = 10000;
 
+function isLiveBackgroundDoubleClick(e) {
+  return e.button === 0 && e.target === e.currentTarget;
+}
+
 function setupLiveEvents() {
   const wrap = $('liveWrap');
   const canvas = $('liveCanvas');
@@ -4209,6 +4211,12 @@ function setupLiveEvents() {
   };
   canvas.addEventListener('pointerup', endTouch);
   canvas.addEventListener('pointercancel', endTouch);
+  // 仅双击画面外的空白区域适应窗口, 不干扰画面内的设备触摸
+  wrap.addEventListener('dblclick', (e) => {
+    if (!isLiveBackgroundDoubleClick(e)) return;
+    e.preventDefault();
+    fitView();
+  });
   // 实时画面的右键菜单只有屏幕截图, 元素信息在层级树右键复制
   wrap.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -4588,6 +4596,8 @@ function updateAutoPanels() {
     if (!auto) panel.forced = false;
     panel.auto = auto;
   });
+  // 小屏详情使用浮层, 从宽屏缩小时退出面板全屏, 避免残留布局覆盖浮层
+  if (isNarrow() && document.body.classList.contains('log-max')) setLogMax(false);
   syncPanels();
 }
 

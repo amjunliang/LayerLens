@@ -47,4 +47,6 @@ assert.match(source, /el\('button', 'icon-btn net-detail-back'\)/);
 assert.match(source, /back\.addEventListener\('click', closeNetDetail\)/);
 assert.match(css, /\.net-body:not\(\.has-detail\) \.net-detail \{ display: none; \}/);
 assert.match(css, /\.net-body\.has-detail \.net-detail/);
+assert.match(css, /#logMax \{ display: none; \}/);
+assert.match(source, /if \(isNarrow\(\) && document\.body\.classList\.contains\('log-max'\)\) setLogMax\(false\);/);
 console.log('PASS network small screen: list-first state, detail open, back action and floating layout');
