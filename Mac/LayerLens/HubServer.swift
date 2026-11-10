@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import ServiceManagement
 import Network
 
 /// Mac 端 HTTP 服务: 提供网页、设备列表, 并把 /t/<设备>/<App>/... 转发给对应的 iOS App.
@@ -24,12 +25,21 @@ final class HubServer {
     let registry: TargetRegistry
     private let xcode = XcodeController()
     private let commandRun = CommandRunController()
+    private let buildHomeLock = NSLock()
+    private var buildHomeInFlight: [String: DispatchGroup] = [:]
+    private var buildHomeAvailableAfter: [String: TimeInterval] = [:]
     private let live = SimulatorLive()
     private let deviceLive = DeviceLive()
     private let appLogs = AppLogRecorder()
     private let network: NetworkRecorder
     private let git = GitController()
     private let targetStates = TargetStateBroadcaster()
+    private let mcpContexts = MCPContextStore()
+    private let mcpClients = MCPClientInstaller(url: HubServer.mcpURL)
+    /// 安装和移除串行执行, 避免两个请求同时改同一份客户端配置
+    private let mcpSetupQueue = DispatchQueue(label: "com.layerlens.hub.mcp-setup")
+    private lazy var mcp = MCPHTTPService(store: mcpContexts, registry: registry, git: git,
+                                              appLogs: appLogs, network: network, workQueue: workQueue)
     private var pendingTargetState: [String: Any]?
     private var targetStateFlush: DispatchWorkItem?
     let terminal = TerminalController()
@@ -169,6 +179,10 @@ final class HubServer {
             targetStates.accept(head: head, leftover: leftover, connection: connection.detach())
             return
         }
+        if head.path == "/mcp" {
+            mcp.handle(head, body: leftover, connection: connection)
+            return
+        }
         if head.path == "/api/hub/event-socket" {
             guard head.method == "GET", head.header("Upgrade")?.lowercased() == "websocket",
                   head.header("Sec-WebSocket-Key") != nil,
@@ -273,6 +287,12 @@ final class HubServer {
                 let versions = XcodeController.installedXcodes().map { ["path": $0.path, "version": $0.version, "name": $0.name] }
                 connection.respond(.json(["xcodes": versions, "defaultPath": XcodeController.defaultXcodePath() ?? ""]))
             }
+        case "/api/hub/mcp/status":
+            connection.respond(.json(mcpStatus()))
+        case "/api/hub/mcp/clients":
+            mcpSetupQueue.async { [self] in
+                connection.respond(.json(mcpSetupState()))
+            }
         case "/api/hub/command-runs":
             connection.respond(.json(["runs": commandRun.currentRuns()]))
         case "/api/hub/command-run-status":
@@ -353,17 +373,137 @@ final class HubServer {
         forward(rescan: false, previous: nil)
     }
 
+    static var mcpURL: String { "http://127.0.0.1:\(port)/mcp" }
+
+    /// MCP 当前会使用的窗口上下文, 菜单栏和网页共用
+    func mcpStatus() -> [String: Any] {
+        let latest = mcpContexts.latest()
+        return [
+            "url": Self.mcpURL,
+            "ready": latest?.hasTarget == true,
+            "app": latest?.appName ?? "",
+            "bundleId": latest?.bundleId ?? "",
+            "device": latest?.deviceName ?? "",
+        ]
+    }
+
+    /// MCP 设置面板: 各客户端的 MCP 与 Skill 状态, 以及登录时启动
+    private func mcpSetupState() -> [String: Any] {
+        [
+            "url": Self.mcpURL,
+            "clients": mcpClients.statuses().map(\.json),
+            "loginItem": LoginItem.state,
+        ]
+    }
+
+    /// 只在运行任务已确认项目和 Scheme 后尝试 Home。控制不可用或超时时继续构建。
+    private func goHomeBeforeBuild(device: String, bundle: String, kind: DeviceKind) {
+        let foreground = registry.foregroundApps(deviceId: device)
+        if foreground.isEmpty && registry.confirmsBackground(deviceId: device, bundles: [bundle]) { return }
+
+        // 同一设备的命令行和 Xcode 运行共用限制，避免相邻请求被系统识别为双击。
+        buildHomeLock.lock()
+        if let active = buildHomeInFlight[device] {
+            buildHomeLock.unlock()
+            _ = active.wait(timeout: .now() + 3)
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        buildHomeAvailableAfter = buildHomeAvailableAfter.filter { $0.value > now }
+        guard buildHomeAvailableAfter[device] == nil else { buildHomeLock.unlock(); return }
+        let active = DispatchGroup()
+        active.enter()
+        buildHomeInFlight[device] = active
+        buildHomeLock.unlock()
+        defer {
+            buildHomeLock.lock()
+            buildHomeInFlight[device] = nil
+            buildHomeAvailableAfter[device] = ProcessInfo.processInfo.systemUptime + 1
+            active.leave()
+            buildHomeLock.unlock()
+        }
+        // 回调可能在等待超时后才到达, sent 的读写需要加锁
+        let pressed = DispatchSemaphore(value: 0)
+        let sentLock = NSLock()
+        var sent = false
+        let complete: (Bool) -> Void = { ok in
+            sentLock.lock()
+            sent = ok
+            sentLock.unlock()
+            pressed.signal()
+        }
+        if kind == .simulator {
+            live.pressHome(udid: device, completion: complete)
+        } else {
+            deviceLive.pressHome(udid: device, deadline: Date().addingTimeInterval(1.5), completion: complete)
+        }
+        let signalled = pressed.wait(timeout: .now() + 1.5) == .success
+        sentLock.lock()
+        let homeSent = signalled && sent
+        sentLock.unlock()
+        guard homeSent else {
+            LiveLog.write("Pre-build Home unavailable for \(device)")
+            return
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while !registry.confirmsBackground(deviceId: device, bundles: foreground) {
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                LiveLog.write("Pre-build Home background confirmation timed out for \(device)")
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+
     private func handlePost(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
         switch head.path {
+        case "/api/hub/mcp/context":
+            guard mcpContexts.update(json) else {
+                connection.respond(.error(400, "Invalid MCP context"))
+                return
+            }
+            connection.respond(.json(["ok": true]))
+        case "/api/hub/mcp/clients/install", "/api/hub/mcp/clients/remove":
+            let install = head.path.hasSuffix("/install")
+            let requested = json["client"] as? String ?? ""
+            let parts = Set((json["parts"] as? [String] ?? ["mcp", "skill"]).compactMap(MCPClientInstaller.Part.init(rawValue:)))
+            guard !parts.isEmpty, requested == "all" || MCPClientInstaller.Client(rawValue: requested) != nil else {
+                connection.respond(.error(400, "Invalid client"))
+                return
+            }
+            mcpSetupQueue.async { [self] in
+                // all 只处理已检测到的客户端; 指定客户端时找不到会返回错误
+                let clients = requested == "all"
+                    ? MCPClientInstaller.Client.allCases.filter { mcpClients.locate($0) != nil }
+                    : [MCPClientInstaller.Client(rawValue: requested)!]
+                let errors = clients.flatMap { install ? mcpClients.install($0, parts: parts) : mcpClients.remove($0, parts: parts) }
+                LiveLog.write("MCP setup \(install ? "install" : "remove") \(requested) \(parts.map(\.rawValue).sorted()): \(errors.isEmpty ? "ok" : errors.joined(separator: "; "))")
+                var state = mcpSetupState()
+                state["errors"] = errors
+                connection.respond(.json(state))
+            }
+        case "/api/hub/login-item":
+            let enabled = json["enabled"] as? Bool ?? false
+            mcpSetupQueue.async { [self] in
+                var state = mcpSetupState()
+                if let error = LoginItem.set(enabled) { state["errors"] = [error] }
+                state["loginItem"] = LoginItem.state
+                connection.respond(.json(state))
+            }
+        case "/api/hub/mcp/context/remove":
+            mcpContexts.remove(windowId: json["windowId"] as? String ?? "")
+            connection.respond(.json(["ok": true]))
         case "/api/hub/command-run":
             let bundle = json["app"] as? String ?? ""
             let device = json["device"] as? String ?? ""
             guard !bundle.isEmpty, !device.isEmpty else { connection.respond(.error(400, "Invalid target")); return }
-            let source = registry.sourceFile(bundleId: bundle)
+            let source = registry.sourceFile(deviceId: device, bundleId: bundle)
             registry.deviceKind(deviceId: device) { [self] kind in
                 guard let kind else { connection.respond(.error(404, "Device not found")); return }
-                let id = commandRun.start(device: device, bundle: bundle, source: source, simulator: kind == .simulator, owner: json["owner"] as? String ?? "", order: json["order"] as? Int ?? 0, xcodePath: json["xcodePath"] as? String ?? "")
+                let id = commandRun.start(device: device, bundle: bundle, source: source, simulator: kind == .simulator, owner: json["owner"] as? String ?? "", order: json["order"] as? Int ?? 0, xcodePath: json["xcodePath"] as? String ?? "") { [weak self] in
+                    self?.goHomeBeforeBuild(device: device, bundle: bundle, kind: kind)
+                }
                 connection.respond(.json(["runId": id]))
             }
         case "/api/hub/command-run-selection":
@@ -378,14 +518,16 @@ final class HubServer {
         case "/api/hub/run":
             let bundleId = json["app"] as? String ?? ""
             let deviceId = json["device"] as? String ?? ""
-            let sourceFile = registry.sourceFile(bundleId: bundleId)
+            let sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
             registry.deviceKind(deviceId: deviceId) { [self] kind in
                 guard let kind else {
                     connection.respond(.json(["error": "xcode_destination_unavailable"], status: 400))
                     return
                 }
                 workQueue.async { [self] in
-                    switch xcode.run(sourceFile: sourceFile, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator, xcodePath: json["xcodePath"] as? String ?? "") {
+                    switch xcode.run(sourceFile: sourceFile, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator, xcodePath: json["xcodePath"] as? String ?? "", beforeBuild: {
+                        goHomeBeforeBuild(device: deviceId, bundle: bundleId, kind: kind)
+                    }) {
                     case .success(let runId):
                         connection.respond(.json(["ok": true, "switched": true, "runId": runId]))
                     case .failure(let failure):
@@ -625,7 +767,7 @@ final class HubServer {
             terminal.accept(id: id, head: head, leftover: body, connection: connection)
         case ("GET", "info", 1):
             // 空状态展示将要打开的位置: 项目名、路径, 是 git 仓库时附带当前分支
-            let sourceFile = registry.sourceFile(bundleId: head.query["app"] ?? "")
+            let sourceFile = registry.sourceFile(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "")
             workQueue.async { [self] in
                 guard let root = terminalRoot(sourceFile: sourceFile) else {
                     connection.respond(.json(["error": "noSource", "reason": "noSource"], status: 404))
@@ -640,10 +782,14 @@ final class HubServer {
             }
         case ("POST", "create", 1):
             let bundleId = json["app"] as? String ?? ""
-            let sourceFile = registry.sourceFile(bundleId: bundleId)
+            let sourceFile = registry.sourceFile(deviceId: json["device"] as? String ?? "", bundleId: bundleId)
             workQueue.async { [self] in
                 guard let root = terminalRoot(sourceFile: sourceFile) else {
                     connection.respond(.json(["error": "noSource", "reason": "noSource"], status: 404))
+                    return
+                }
+                guard json["root"] as? String == root else {
+                    connection.respond(.error(409, "Project directory changed. Try again after refreshing."))
                     return
                 }
                 if let id = terminal.create(root: root, app: bundleId) {
@@ -663,8 +809,9 @@ final class HubServer {
     /// 终端的工作目录: App 源码所在仓库的根目录, 不在仓库中时为源文件所在目录
     private func terminalRoot(sourceFile: String) -> String? {
         if let root = git.repository(sourceFile: sourceFile) { return root }
-        let directory = (sourceFile as NSString).deletingLastPathComponent
-        return sourceFile.isEmpty || !FileManager.default.fileExists(atPath: directory) ? nil : directory
+        guard let directory = XcodeSourcePath.sourceDirectory(for: sourceFile),
+              FileManager.default.fileExists(atPath: directory) else { return nil }
+        return directory
     }
 
     /// 改动面板: /api/hub/git/<操作>?app=<Bundle ID>. 仓库由该 App 上报的源文件路径推断, 找不到时返回 reason 供网页提示
@@ -672,7 +819,7 @@ final class HubServer {
         let action = String(head.path.dropFirst("/api/hub/git/".count))
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
         let bundleId = head.query["app"] ?? json["app"] as? String ?? ""
-        let sourceFile = registry.sourceFile(bundleId: bundleId)
+        let sourceFile = registry.sourceFile(deviceId: head.query["device"] ?? json["device"] as? String ?? "", bundleId: bundleId)
         // 事件流先在本队列分离连接, 解析仓库较慢, 放到工作队列
         let stream = head.method == "GET" && action == "events" ? connection.detach() : nil
         workQueue.async { [self] in
@@ -683,6 +830,16 @@ final class HubServer {
                     stream.send(content: Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), completion: .contentProcessed { _ in stream.cancel() })
                 } else {
                     connection.respond(.json(["error": reason, "reason": reason], status: 404))
+                }
+                return
+            }
+            // 网页首次打开改动面板时还不知道仓库, 不带 root 的 GET 用来发现仓库; 写操作必须带 root
+            let expectedRoot = head.method == "POST" ? json["root"] as? String : head.query["root"]
+            if expectedRoot != root && (head.method == "POST" || expectedRoot != nil) {
+                if let stream {
+                    stream.send(content: Data("HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), completion: .contentProcessed { _ in stream.cancel() })
+                } else {
+                    connection.respond(.json(["error": "Repository changed. Refresh the Changes panel and try again.", "reason": "repositoryChanged"], status: 409))
                 }
                 return
             }
@@ -1013,5 +1170,27 @@ final class EventStreamSocket {
         upstream?.cancel()
         upstream = nil
         socket.close()
+    }
+}
+
+/// 登录时启动 LayerLens, 让 Agent 会话开始时 MCP 已可连接
+enum LoginItem {
+    static var state: String {
+        switch SMAppService.mainApp.status {
+        case .enabled: return "enabled"
+        case .requiresApproval: return "requiresApproval"
+        default: return "disabled"
+        }
+    }
+
+    static func set(_ enabled: Bool) -> String? {
+        let service = SMAppService.mainApp
+        if enabled == (service.status == .enabled || service.status == .requiresApproval) { return nil }
+        do {
+            if enabled { try service.register() } else { try service.unregister() }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }

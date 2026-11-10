@@ -11,6 +11,7 @@ final class CommandRunController {
         let simulator: Bool
         let owner: String
         let xcodePath: String
+        let beforeBuild: () -> Void
         let created = Date()
         var status = "queued"
         var buildStarted = false
@@ -19,9 +20,10 @@ final class CommandRunController {
         var process: Process?
         var canTerminate = false
         var superseded = false
-        init(device: String, bundle: String, source: String, simulator: Bool, owner: String, xcodePath: String) {
+        init(device: String, bundle: String, source: String, simulator: Bool, owner: String, xcodePath: String, beforeBuild: @escaping () -> Void) {
             self.device = device; self.bundle = bundle; self.source = source; self.simulator = simulator; self.owner = owner
             self.xcodePath = xcodePath
+            self.beforeBuild = beforeBuild
         }
     }
     private let lock = NSLock()
@@ -41,8 +43,8 @@ final class CommandRunController {
         self.cacheRoot = cacheRoot ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!.appendingPathComponent("LayerLens/CommandBuilds", isDirectory: true)
     }
 
-    func start(device: String, bundle: String, source: String, simulator: Bool, owner: String = "", order: Int = 0, xcodePath: String = "") -> String {
-        let job = Job(device: device, bundle: bundle, source: source, simulator: simulator, owner: owner, xcodePath: xcodePath)
+    func start(device: String, bundle: String, source: String, simulator: Bool, owner: String = "", order: Int = 0, xcodePath: String = "", beforeBuild: @escaping () -> Void = {}) -> String {
+        let job = Job(device: device, bundle: bundle, source: source, simulator: simulator, owner: owner, xcodePath: xcodePath, beforeBuild: beforeBuild)
         lock.lock()
         jobs = jobs.filter { _, old in
             !["succeeded", "failed", "cancelled", "superseded", "skipped"].contains(old.status) || Date().timeIntervalSince(old.created) < 3600
@@ -146,6 +148,11 @@ final class CommandRunController {
         job.status = status; job.detail = detail
         return true
     }
+    private func shouldPressHome(_ job: Job) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !job.cancelled && (job.owner.isEmpty ||
+            (selections[job.owner]?.device == job.device && selections[job.owner]?.bundle == job.bundle))
+    }
     private func mayLaunch(_ job: Job) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !job.cancelled else { return false }
@@ -246,16 +253,24 @@ final class CommandRunController {
     }
     private func fail(_ job: Job, _ message: String) { _ = update(job, "failed", String(message.suffix(4000))) }
 
-    private func run(_ job: Job) {
+    private func run(_ job: Job, useSavedScheme: Bool = true) {
         guard update(job, "resolving") else { return }
         if !job.xcodePath.isEmpty && !XcodeController.installedXcodes().contains(where: { $0.path == URL(fileURLWithPath: job.xcodePath).resolvingSymlinksInPath().path }) {
             fail(job, "所选 Xcode 不可用，请重新选择"); return
         }
         guard !job.source.isEmpty else { fail(job, "未找到 App 上报的源码路径，无法查找项目"); return }
         let sourceDir = URL(fileURLWithPath: job.source).deletingLastPathComponent().standardizedFileURL
-        guard FileManager.default.fileExists(atPath: sourceDir.path) else { fail(job, "App 上报的源码目录不存在，无法查找项目"); return }
-        let saved = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [String: String]])?[job.bundle]
-        let savedProject = saved.flatMap { Self.resolveRelative($0["path"] ?? "", from: sourceDir) }
+        let packageBuild = XcodeSourcePath.packageBuildDirectory(containing: sourceDir)
+        let hostProject = packageBuild.flatMap(XcodeSourcePath.hostProject(in:))
+        if packageBuild != nil && hostProject == nil {
+            fail(job, "无法从 Xcode 构建目录确定宿主项目"); return
+        }
+        if hostProject == nil && !FileManager.default.fileExists(atPath: sourceDir.path) {
+            fail(job, "App 上报的源码目录不存在，无法查找项目"); return
+        }
+        let savedKey = hostProject.map { job.bundle + "|" + $0 } ?? job.bundle
+        let saved = useSavedScheme ? (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [String: String]])?[savedKey] : nil
+        let savedProject = hostProject ?? saved.flatMap { Self.resolveRelative($0["path"] ?? "", from: sourceDir) }
         let sdk = job.simulator ? "iphonesimulator" : "iphoneos"
         var resolutionFailed = false
         var targetSettings: [String: [[String: Any]]] = [:]
@@ -284,29 +299,36 @@ final class CommandRunController {
             return matched
         }
         var chosen: (String, XcodeRunPlan.Candidate)?
-        let hasSavedProject = saved != nil
-        if let saved {
-            guard let savedProject, FileManager.default.fileExists(atPath: savedProject), let scheme = saved["scheme"], !scheme.isEmpty else {
-                fail(job, "保存的项目路径或 Scheme 不可用，请检查项目位置和运行配置"); return
-            }
+        if let saved, let savedProject, FileManager.default.fileExists(atPath: savedProject),
+           let scheme = saved["scheme"], !scheme.isEmpty {
             let candidates = XcodeRunPlan.candidates(workspace: savedProject, schemes: [scheme])
-            guard candidates.count == 1, let candidate = candidates.first else {
+            if candidates.count == 1, let candidate = candidates.first {
+                chosen = (savedProject, candidate)
+            } else if hostProject == nil {
                 fail(job, "保存的 Scheme 不存在或运行目标不明确，请检查项目配置"); return
             }
-            chosen = (savedProject, candidate)
+        } else if saved != nil && hostProject == nil {
+            fail(job, "保存的项目路径或 Scheme 不可用，请检查项目位置和运行配置"); return
         }
+        let hasSavedProject = chosen != nil
         if chosen == nil {
             guard update(job, "resolving") else { return }
             resolutionFailed = false
-            let git = runProcess(job, ["-C", sourceDir.path, "rev-parse", "--show-toplevel"], cancellable: true, executablePath: "/usr/bin/git", timeout: min(queryTimeout, 5))
-            guard let git else { return }
-            if git.0 != 0 && git.1 == "项目配置查询超时" { fail(job, "Git 仓库查询超时，请检查仓库后重试"); return }
-            let root = git.0 == 0 ? git.1.trimmingCharacters(in: .whitespacesAndNewlines) : nil
-            let deadline = ProcessInfo.processInfo.systemUptime + 20
-            guard let projects = Self.findProjects(sourceDir: sourceDir, repository: root, shouldContinue: {
-                self.lock.lock(); let current = !job.cancelled; self.lock.unlock()
-                return current && ProcessInfo.processInfo.systemUptime < deadline
-            }) else { fail(job, "项目扫描超时或无法读取，请检查源码所在仓库"); return }
+            let projects: [String]
+            if let hostProject {
+                projects = [hostProject]
+            } else {
+                let git = runProcess(job, ["-C", sourceDir.path, "rev-parse", "--show-toplevel"], cancellable: true, executablePath: "/usr/bin/git", timeout: min(queryTimeout, 5))
+                guard let git else { return }
+                if git.0 != 0 && git.1 == "项目配置查询超时" { fail(job, "Git 仓库查询超时，请检查仓库后重试"); return }
+                let root = git.0 == 0 ? git.1.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+                let deadline = ProcessInfo.processInfo.systemUptime + 20
+                guard let found = Self.findProjects(sourceDir: sourceDir, repository: root, shouldContinue: {
+                    self.lock.lock(); let current = !job.cancelled; self.lock.unlock()
+                    return current && ProcessInfo.processInfo.systemUptime < deadline
+                }) else { fail(job, "项目扫描超时或无法读取，请检查源码所在仓库"); return }
+                projects = found
+            }
             var matches: [(String, XcodeRunPlan.Candidate)] = []
             for (index, project) in projects.enumerated() {
                 guard update(job, "resolving", "\(index + 1)/\(projects.count)") else { return }
@@ -328,59 +350,31 @@ final class CommandRunController {
         }
         guard let (project, plan) = chosen else { return }
         let flag = project.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
-        if !hasSavedProject {
-            let relative = Self.relativePath(from: sourceDir, to: URL(fileURLWithPath: project))
-            lock.lock()
-            var savedProjects = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [String: String]] ?? [:]
-            savedProjects[job.bundle] = ["path": relative, "scheme": plan.scheme]
-            UserDefaults.standard.set(savedProjects, forKey: defaultsKey)
-            // 清理本 App 的旧格式绝对路径；其他 App 的记录留待各自迁移。
-            var legacy = UserDefaults.standard.dictionary(forKey: "LayerLensCommandRunProjects") as? [String: String] ?? [:]
-            if let old = legacy.removeValue(forKey: job.bundle) {
-                UserDefaults.standard.set(legacy, forKey: "LayerLensCommandRunProjects")
-                UserDefaults.standard.removeObject(forKey: "LayerLensCommandRunScheme." + job.bundle + "." + old)
-            }
-            lock.unlock()
-        }
-        let cacheKey = project + "\n" + job.device + (job.xcodePath.isEmpty ? "" : "\n" + job.xcodePath)
+        let cacheKey = [project, plan.project, plan.scheme, plan.target, job.device, job.xcodePath].joined(separator: "\n")
         let digest = SHA256.hash(data: Data(cacheKey.utf8)).map { String(format: "%02x", $0) }.joined()
         let derived = cacheRoot.appendingPathComponent(digest, isDirectory: true).path
         let base = ["xcodebuild", flag, project, "-scheme", plan.scheme, "-configuration", plan.configuration, "-destination", "id=\(job.device)", "-derivedDataPath", derived]
-        var build: [String: Any] = [:]
-        var locatedApp: String?
-        if !hasSavedProject {
-            guard let settings = runProcess(job, base + ["-showBuildSettings", "-json"], cancellable: true, timeout: queryTimeout) else { return }
-            guard settings.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(settings.1.utf8)),
-                  XcodeRunPlan.matchesBundle(values, candidate: plan, bundleId: job.bundle),
-                  let value = values.first(where: { ($0["target"] as? String) == plan.target }),
-                  let settings = value["buildSettings"] as? [String: Any],
-                  settings["PRODUCT_BUNDLE_IDENTIFIER"] as? String == job.bundle,
-                  let directory = settings["TARGET_BUILD_DIR"] as? String, let name = settings["WRAPPER_NAME"] as? String else { fail(job, "无法确定目标 App 构建产物"); return }
-            build = settings
-            locatedApp = (directory as NSString).appendingPathComponent(name)
+        guard let settings = runProcess(job, base + ["-showBuildSettings", "-json"], cancellable: true, timeout: queryTimeout) else { return }
+        guard settings.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(settings.1.utf8)) else {
+            fail(job, settings.1.isEmpty ? "无法读取当前 Scheme 的构建配置" : settings.1); return
         }
-        guard let built = runProcess(job, base + ["build"], cancellable: true, marksBuild: true) else { return }
-        guard built.0 == 0 else { fail(job, built.1); return }
-        if hasSavedProject {
-            locatedApp = Self.findBuiltApp(derived: derived, configuration: plan.configuration, simulator: job.simulator, bundleId: job.bundle)
+        guard let value = values.first(where: { XcodeRunPlan.matchesBundle([$0], candidate: plan, bundleId: job.bundle) }) else {
+            if hostProject != nil && hasSavedProject {
+                // Scheme 仍存在但已改绑目标。只重新发现一次，不重复发送 Home。
+                run(job, useSavedScheme: false)
+            } else {
+                fail(job, "当前 Scheme 不再构建所选 App")
+            }
+            return
         }
-        guard let app = locatedApp else { fail(job, "构建成功，但未找到与当前 Bundle ID 匹配的 App；请检查项目的构建产物目录"); return }
+        guard let build = value["buildSettings"] as? [String: Any],
+              let directory = build["TARGET_BUILD_DIR"] as? String, !directory.isEmpty,
+              let name = build["WRAPPER_NAME"] as? String, name.hasSuffix(".app"), name == (name as NSString).lastPathComponent else {
+            fail(job, "当前 Scheme 不再构建所选 App，或无法确定构建产物"); return
+        }
+        let app = URL(fileURLWithPath: directory).appendingPathComponent(name)
         let launch = Self.launchOptions(project: project, plan: plan)
         guard !launch.unsupported else { fail(job, "此 Scheme 的运行脚本或自定义工作目录需要通过 Xcode 运行"); return }
-        if hasSavedProject && (launch.arguments.contains { $0.contains("$(") } || launch.environment.values.contains { $0.contains("$(") }) {
-            // 仅当启动参数引用构建变量时，读取展开它们所需的配置。
-            guard let settings = runProcess(job, base + ["-showBuildSettings", "-json"], cancellable: true, timeout: queryTimeout) else { return }
-            guard settings.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(settings.1.utf8)),
-                  XcodeRunPlan.matchesBundle(values, candidate: plan, bundleId: job.bundle),
-                  let value = values.first(where: { ($0["target"] as? String) == plan.target }),
-                  let settings = value["buildSettings"] as? [String: Any] else { fail(job, "无法读取 Scheme 启动参数所需的构建配置"); return }
-            build = settings
-        }
-        guard update(job, "installing") else { return }
-        let install = job.simulator ? ["simctl", "install", job.device, app] : ["devicectl", "device", "install", "app", "--device", job.device, app]
-        guard let installed = runProcess(job, install, cancellable: false) else { return }
-        guard installed.0 == 0 else { fail(job, installed.1); return }
-        guard mayLaunch(job), update(job, "launching") else { return }
         func expand(_ text: String) -> String? {
             var result = text
             let regex = try! NSRegularExpression(pattern: #"\$\(([^)]+)\)"#)
@@ -415,21 +409,43 @@ final class CommandRunController {
             for (key, value) in expandedEnvironment { environment["DEVICECTL_CHILD_" + key] = value }
             command = ["devicectl", "device", "process", "launch", "--terminate-existing", "--device", job.device, job.bundle, "--"] + arguments
         }
+        if !hasSavedProject {
+            // SwiftPM 每次从宿主元数据获取项目，只保存该项目对应的 Scheme。
+            var configuration = ["scheme": plan.scheme]
+            if hostProject == nil {
+                configuration["path"] = Self.relativePath(from: sourceDir, to: URL(fileURLWithPath: project))
+            }
+            lock.lock()
+            var savedProjects = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [String: String]] ?? [:]
+            savedProjects[savedKey] = configuration
+            UserDefaults.standard.set(savedProjects, forKey: defaultsKey)
+            // 清理本 App 的旧格式绝对路径；其他 App 的记录留待各自迁移。
+            var legacy = UserDefaults.standard.dictionary(forKey: "LayerLensCommandRunProjects") as? [String: String] ?? [:]
+            if let old = legacy.removeValue(forKey: job.bundle) {
+                UserDefaults.standard.set(legacy, forKey: "LayerLensCommandRunProjects")
+                UserDefaults.standard.removeObject(forKey: "LayerLensCommandRunScheme." + job.bundle + "." + old)
+            }
+            lock.unlock()
+        }
+        if shouldPressHome(job) { job.beforeBuild() }
+        guard let built = runProcess(job, base + ["build"], cancellable: true, marksBuild: true) else { return }
+        guard built.0 == 0 else { fail(job, built.1); return }
+        guard Self.appMatchesBundle(app, bundleId: job.bundle) else {
+            fail(job, "构建成功，但指定产物的 Bundle ID 与当前 App 不匹配"); return
+        }
+        guard update(job, "installing") else { return }
+        let install = job.simulator ? ["simctl", "install", job.device, app.path] : ["devicectl", "device", "install", "app", "--device", job.device, app.path]
+        guard let installed = runProcess(job, install, cancellable: false) else { return }
+        guard installed.0 == 0 else { fail(job, installed.1); return }
+        guard mayLaunch(job), update(job, "launching") else { return }
         guard let launched = runProcess(job, command, cancellable: false, environment: environment, requireSelection: true) else { return }
         guard launched.0 == 0 else { fail(job, launched.1); return }
         _ = update(job, "succeeded")
     }
-    /// 直接构建后在本次配置的产物目录中按 Bundle ID 定位 App，避免运行前查询构建设置。
-    static func findBuiltApp(derived: String, configuration: String, simulator: Bool, bundleId: String) -> String? {
-        let platform = simulator ? "iphonesimulator" : "iphoneos"
-        let products = URL(fileURLWithPath: derived, isDirectory: true).appendingPathComponent("Build/Products", isDirectory: true).appendingPathComponent(configuration + "-" + platform, isDirectory: true)
-        guard let entries = try? FileManager.default.contentsOfDirectory(at: products, includingPropertiesForKeys: nil) else { return nil }
-        let matches = entries.filter { url in
-            guard url.pathExtension == "app", let data = try? Data(contentsOf: url.appendingPathComponent("Info.plist")),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else { return false }
-            return plist["CFBundleIdentifier"] as? String == bundleId
-        }
-        return matches.count == 1 ? matches[0].path : nil
+    static func appMatchesBundle(_ app: URL, bundleId: String) -> Bool {
+        guard let data = try? Data(contentsOf: app.appendingPathComponent("Info.plist")),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else { return false }
+        return plist["CFBundleIdentifier"] as? String == bundleId
     }
     static func launchOptions(project: String, plan: XcodeRunPlan.Candidate) -> (arguments: [String], environment: [String: String], unsupported: Bool) {
         var locations: [String] = []

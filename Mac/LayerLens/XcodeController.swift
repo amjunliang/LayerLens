@@ -56,7 +56,7 @@ final class XcodeController {
     private var sessions: [String: RunSession] = [:]
 
     /// 精确匹配 Run Action 的 App Bundle ID, 不沿用无关 Scheme / 设备。
-    func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool, xcodePath: String = "") -> Result<String, Failure> {
+    func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool, xcodePath: String = "", beforeBuild: () -> Void = {}) -> Result<String, Failure> {
         guard operationLock.try() else { return .failure(Failure(code: .busy)) }
         defer { operationLock.unlock() }
         guard !bundleId.isEmpty, !deviceId.isEmpty else { return .failure(Failure(code: .schemeUnavailable)) }
@@ -88,8 +88,8 @@ final class XcodeController {
                 let containerFlag = path.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
                 guard let actual = settings([containerFlag, path, "-scheme", plan.scheme, "-configuration", plan.configuration]),
                       XcodeRunPlan.matchesBundle(actual, candidate: plan, bundleId: bundleId) else { return .failure(Failure(code: .schemeUnavailable)) }
-                // Scheme 和目标在同一个脚本中设置, 找不到设备时终止, 绝不运行到别的设备。
-                let script = """
+                // Home 前先验证设备；真正运行时重新选择，避免用户在等待期间改了目标。
+                let selectDestination = """
                 set doc to first workspace document whose path is \(quoted(path))
                 set active scheme of doc to first scheme of doc whose name is \(quoted(plan.scheme))
                 set picked to missing value
@@ -103,10 +103,13 @@ final class XcodeController {
                 end repeat
                 if picked is missing value then error "layerlens_destination_unavailable"
                 set active run destination of doc to picked
-                set actionResult to run doc
-                return id of actionResult
                 """
-                return execute(script, xcode: xcode, timeout: 5).map { action in
+                if case .failure(let failure) = execute(selectDestination + "\nreturn \"ready\"", xcode: xcode) {
+                    return .failure(failure)
+                }
+                beforeBuild()
+                let runScript = selectDestination + "\nset actionResult to run doc\nreturn id of actionResult"
+                return execute(runScript, xcode: xcode, timeout: 5).map { action in
                     let id = UUID().uuidString
                     sessions = sessions.filter { Date().timeIntervalSince($0.value.created) < 900 }
                     if sessions.count >= 16, let oldest = sessions.values.min(by: { $0.created < $1.created }) { sessions.removeValue(forKey: oldest.id) }
@@ -201,6 +204,11 @@ final class XcodeController {
 
     static func match(sourceFile: String, workspaces: [String]) -> String? {
         let directory = { (path: String) in (path as NSString).deletingLastPathComponent + "/" }
+        if (sourceFile as NSString).isAbsolutePath,
+           let buildDirectory = XcodeSourcePath.packageBuildDirectory(containing: URL(fileURLWithPath: sourceFile).deletingLastPathComponent()) {
+            guard let host = XcodeSourcePath.hostProject(in: buildDirectory) else { return nil }
+            return workspaces.first { XcodeSourcePath.projectEntry($0) == host }
+        }
         if !sourceFile.isEmpty {
             let containing = workspaces.filter { sourceFile.hasPrefix(directory($0)) }
             if let best = containing.max(by: { directory($0).count < directory($1).count }) {
@@ -410,4 +418,43 @@ enum XcodeRunPlan {
         }
     }
     private static func normalized(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path }
+}
+
+/// Xcode 记录 SwiftPM checkout 对应的宿主工作区，自定义 DerivedData 路径也使用相同布局。
+enum XcodeSourcePath {
+    static func packageBuildDirectory(containing sourceDirectory: URL) -> URL? {
+        var directory = sourceDirectory
+        while directory.path != "/" {
+            let parent = directory.deletingLastPathComponent()
+            if directory.lastPathComponent == "checkouts", parent.lastPathComponent == "SourcePackages" {
+                return parent.deletingLastPathComponent()
+            }
+            directory = parent
+        }
+        return nil
+    }
+
+    static func hostProject(in buildDirectory: URL) -> String? {
+        let info = buildDirectory.appendingPathComponent("info.plist")
+        guard let data = try? Data(contentsOf: info),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+              let path = plist["WorkspacePath"] as? String, (path as NSString).isAbsolutePath else { return nil }
+        let entry = projectEntry(path)
+        guard ["xcworkspace", "xcodeproj"].contains((entry as NSString).pathExtension),
+              FileManager.default.fileExists(atPath: entry) else { return nil }
+        return entry
+    }
+
+    static func projectEntry(_ path: String) -> String {
+        let project = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        let parent = project.deletingLastPathComponent()
+        return project.lastPathComponent == "project.xcworkspace" && parent.pathExtension == "xcodeproj" ? parent.path : project.path
+    }
+
+    static func sourceDirectory(for sourceFile: String) -> String? {
+        guard (sourceFile as NSString).isAbsolutePath else { return nil }
+        let directory = URL(fileURLWithPath: sourceFile).deletingLastPathComponent().standardizedFileURL
+        guard let buildDirectory = packageBuildDirectory(containing: directory) else { return directory.path }
+        return hostProject(in: buildDirectory).map { ($0 as NSString).deletingLastPathComponent }
+    }
 }

@@ -794,6 +794,31 @@ final class NetworkRecorder {
         return session
     }
 
+    /// MCP 读取的一次启动: 按顺序的请求记录, 以及读取内容所需的位置。已清空的请求不包含在内。
+    struct MCPSession {
+        let capture: Bool
+        let records: [(id: UInt64, record: [String: Any])]
+        let bodyURL: (UInt64, String) -> URL
+    }
+
+    /// MCP 只读查询: 当前启动的抓包。会话还属于以前的启动(新启动尚未产生请求)时 records 为空。
+    func mcpSession(deviceId: String, bundleId: String, instanceId: String, completion: @escaping (MCPSession) -> Void) {
+        queue.async { [self] in
+            let capture = isEnabled(deviceId, bundleId)
+            guard let source = sources[deviceId + "|" + bundleId], let session = source.session,
+                  session.instanceId == instanceId else {
+                completion(MCPSession(capture: capture, records: [], bodyURL: { _, _ in URL(fileURLWithPath: "/dev/null") }))
+                return
+            }
+            let through = clearedThrough(source, instanceId: instanceId)
+            let records = session.order.compactMap { id -> (id: UInt64, record: [String: Any])? in
+                guard id > through, let record = session.records[id] else { return nil }
+                return (id, record)
+            }
+            completion(MCPSession(capture: capture, records: records, bodyURL: { session.bodyURL($0, side: $1) }))
+        }
+    }
+
     /// 网络面板「当前启动」对应的会话文件夹名和 App 进程
     func current(deviceId: String, bundleId: String, completion: @escaping (_ session: String?, _ instanceId: String) -> Void) {
         queue.async { [self] in

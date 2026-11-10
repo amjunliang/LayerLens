@@ -60,6 +60,21 @@ final class SimulatorLive {
         return process.terminationStatus == 0
     }
 
+    func pressHome(udid: String, completion: @escaping (Bool) -> Void) {
+        guard let device = SimBridge.device(udid: udid) else { completion(false); return }
+        let button = SimHomeButton(device: device)
+        func finish(_ sent: Bool) {
+            withExtendedLifetime(button) { completion(sent) }
+        }
+        button.press(legacyPress: {
+            guard let touch = SimTouch(device: device) else { finish(false); return }
+            let down = touch.sendHome(down: true)
+            usleep(30_000)
+            let up = touch.sendHome(down: false)
+            finish(down && up)
+        }, unavailable: { finish(false) }, sent: { finish(true) })
+    }
+
     func accept(udid: String, head: HTTPRequestHead, leftover: Data, connection: HubConnection) {
         guard head.header("Upgrade")?.lowercased() == "websocket" else {
             connection.respond(.error(400, "WebSocket upgrade required"))

@@ -17,7 +17,7 @@ import Foundation
         <Scheme><LaunchAction buildConfiguration="Debug"><BuildableProductRunnable><BuildableReference BlueprintName="App" ReferencedContainer="container:App.xcodeproj"/></BuildableProductRunnable><CommandLineArguments><CommandLineArgument argument="-test" isEnabled="YES"/></CommandLineArguments><EnvironmentVariables><EnvironmentVariable key="MODE" value="test" isEnabled="YES"/></EnvironmentVariables></LaunchAction></Scheme>
         """
         try scheme.write(to: project.appendingPathComponent("xcshareddata/xcschemes/App.xcscheme"), atomically: true, encoding: .utf8)
-        let settings: [[String: Any]] = [["target": "App", "buildSettings": ["PRODUCT_BUNDLE_IDENTIFIER": bundle, "WRAPPER_EXTENSION": "app", "PROJECT_FILE_PATH": project.path, "TARGET_BUILD_DIR": root.path, "WRAPPER_NAME": "App.app"]]]
+        let settings: [[String: Any]] = [["target": "App", "buildSettings": ["PRODUCT_BUNDLE_IDENTIFIER": bundle, "WRAPPER_EXTENSION": "app", "PROJECT_FILE_PATH": project.path, "TARGET_BUILD_DIR": "MOCK_BUILD_DIR", "WRAPPER_NAME": "App.app"]]]
         try JSONSerialization.data(withJSONObject: settings).write(to: root.appendingPathComponent("settings.json"))
         let info = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": bundle], format: .xml, options: 0)
         try info.write(to: root.appendingPathComponent("app-info.plist"))
@@ -25,18 +25,26 @@ import Foundation
         let executable = root.appendingPathComponent("xcrun")
         let script = """
         #!/bin/sh
+        derived=''
+        previous=''
+        for argument in "$@"; do
+          if [ "$previous" = '-derivedDataPath' ]; then derived="$argument"; break; fi
+          previous="$argument"
+        done
+        products="$derived/Build/Products/Debug-iphonesimulator"
         case " $* " in
           *" -list "*) echo list >> '\(root.path)/events'; if [ -f '\(root.path)/hang' ]; then sleep 5; fi; cat '\(root.path)/schemes.json';;
-          *" -showBuildSettings "*) echo "$*" >> '\(root.path)/settings-events'; cat '\(root.path)/settings.json';;
+          *" -showBuildSettings "*)
+            echo "$*" >> '\(root.path)/settings-events'
+            settings='\(root.path)/settings.json'
+            case " $* " in
+              *" -scheme App "*) if [ -f '\(root.path)/retargeted-settings.json' ]; then settings='\(root.path)/retargeted-settings.json'; fi;;
+            esac
+            sed "s|MOCK_BUILD_DIR|$products|g" "$settings";;
           *" build "*)
             if [ -f '\(root.path)/fail-build' ]; then echo 'forced build error'; exit 1; fi
-            derived=''
-            while [ "$#" -gt 0 ]; do
-              if [ "$1" = '-derivedDataPath' ]; then shift; derived="$1"; fi
-              shift
-            done
-            mkdir -p "$derived/Build/Products/Debug-iphonesimulator/App.app"
-            cp '\(root.path)/app-info.plist' "$derived/Build/Products/Debug-iphonesimulator/App.app/Info.plist"
+            mkdir -p "$products/App.app"
+            cp '\(root.path)/app-info.plist' "$products/App.app/Info.plist"
             echo build >> '\(root.path)/events'; sleep 1;;
           *" install "*) echo install >> '\(root.path)/events'; if [ "$3" = device-slow ]; then sleep 4; fi;;
           *" launch "*) echo launch >> '\(root.path)/events';;
@@ -47,13 +55,27 @@ import Foundation
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let controller = CommandRunController(executable: executable.path, cacheRoot: root.appendingPathComponent("cache"))
         precondition(CommandRunController.findProjects(sourceDir: source.deletingLastPathComponent(), repository: nil)?.contains(project.path) == true)
+        let derived = root.appendingPathComponent("DerivedData/App")
+        let checkout = derived.appendingPathComponent("SourcePackages/checkouts/LayerLens/Pod/Classes")
+        try fm.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let metadata = try PropertyListSerialization.data(
+            fromPropertyList: ["WorkspacePath": project.appendingPathComponent("project.xcworkspace").path],
+            format: .xml, options: 0)
+        try metadata.write(to: derived.appendingPathComponent("info.plist"))
+        precondition(XcodeSourcePath.packageBuildDirectory(containing: checkout).flatMap(XcodeSourcePath.hostProject(in:)) == project.path,
+                     "A SwiftPM checkout must resolve to its host Xcode project")
+        precondition(XcodeSourcePath.packageBuildDirectory(containing: source.deletingLastPathComponent()) == nil)
         let relative = CommandRunController.relativePath(from: source.deletingLastPathComponent(), to: project)
         precondition(!relative.hasPrefix("/") && CommandRunController.resolveRelative(relative, from: source.deletingLastPathComponent()) == project.standardizedFileURL.path)
         precondition(CommandRunController.resolveRelative(project.path, from: source.deletingLastPathComponent()) == nil, "Absolute saved paths must be rejected")
-        let first = controller.start(device: "device-a", bundle: bundle, source: source.path, simulator: true)
+        let homeMarker = root.appendingPathComponent("home")
+        let first = controller.start(device: "device-a", bundle: bundle, source: source.path, simulator: true) {
+            try! Data().write(to: homeMarker)
+        }
         let deadline = Date().addingTimeInterval(10)
         while controller.status(id: first)?.0 != "building" && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
         precondition(controller.status(id: first)?.0 == "building" && controller.status(id: first)?.2 == true)
+        precondition(fm.fileExists(atPath: homeMarker.path), "Home must finish before the compiler starts")
         precondition(controller.currentRuns().contains { ($0["runId"] as? String) == first && ($0["app"] as? String) == bundle }, "A page reload must recover the active target's run")
         let second = controller.start(device: "device-a", bundle: bundle, source: source.path, simulator: true)
         let third = controller.start(device: "device-a", bundle: bundle, source: source.path, simulator: true)
@@ -77,7 +99,8 @@ import Foundation
         let afterCache = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         precondition(afterCache.components(separatedBy: "list").count == 2, "Restored projects must validate without enumerating schemes")
         let settingsAfterCache = try String(contentsOf: root.appendingPathComponent("settings-events"), encoding: .utf8)
-        precondition(settingsAfterCache == settingsBeforeCache, "A saved project must build directly without querying build settings")
+        precondition(settingsAfterCache.dropFirst(settingsBeforeCache.count).contains("-derivedDataPath"),
+                     "A saved Scheme must still validate its current product")
         try "".write(to: root.appendingPathComponent("fail-build"), atomically: true, encoding: .utf8)
         let failingBuild = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true)
         let failBuildDeadline = Date().addingTimeInterval(5)
@@ -85,7 +108,8 @@ import Foundation
         precondition(restoredController.status(id: failingBuild)?.1.contains("forced build error") == true, "Build failures must be reported")
         let afterFailBuild = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         let settingsAfterFailBuild = try String(contentsOf: root.appendingPathComponent("settings-events"), encoding: .utf8)
-        precondition(afterFailBuild == afterCache && settingsAfterFailBuild == settingsAfterCache, "A build error must not trigger project search, settings queries, installation or launch")
+        precondition(afterFailBuild == afterCache && settingsAfterFailBuild.dropFirst(settingsAfterCache.count).split(separator: "\n").count == 1,
+                     "A build error must stop after the required build settings query")
         try fm.removeItem(at: root.appendingPathComponent("fail-build"))
         var invalidated = UserDefaults.standard.dictionary(forKey: "LayerLensCommandRunRelativeProjects") as? [String: [String: String]] ?? [:]
         invalidated[bundle]?["scheme"] = "Missing"
@@ -107,15 +131,43 @@ import Foundation
         precondition(afterMissing == afterRetry, "Missing saved projects must not trigger discovery or build")
         invalidated[bundle]?["path"] = relative
         UserDefaults.standard.set(invalidated, forKey: "LayerLensCommandRunRelativeProjects")
-        let productRoot = root.appendingPathComponent("product-test")
-        let output = productRoot.appendingPathComponent("Build/Products/Debug-iphonesimulator")
-        try fm.createDirectory(at: output.appendingPathComponent("App.app"), withIntermediateDirectories: true)
-        try info.write(to: output.appendingPathComponent("App.app/Info.plist"))
-        precondition(CommandRunController.findBuiltApp(derived: productRoot.path, configuration: "Debug", simulator: true, bundleId: bundle) != nil)
-        precondition(CommandRunController.findBuiltApp(derived: productRoot.path, configuration: "Debug", simulator: true, bundleId: "wrong.bundle") == nil)
-        try fm.createDirectory(at: output.appendingPathComponent("Other.app"), withIntermediateDirectories: true)
-        try info.write(to: output.appendingPathComponent("Other.app/Info.plist"))
-        precondition(CommandRunController.findBuiltApp(derived: productRoot.path, configuration: "Debug", simulator: true, bundleId: bundle) == nil, "Ambiguous products must not be installed")
+        // A cached Scheme that now targets a different Bundle ID must never install the existing product.
+        var retargeted = settings
+        var retargetedBuild = retargeted[0]["buildSettings"] as! [String: Any]
+        retargetedBuild["PRODUCT_BUNDLE_IDENTIFIER"] = bundle + ".other"
+        retargeted[0]["buildSettings"] = retargetedBuild
+        try JSONSerialization.data(withJSONObject: retargeted).write(to: root.appendingPathComponent("settings.json"))
+        let wrongTarget = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true)
+        let wrongTargetDeadline = Date().addingTimeInterval(5)
+        while restoredController.status(id: wrongTarget)?.0 != "failed" && Date() < wrongTargetDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(restoredController.status(id: wrongTarget)?.0 == "failed" && restoredController.status(id: wrongTarget)?.2 == false)
+        let afterWrongTarget = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        precondition(afterWrongTarget == afterMissing, "A stale product must not trigger build, install or launch")
+        try JSONSerialization.data(withJSONObject: settings).write(to: root.appendingPathComponent("settings.json"))
+        let schemeFile = project.appendingPathComponent("xcshareddata/xcschemes/App.xcscheme")
+        let invalidHome = root.appendingPathComponent("invalid-launch-home")
+        try scheme.replacingOccurrences(of: "-test", with: "$(MISSING_TEST_BUILD_SETTING)")
+            .write(to: schemeFile, atomically: true, encoding: .utf8)
+        let invalidLaunch = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true) {
+            try! Data().write(to: invalidHome)
+        }
+        let invalidLaunchDeadline = Date().addingTimeInterval(5)
+        while restoredController.status(id: invalidLaunch)?.0 != "failed" && Date() < invalidLaunchDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(restoredController.status(id: invalidLaunch)?.1.contains("启动参数") == true)
+        precondition(!fm.fileExists(atPath: invalidHome.path), "An invalid launch configuration must fail before Home")
+        let afterInvalidLaunch = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        precondition(afterInvalidLaunch == afterWrongTarget, "An invalid launch configuration must not build or install")
+        try scheme.write(to: schemeFile, atomically: true, encoding: .utf8)
+        let product = root.appendingPathComponent("TestProduct.app")
+        precondition(!CommandRunController.appMatchesBundle(product, bundleId: bundle))
+        try fm.createDirectory(at: product, withIntermediateDirectories: true)
+        try info.write(to: product.appendingPathComponent("Info.plist"))
+        precondition(CommandRunController.appMatchesBundle(product, bundleId: bundle))
+        precondition(!CommandRunController.appMatchesBundle(product, bundleId: bundle + ".other"))
         let scanDirectory = root.appendingPathComponent("ScanLimit")
         try fm.createDirectory(at: scanDirectory, withIntermediateDirectories: true)
         for index in 0..<256 { try "".write(to: scanDirectory.appendingPathComponent("item-\(index)"), atomically: true, encoding: .utf8) }
@@ -201,7 +253,7 @@ import Foundation
         try scheme.write(to: project.appendingPathComponent("xcshareddata/xcschemes/AppCopy.xcscheme"), atomically: true, encoding: .utf8)
         try "{\"project\":{\"schemes\":[\"App\",\"AppCopy\"]}}".write(to: root.appendingPathComponent("schemes.json"), atomically: true, encoding: .utf8)
         let ambiguousBundle = bundle + ".ambiguous"
-        let ambiguousSettings: [[String: Any]] = [["target": "App", "buildSettings": ["PRODUCT_BUNDLE_IDENTIFIER": ambiguousBundle, "WRAPPER_EXTENSION": "app", "PROJECT_FILE_PATH": project.path, "TARGET_BUILD_DIR": root.path, "WRAPPER_NAME": "App.app"]]]
+        let ambiguousSettings: [[String: Any]] = [["target": "App", "buildSettings": ["PRODUCT_BUNDLE_IDENTIFIER": ambiguousBundle, "WRAPPER_EXTENSION": "app", "PROJECT_FILE_PATH": project.path, "TARGET_BUILD_DIR": "MOCK_BUILD_DIR", "WRAPPER_NAME": "App.app"]]]
         try JSONSerialization.data(withJSONObject: ambiguousSettings).write(to: root.appendingPathComponent("settings.json"))
         let settingsBefore = (try? String(contentsOf: root.appendingPathComponent("settings-events"), encoding: .utf8)) ?? ""
         let ambiguous = controller.start(device: "device-ambiguous", bundle: ambiguousBundle, source: source.path, simulator: true)
@@ -223,6 +275,35 @@ import Foundation
         while timeoutController.status(id: timeoutJob)?.0 != "failed" && Date() < timeoutDeadline { Thread.sleep(forTimeInterval: 0.02) }
         precondition(timeoutController.status(id: timeoutJob)?.0 == "failed", "A stuck query must terminate and report failure")
         precondition(Date().timeIntervalSince(timeoutStart) < 4, "Inherited child output pipes must not keep a timed-out query stuck")
+        try fm.removeItem(at: root.appendingPathComponent("hang"))
+        try JSONSerialization.data(withJSONObject: settings).write(to: root.appendingPathComponent("settings.json"))
+        try "{\"project\":{\"schemes\":[\"App\"]}}".write(to: root.appendingPathComponent("schemes.json"), atomically: true, encoding: .utf8)
+        let customBuild = root.appendingPathComponent("Custom/Deeper/DerivedData/App")
+        let customCheckout = customBuild.appendingPathComponent("SourcePackages/checkouts/LayerLens/Pod/Classes")
+        try fm.createDirectory(at: customCheckout, withIntermediateDirectories: true)
+        try metadata.write(to: customBuild.appendingPathComponent("info.plist"))
+        func runPackage(_ directory: URL) {
+            let id = controller.start(device: "device-package", bundle: bundle, source: directory.appendingPathComponent("Bridge.m").path, simulator: true)
+            let deadline = Date().addingTimeInterval(10)
+            while !["succeeded", "failed"].contains(controller.status(id: id)?.0 ?? "") && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            precondition(controller.status(id: id)?.0 == "succeeded", controller.status(id: id)?.1 ?? "Missing package run")
+        }
+        runPackage(checkout)
+        let beforeRelocation = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        try fm.removeItem(at: customBuild.appendingPathComponent("SourcePackages"))
+        runPackage(customCheckout)
+        let afterRelocation = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        precondition(!afterRelocation.dropFirst(beforeRelocation.count).contains("list"), "Relocating DerivedData must reuse the host project’s saved Scheme")
+        try JSONSerialization.data(withJSONObject: retargeted).write(to: root.appendingPathComponent("retargeted-settings.json"))
+        try "{\"project\":{\"schemes\":[\"App\",\"AppCopy\"]}}".write(to: root.appendingPathComponent("schemes.json"), atomically: true, encoding: .utf8)
+        runPackage(customCheckout)
+        let afterRecovery = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        precondition(afterRecovery.dropFirst(afterRelocation.count).contains("list"), "A retargeted cached Scheme must trigger fresh discovery")
+        runPackage(customCheckout)
+        let afterRecoveredRun = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        precondition(!afterRecoveredRun.dropFirst(afterRecovery.count).contains("list"), "The replacement Scheme must become the cached choice")
         print("PASS command run: latest per device, install/launch isolation and scheme options")
     }
 }

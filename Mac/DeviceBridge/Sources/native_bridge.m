@@ -570,12 +570,19 @@ static void installNativeSink(void){
             if(self->touching){ [self touch:NO];self->touching=NO; }
             IPBKeyboardState empty={0};if(self->keyboardService) [self keyboard:empty];
         }else if([type isEqual:@"button"]){
+            NSString *homeRequest=[message[@"homeRequestId"] isKindOfClass:NSString.class]?message[@"homeRequestId"]:nil;
+            NSNumber *homeDeadline=[message[@"deadline"] isKindOfClass:NSNumber.class]?message[@"deadline"]:nil;
+            if(homeRequest && (!homeDeadline || [NSDate date].timeIntervalSince1970 >= homeDeadline.doubleValue)) return;
             uint64_t page=[message[@"button"] isEqual:@"app-switcher"]?0xff01:0x0c;
             uint64_t usage=page==0xff01?0x10:([message[@"button"] isEqual:@"sleep-wake"]?0x30:0x40);
-            [self send:^{ return coredevice_send_hid_button_custom(self->buttons,page,usage,0); }];
+            int down=[self send:^{ return coredevice_send_hid_button_custom(self->buttons,page,usage,0); }];
             usleep(80000);
-            [self send:^{ return coredevice_send_hid_button_custom(self->buttons,page,usage,1); }];
-            [self send:^{ return coredevice_send_hid_button_barrier(self->buttons); }];
+            int up=[self send:^{ return coredevice_send_hid_button_custom(self->buttons,page,usage,1); }];
+            int barrier=[self send:^{ return coredevice_send_hid_button_barrier(self->buttons); }];
+            if(homeRequest){
+                NSDictionary *result=@{@"type":@"home-result",@"requestId":homeRequest,@"ok":@(down==0 && up==0 && barrier==0)};
+                [self emit:8 data:[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]];
+            }
         }else if([type isEqual:@"key"] || [type isEqual:@"paste"]){
             NSString *code=message[@"code"];uint32_t usage=0;
             IPBKeyboardState state={0};

@@ -36,7 +36,7 @@ common=(
   Mac/LayerLens/DurableFile.swift Mac/LayerLens/BoundedStreamWriter.swift
   Mac/LayerLens/HTTPMessage.swift Mac/LayerLens/HTTPClient.swift
   Mac/LayerLens/Usbmux.swift Mac/LayerLens/AppEventStream.swift
-  Mac/LayerLens/NetworkRecorder.swift Mac/Tests/RecorderTestSupport.swift
+  Mac/LayerLens/NetworkRecorder.swift Mac/LayerLens/MCPRecords.swift Mac/Tests/RecorderTestSupport.swift
 )
 swift_test() {
   local name="$1"
@@ -60,7 +60,10 @@ swift_test home-button Mac/LayerLens/SimulatorBridge.swift Mac/Tests/SimHomeButt
 swift_test live-video Mac/LayerLens/LiveVideo.swift Mac/Tests/LiveVideoTests.swift
 swift_test target-history Mac/LayerLens/TargetHistory.swift Mac/Tests/TargetHistoryTests.swift
 swift_test target-state Mac/LayerLens/TargetStateHub.swift Mac/Tests/TargetStateHubTests.swift
-swift_test git-paths Mac/LayerLens/GitController.swift Mac/Tests/GitPathTests.swift
+swift_test mcp-context Mac/LayerLens/MCPContext.swift Mac/Tests/MCPContextTests.swift
+swift_test mcp-records Mac/LayerLens/MCPRecords.swift Mac/Tests/MCPRecordsTests.swift
+swift_test mcp-clients Mac/LayerLens/MCPClients.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/MCPClientsTests.swift
+swift_test git-paths Mac/LayerLens/GitController.swift Mac/LayerLens/XcodeController.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/GitPathTests.swift
 swift_test streams-pty Mac/LayerLens/BoundedStreamWriter.swift Mac/LayerLens/PTYInputWriter.swift Mac/Tests/StreamAndPTYTests.swift
 swift_test proxy Mac/LayerLens/HTTPMessage.swift Mac/LayerLens/ProxyTunnel.swift Mac/Tests/ProxyTunnelTests.swift
 swift_test command-run Mac/LayerLens/CommandRunController.swift Mac/LayerLens/XcodeController.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/CommandRunTests.swift
@@ -79,7 +82,7 @@ swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift 
 
 for file in \
   GitViewStateTests.cjs GitInteractionTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs TargetTaskTests.cjs AutoFollowTests.cjs PageActivityTests.cjs LiveVideoDecoderTests.cjs LiveBudgetWebTests.cjs NetworkAsyncStateTests.cjs \
-  NetworkCaptureActionTests.cjs NetworkSmallScreenTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LivePixelZoomTests.cjs; do
+  NetworkCaptureActionTests.cjs NetworkSmallScreenTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LivePixelZoomTests.cjs MCPContextWebTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"
 done

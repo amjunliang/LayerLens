@@ -57,6 +57,9 @@
     node[@"specialTrace"] = displayObject.specialTrace ?: [NSNull null];
     node[@"title"] = item.customDisplayTitle ?: [NSNull null];
     node[@"text"] = [self displayTextOfView:[layer isKindOfClass:CALayer.class] ? layer.layerlens_hostView : nil] ?: [NSNull null];
+    NSObject *viewObject = item.viewObject ? [NSObject layerlens_objectWithOid:item.viewObject.oid] : nil;
+    NSString *identifier = [viewObject isKindOfClass:UIView.class] ? ((UIView *)viewObject).accessibilityIdentifier : nil;
+    node[@"identifier"] = identifier.length ? identifier : [NSNull null];
     node[@"frame"] = [self arrayFromRect:item.frame];
     node[@"rect"] = [self arrayFromRect:rect];
     node[@"hidden"] = @(item.isHidden);

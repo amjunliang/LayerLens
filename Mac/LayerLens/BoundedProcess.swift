@@ -27,10 +27,13 @@ enum BoundedProcess {
         let timedOut: Bool
     }
     /// 合并错误输出, 避免两个管道互相等待; 保留退出状态供调用方解释错误。
-    static func capture(_ path: String, _ arguments: [String], timeout: TimeInterval, includeError: Bool = true) -> Result? {
+    static func capture(_ path: String, _ arguments: [String], timeout: TimeInterval, includeError: Bool = true,
+                        environment: [String: String]? = nil, directory: URL? = nil) -> Result? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
+        if let environment { process.environment = environment }
+        if let directory { process.currentDirectoryURL = directory }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = includeError ? pipe : FileHandle.nullDevice

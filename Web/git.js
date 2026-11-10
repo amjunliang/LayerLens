@@ -36,6 +36,7 @@ const git = {
   active: false,
   timer: 0,
   key: '',
+  device: '',
   es: null,
   connectSeq: 0,
   repoController: null,
@@ -61,7 +62,7 @@ const git = {
   // 进行中的暂存或取消暂存 { key, paths }: key 为点击的复选框, 菜单或空格触发时为空, 按路径标记
   staging: null,
   // 提交并推送进行中, 推送结束前提交按钮不可用
-  committing: false,
+  committing: null,
   diffSize: gitLoadDiffSize(),
   // 文件按目录树显示, 关闭时为平铺列表
   tree: gitLoadTreeMode(),
@@ -303,6 +304,10 @@ function gitDiffSizeControl() {
   return control;
 }
 
+function gitIsCurrent() {
+  return (targets.deviceId || '') === git.device && (targets.bundleId || '') === git.key;
+}
+
 function gitVisible() {
   return logVisible() && net.tab === 'git';
 }
@@ -314,10 +319,10 @@ function syncGitPanel() {
   if (visible && !git.active) {
     git.active = true;
     clearTimeout(git.idleTimer);
-    if (!git.es || git.es.readyState === LayerLensEventSource.CLOSED || (targets.bundleId || '') !== git.key) gitConnect();
+    if (!git.es || git.es.readyState === LayerLensEventSource.CLOSED || !gitIsCurrent()) gitConnect();
     // 同一窗口切换 App 时重新连接
     git.timer = setInterval(() => {
-      if ((targets.bundleId || '') !== git.key) gitConnect();
+      if (!gitIsCurrent()) gitConnect();
     }, 1000);
   } else if (!visible && git.active) {
     git.active = false;
@@ -338,14 +343,18 @@ function gitDisconnect() {
 async function gitConnect() {
   gitDisconnect();
   const seq = git.connectSeq;
-  const key = targets.bundleId || '';
+  const key = targets.bundleId || '', device = targets.deviceId || '';
   // 同一个 App 重新连接时保留列表、选中和 diff, 只重新订阅状态
-  if (key && key === git.key && git.repo && git.status) {
+  if (key && gitIsCurrent() && git.repo && git.status) {
     gitSubscribe(key);
     return;
   }
   git.key = key;
+  git.device = device;
   git.repo = null;
+  git.busy = new Set();
+  git.staging = null;
+  git.committing = null;
   git.status = null;
   git.dirStatus = null;
   git.statusText = '';
@@ -354,6 +363,7 @@ async function gitConnect() {
   git.commits = [];
   git.logKey = null;
   git.logMore = false;
+  git.logLoading = false;
   git.error = key ? '' : t('未选择 App');
   gitRender();
   if (!key) return;
@@ -367,7 +377,7 @@ async function gitConnect() {
     clearTimeout(timer);
     if (git.repoController === controller) git.repoController = null;
   }
-  if (seq !== git.connectSeq || key !== git.key || !git.active) return;
+  if (seq !== git.connectSeq || !gitIsCurrent() || !git.active) return;
   if (controller.signal.aborted) repo = { error: t('查找仓库超时，请点击刷新重试') };
   if (repo.error) {
     git.error = repo.reason === 'noSource'
@@ -383,7 +393,8 @@ async function gitConnect() {
 }
 
 function gitSubscribe(key) {
-  const es = new LayerLensEventSource(`/api/hub/git/events?app=${encodeURIComponent(key)}`);
+  const query = new URLSearchParams({ device: git.device, app: key, root: git.repo.root });
+  const es = new LayerLensEventSource(`/api/hub/git/events?${query}`);
   git.es = es;
   es.addEventListener('status', (e) => {
     if (git.es !== es) return;
@@ -393,13 +404,16 @@ function gitSubscribe(key) {
   es.onerror = () => {
     if (es.readyState !== LayerLensEventSource.CLOSED) return;
     setTimeout(() => {
-      if (git.es === es && git.active) gitConnect();
+      if (git.es === es && git.active) {
+        git.key = '';
+        gitConnect();
+      }
     }, GIT_RETRY_MS);
   };
 }
 
 async function gitRequest(action, params = {}, options = {}) {
-  const query = new URLSearchParams({ app: git.key, ...params });
+  const query = new URLSearchParams({ device: git.device, app: git.key, ...(git.repo ? { root: git.repo.root } : {}), ...params });
   try {
     const response = await fetch(`/api/hub/git/${action}?${query}`, options);
     return await response.json();
@@ -408,31 +422,49 @@ async function gitRequest(action, params = {}, options = {}) {
   }
 }
 
-// 写操作: 期间禁用对应按钮, 失败时提示 git 的输出
-async function gitAction(action, body = {}) {
-  if (git.busy.has(action)) return false;
-  git.busy.add(action);
-  gitRenderHead();
-  let result;
+function gitActionTarget() {
+  if (!gitIsCurrent() || !git.repo) return null;
+  return { device: git.device, app: git.key, repo: git.repo, busy: git.busy };
+}
+
+function gitActionTargetIsCurrent(target) {
+  return gitIsCurrent() && git.repo === target.repo && git.device === target.device && git.key === target.app;
+}
+
+// 提交并推送共用点击时的目标，其他操作完成后仅更新对应面板。
+async function gitAction(action, body = {}, pinnedTarget = null) {
+  const target = pinnedTarget || gitActionTarget();
+  if (!target || target.busy.has(action)) return false;
+  target.busy.add(action);
+  if (gitActionTargetIsCurrent(target)) gitRenderHead();
+  let result, status;
   try {
     const response = await fetch(`/api/hub/git/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app: git.key, ...body }),
+      body: JSON.stringify({ ...body, device: target.device, app: target.app, root: target.repo.root }),
     });
+    status = response.status;
     result = await response.json().catch(() => ({ error: String(response.status) }));
   } catch (e) {
     result = { error: e.message };
   }
-  git.busy.delete(action);
-  gitRenderHead();
-  if (result.error) {
-    // git 的错误常有多行, 提示里只放最有用的前两行
-    const lines = String(result.error).split('\n').map((line) => line.trim()).filter(Boolean);
-    toast(t('git 失败: {0}', lines.slice(0, 2).join(' ')), true, true);
-    return false;
+  target.busy.delete(action);
+  const current = gitActionTargetIsCurrent(target);
+  if (current) {
+    if (status === 409 && result.reason === 'repositoryChanged') {
+      git.key = '';
+      gitConnect();
+    } else {
+      gitRenderHead();
+    }
   }
-  return true;
+  if (result.error && (current || pinnedTarget)) {
+    const lines = String(result.error).split('\n').map((line) => line.trim()).filter(Boolean);
+    const message = lines.slice(0, 2).join(' ');
+    toast(t('git 失败: {0}', current ? message : target.repo.root + ' · ' + message), true, true);
+  }
+  return !result.error && (current || !!pinnedTarget);
 }
 
 function gitOnStatus(text) {
@@ -474,13 +506,16 @@ function gitFindFile(group, path) {
 // 暂存或取消暂存: 请求是异步的, 文件多或仓库大时 git 较慢; 执行期间点击的复选框显示加载, 其余复选框暂不可点
 async function gitStage(action, paths, key = '') {
   if (!paths.length || git.staging) return false;
-  git.staging = { key, paths: new Set(paths) };
+  const staging = { key, paths: new Set(paths) };
+  git.staging = staging;
   gitRenderHead();
   gitMarkStaging();
   const ok = await gitAction(action, { paths });
-  git.staging = null;
-  gitRenderHead();
-  gitMarkStaging();
+  if (git.staging === staging) {
+    git.staging = null;
+    gitRenderHead();
+    gitMarkStaging();
+  }
   return ok;
 }
 
@@ -511,10 +546,12 @@ async function gitRefresh() {
 // key: 读取时的分支状态, 期间状态变化后旧结果作废
 async function gitLoadLog(key, reset) {
   if (!reset && (git.logLoading || !git.logMore)) return;
+  const target = gitActionTarget();
+  if (!target) return;
   git.logKey = key;
   git.logLoading = true;
   const result = await gitRequest('log', { skip: reset ? 0 : git.commits.length });
-  if (git.logKey !== key) return;
+  if (!gitActionTargetIsCurrent(target) || git.logKey !== key) return;
   git.logLoading = false;
   const commits = result.commits || [];
   git.commits = reset ? commits : git.commits.concat(commits);
@@ -1014,7 +1051,10 @@ function gitDiscardButton(group, file) {
   button.addEventListener('click', (e) => {
     e.stopPropagation();
     const items = gitTargets(group, file);
-    showConfirm(button, { ...gitDiscardConfirm(items), onConfirm: () => gitDiscard(items) });
+    const repo = git.repo;
+    showConfirm(button, { ...gitDiscardConfirm(items), onConfirm: () => {
+      if (git.repo === repo && gitIsCurrent()) gitDiscard(items);
+    } });
   });
   return button;
 }
@@ -1142,12 +1182,17 @@ function gitHunkButton(label, onClick) {
 
 // 放弃区块不可撤销, 先在气泡中确认
 function gitHunkDiscardButton(hunk) {
-  const button = gitHunkButton(t('放弃区块'), () => showConfirm(button, {
-    title: t('放弃这个区块的改动?'),
-    detail: t('此操作不可撤销'),
-    action: t('放弃'),
-    onConfirm: () => gitHunkAction('discard', hunk),
-  }));
+  const button = gitHunkButton(t('放弃区块'), () => {
+    const repo = git.repo;
+    showConfirm(button, {
+      title: t('放弃这个区块的改动?'),
+      detail: t('此操作不可撤销'),
+      action: t('放弃'),
+      onConfirm: () => {
+        if (git.repo === repo && gitIsCurrent()) gitHunkAction('discard', hunk);
+      },
+    });
+  });
   return button;
 }
 
@@ -1266,7 +1311,10 @@ function gitDiffView(text, multiple, hunkGroup) {
 const GIT_PUSH_AFTER_KEY = 'layerlens_git_push_after';
 
 async function gitCommit() {
-  const message = $('gitMessage').value.trim();
+  const target = gitActionTarget();
+  if (!target || git.committing) return;
+  const draft = $('gitMessage').value;
+  const message = draft.trim();
   const amend = $('gitAmend').checked;
   if (!message && !amend) {
     $('gitMessage').focus();
@@ -1274,22 +1322,26 @@ async function gitCommit() {
     return;
   }
   const pushAfter = !!git.status?.hasRemote && $('gitPushAfter').checked;
-  // 提交到推送结束前按钮保持不可用, 显示推送进度
-  git.committing = true;
+  const expectedBranch = git.status?.branch?.head;
+  git.committing = target;
   try {
-    if (!(await gitAction('commit', { message, amend }))) return;
-    $('gitMessage').value = '';
-    gitFitMessage();
-    $('gitAmend').checked = false;
-    if (!pushAfter) {
-      toast(t('已提交'));
-      return;
+    if (!(await gitAction('commit', { message, amend, expectedBranch }, target))) return;
+    if (gitActionTargetIsCurrent(target)) {
+      if ($('gitMessage').value === draft) {
+        $('gitMessage').value = '';
+        gitFitMessage();
+      }
+      if ($('gitAmend').checked === amend) $('gitAmend').checked = false;
+      if (!pushAfter) toast(t('已提交'));
     }
-    // 推送失败时 gitAction 已提示原因, 提交已完成
-    if (await gitAction('push')) toast(t('已提交并推送'));
+    if (pushAfter && await gitAction('push', { expectedBranch }, target) && gitActionTargetIsCurrent(target)) {
+      toast(t('已提交并推送'));
+    }
   } finally {
-    git.committing = false;
-    gitRenderHead();
+    if (git.committing === target) {
+      git.committing = null;
+      gitRenderHead();
+    }
   }
 }
 

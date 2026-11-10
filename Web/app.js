@@ -427,6 +427,94 @@ function pageHasFocus() {
     (typeof window.LAYERLENS_WINDOW_FOCUSED === 'boolean' ? window.LAYERLENS_WINDOW_FOCUSED : document.hasFocus());
 }
 
+// MCP 使用最后获得焦点的窗口。窗口 ID 每次整页加载重新生成，刷新后旧快照自然失效。
+function newMCPWindowId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+const mcpContext = {
+  windowId: newMCPWindowId(),
+  closed: false,
+  focusEpoch: 0,
+  focusPending: false,
+  revision: 0,
+  timer: 0,
+};
+
+// 只上报 element、owner、vc; element 已包含 ivar、类名、文字和 identifier. 与 MCPContext.swift 的 MCPNodeInfo 一致
+function mcpSelectedInfo() {
+  const node = state.nodes.get(viewKeyOf(state.selected));
+  if (!node) return null;
+  let element = elementLine(node, codeIvars(node));
+  if (node.identifier) element += ` · id=${node.identifier}`;
+  let owner = '';
+  for (let p = node.parent; p; p = p.parent) {
+    if (isCodeClass(p.cls)) { owner = p.cls; break; }
+  }
+  let viewController = '';
+  for (let p = node; p; p = p.parent) {
+    if (p.vcClass) { viewController = p.vcClass; break; }
+  }
+  const info = { element };
+  if (owner && owner !== node.cls) info.owner = owner;
+  if (viewController) info.vc = viewController;
+  return info;
+}
+
+function publishMCPContext() {
+  mcpContext.timer = 0;
+  if (mcpContext.closed) return;
+  const device = currentDevice();
+  const payload = {
+    windowId: mcpContext.windowId,
+    revision: ++mcpContext.revision,
+    focusRequested: mcpContext.focusPending,
+    focusEpoch: mcpContext.focusEpoch,
+    deviceId: targets.deviceId || '',
+    bundleId: targets.bundleId || '',
+    deviceName: device?.name || targetHistory[targets.deviceId]?.name || '',
+    appName: targets.bundleId ? targetAppName(targets.deviceId, targets.bundleId) : '',
+    instanceId: appState.instanceId || currentApp()?.instanceId || '',
+    selected: mcpSelectedInfo(),
+  };
+  fetch('/api/hub/mcp/context', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    cache: 'no-store',
+    keepalive: true,
+  }).catch(() => {});
+  mcpContext.focusPending = false;
+}
+
+function scheduleMCPContext(focus = false) {
+  if (mcpContext.closed) return;
+  if (focus) {
+    mcpContext.focusEpoch = Date.now();
+    mcpContext.focusPending = true;
+  }
+  if (mcpContext.timer) return;
+  mcpContext.timer = setTimeout(publishMCPContext, focus ? 0 : 30);
+}
+
+function removeMCPContext() {
+  if (mcpContext.closed) return;
+  mcpContext.closed = true;
+  clearTimeout(mcpContext.timer);
+  mcpContext.timer = 0;
+  mcpContext.focusPending = false;
+  const body = JSON.stringify({ windowId: mcpContext.windowId });
+  try {
+    if (navigator.sendBeacon('/api/hub/mcp/context/remove', new Blob([body], { type: 'application/json' }))) return;
+  } catch (e) { /* use keepalive below */ }
+  fetch('/api/hub/mcp/context/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
 function setupPageActivity() {
   pageActivity.active = pageHasFocus();
   const update = () => {
@@ -445,14 +533,24 @@ function setupPageActivity() {
       stage3D.frame = 0;
       return;
     }
+    if (typeof scheduleMCPContext === 'function') scheduleMCPContext(true);
     liveRequestFocus();
     if (pageActivity.ready) resumePageActivity();
   };
-  window.addEventListener('pagehide', () => { cancelSwitch(); liveStop(); });
+  window.addEventListener('pagehide', () => { removeMCPContext(); cancelSwitch(); liveStop(); });
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted || !mcpContext.closed) return;
+    mcpContext.windowId = newMCPWindowId();
+    mcpContext.closed = false;
+    mcpContext.focusEpoch = 0;
+    mcpContext.revision = 0;
+    scheduleMCPContext(pageHasFocus());
+  });
   window.addEventListener('focus', update);
   window.addEventListener('blur', update);
   window.addEventListener('layerlens-window-focus', update);
   document.addEventListener('visibilitychange', update);
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext(pageActivity.active);
 }
 
 async function resumePageActivity() {
@@ -662,6 +760,7 @@ function applyHierarchy(roots) {
   renderCanvas();
   loadDetail();
   setStatus(true);
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
 }
 
 // MARK: - Status
@@ -995,6 +1094,7 @@ function clearSelection() {
     if (state.mode === '3d') updatePivot();
   }
   loadDetail();
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
 }
 
 function canEscapeClearSelection(event) {
@@ -1036,6 +1136,8 @@ function select(key, fromTree) {
   }
   clearTimeout(select.detailTimer);
   select.detailTimer = setTimeout(loadDetail, 120);
+  // 用户明确选择节点即视为与该窗口交互; 可覆盖嵌入式浏览器的 document.hasFocus 误判。
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext(true);
 }
 
 // 离开实时模式时刷新一次层级, 画面期间不同步
@@ -3424,6 +3526,7 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
     loadAppInfo();
   }
   clearHierarchy();
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
   // 换目标先显示设备实时画面, 用户再进入 2D/3D 时读取新层级。
   if ((changed || activating) && liveAvailable()) setMode('live');
   if (!activating && state.mode !== 'live') refresh();
@@ -3774,6 +3877,7 @@ function setAppState(value, message, link) {
   syncOfflineView();
   renderLaunchSelects();
   renderTargetMenu();
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
 }
 
 // 画布中央的引导；离线目标由 syncOfflineView 标记后在所有模式显示。
@@ -5496,7 +5600,7 @@ function shortcutsPanel() {
 }
 
 function openPanel(name) {
-  const panels = { options: [t('设置'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel], cache: [t('缓存管理'), cachePanel] };
+  const panels = { options: [t('设置'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel], cache: [t('缓存管理'), cachePanel], mcp: [t('MCP 设置'), mcpSetupPanel] };
   const panel = panels[name];
   if (!panel) return;
   state.panel = name;
@@ -5508,6 +5612,7 @@ function openPanel(name) {
   $('modal').classList.toggle('modal-narrow', name === 'options');
   if (name !== 'sandbox') sandbox = null;
   if (name !== 'cache') cacheView = null;
+  if (name !== 'mcp') mcpSetupClosed();
   $('modalTitle').textContent = panel[0];
   $('modalBody').replaceChildren(...panel[1]());
   $('modalBody').scrollTop = 0;
@@ -5517,6 +5622,7 @@ function openPanel(name) {
 function closePanel() {
   sandbox = null;
   cacheView = null;
+  mcpSetupClosed();
   hideLayer($('modal'), 160);
 }
 
@@ -8693,6 +8799,8 @@ function setup() {
   setupPanels();
   setupInputMemory();
   start();
+  // 首次使用时提示一键接入 Agent, 等页面加载完再检测, 不占用启动时间
+  setTimeout(() => mcpSetupHint(), 4000);
 }
 
 async function start() {

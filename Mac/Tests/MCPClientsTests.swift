@@ -1,0 +1,114 @@
+import Foundation
+
+func require(_ value: @autoclosure () -> Bool, _ message: String) {
+    if !value() { fatalError(message) }
+}
+
+/// 假的 claude / codex: 只在内存中记录 layerlens 的配置, 不触碰真实客户端。
+final class FakeCLI {
+    var configured: [String: String] = [:]
+    var calls: [[String]] = []
+
+    func run(_ path: String, _ arguments: [String]) -> MCPClientInstaller.CommandResult {
+        let name = (path as NSString).lastPathComponent
+        calls.append([name] + arguments)
+        if name == "zsh" || name == "bash" { return .init(status: 0, output: "/fake/bin:/usr/bin", timedOut: false) }
+        switch Array(arguments.prefix(2)) {
+        case ["mcp", "get"]:
+            guard let url = configured[name] else { return .init(status: 1, output: "No MCP server", timedOut: false) }
+            let output = name == "claude"
+                ? "layerlens:\n  Scope: User config\n  Type: http\n  URL: \(url)\n"
+                : "{\"name\":\"layerlens\",\"transport\":{\"type\":\"streamable_http\",\"url\":\"\(url)\"}}"
+            return .init(status: 0, output: output, timedOut: false)
+        case ["mcp", "add"]:
+            if configured[name] != nil { return .init(status: 1, output: "already exists", timedOut: false) }
+            configured[name] = arguments.last
+            return .init(status: 0, output: "", timedOut: false)
+        case ["mcp", "remove"]:
+            configured[name] = nil
+            return .init(status: 0, output: "", timedOut: false)
+        default:
+            return .init(status: 2, output: "unexpected", timedOut: false)
+        }
+    }
+}
+
+@main enum MCPClientsTests {
+    static func main() throws {
+        let url = "http://127.0.0.1:9523/mcp"
+        require(MCPClientInstaller.claudeURL("layerlens:\n  Scope: User config\n  URL: \(url)\n\nTo remove…") == url, "Claude URL parse")
+        require(MCPClientInstaller.codexURL("{\"transport\":{\"url\":\"\(url)\"}}") == url, "Codex URL parse")
+        require(MCPClientInstaller.codexURL("Error: none") == nil, "Codex parse must tolerate errors")
+
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("layerlens-mcp-clients-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent("fakebin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        for name in ["claude", "codex"] {
+            let file = bin.appendingPathComponent(name)
+            try Data("#!/bin/sh\n".utf8).write(to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+
+        let fake = FakeCLI()
+        let installer = MCPClientInstaller(url: url, home: home, shell: "/bin/zsh") { path, arguments, _, _ in
+            fake.run(path, arguments)
+        }
+        // 假 shell 返回的 PATH 里没有这两个命令, 放到 ~/.local/bin 模拟用户安装后靠补充目录找到
+        let local = home.appendingPathComponent(".local/bin")
+        try FileManager.default.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: bin, to: local)
+        require(installer.searchPath().first == "/fake/bin", "Login shell PATH must come first")
+        require(installer.locate(.claude) == local.appendingPathComponent("claude").path, "Claude not located from fallback directory")
+
+        var status = installer.status(.claude)
+        require(status.mcp == .missing && status.skill == .missing, "Fresh client must be missing")
+
+        require(installer.install(.claude, parts: [.mcp, .skill]).isEmpty, "Claude install failed")
+        require(fake.calls.contains(["claude", "mcp", "add", "--transport", "http", "--scope", "user", "layerlens", url]),
+                "Claude must be installed at user scope")
+        status = installer.status(.claude)
+        require(status.mcp == .installed && status.skill == .installed, "Claude install not detected")
+        let skill = try String(contentsOf: home.appendingPathComponent(".claude/skills/layerlens/SKILL.md"), encoding: .utf8)
+        require(skill.hasPrefix("---\nname: layerlens\n"), "Skill frontmatter must start the file")
+        require(skill.contains("get_context") && skill.contains("curl -s -X POST \(url)"), "Skill content missing")
+
+        // 已安装时再次安装不重复执行 add
+        let adds = fake.calls.filter { $0.prefix(3) == ["claude", "mcp", "add"] }.count
+        require(installer.install(.claude, parts: [.mcp]).isEmpty, "Reinstall failed")
+        require(fake.calls.filter { $0.prefix(3) == ["claude", "mcp", "add"] }.count == adds, "Installed MCP was added again")
+
+        // 地址不同: 先移除再添加
+        fake.configured["codex"] = "http://127.0.0.1:1/mcp"
+        require(installer.status(.codex).mcp == .different, "Different URL not detected")
+        require(installer.install(.codex, parts: [.mcp]).isEmpty, "Codex update failed")
+        require(fake.configured["codex"] == url, "Codex URL not updated")
+        require(fake.calls.contains(["codex", "mcp", "add", "layerlens", "--url", url]), "Codex add arguments")
+
+        // 旧版本 Skill 可以更新; 用户自己的同名文件不能覆盖或删除
+        let codexSkill = home.appendingPathComponent(".codex/skills/layerlens/SKILL.md")
+        try FileManager.default.createDirectory(at: codexSkill.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("old\n\(MCPClientInstaller.skillMarker)\n".utf8).write(to: codexSkill)
+        require(installer.skillState(.codex) == .outdated, "Outdated skill not detected")
+        require(installer.install(.codex, parts: [.skill]).isEmpty, "Skill update failed")
+        require(installer.skillState(.codex) == .installed, "Skill not updated")
+        try Data("my own skill".utf8).write(to: codexSkill)
+        require(installer.skillState(.codex) == .conflict, "Foreign skill not detected")
+        require(!installer.install(.codex, parts: [.skill]).isEmpty, "Foreign skill was overwritten")
+        require(!installer.remove(.codex, parts: [.skill]).isEmpty, "Foreign skill was removed")
+        require((try? String(contentsOf: codexSkill, encoding: .utf8)) == "my own skill", "Foreign skill changed")
+
+        // 移除: MCP 交给 CLI, Skill 删除文件和空目录
+        require(installer.remove(.claude, parts: [.mcp, .skill]).isEmpty, "Claude remove failed")
+        require(fake.calls.contains(["claude", "mcp", "remove", "--scope", "user", "layerlens"]), "Claude remove arguments")
+        require(fake.configured["claude"] == nil, "Claude MCP still configured")
+        require(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude/skills/layerlens").path),
+                "Empty skill directory left behind")
+        require(installer.remove(.claude, parts: [.mcp, .skill]).isEmpty, "Removing twice must succeed")
+
+        let statuses = installer.statuses()
+        require(statuses.map(\.client) == [.claude, .codex], "Statuses must keep client order")
+        require(statuses[1].json["mcp"] as? String == "installed" && statuses[1].json["found"] as? Bool == true, "Status JSON")
+        print("PASS MCP clients: locate, status, user-scope install, URL update, skill ownership and removal")
+    }
+}

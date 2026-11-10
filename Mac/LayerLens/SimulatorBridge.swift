@@ -371,7 +371,8 @@ final class SimHomeButton {
         usage: UInt64 = 0x40,
         holdMicroseconds: UInt32 = 30_000,
         legacyPress: @escaping () -> Void,
-        unavailable: @escaping () -> Void
+        unavailable: @escaping () -> Void,
+        sent: @escaping () -> Void = {}
     ) {
         lock.lock()
         guard !stopped, pendingPresses < 2 else { lock.unlock(); return }
@@ -402,6 +403,7 @@ final class SimHomeButton {
             xpc_connection_send_message(connection, Self.message(down: true, usagePage: usagePage, usage: usage))
             usleep(holdMicroseconds)
             xpc_connection_send_message(connection, Self.message(down: false, usagePage: usagePage, usage: usage))
+            sent()
         }
     }
 

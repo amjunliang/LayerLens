@@ -100,7 +100,9 @@
 
     [router addRoute:@"GET" path:@"/api/hierarchy" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         [self onMain:^{
-            responder([LayerLensHTTPResponse JSONResponse:[LayerLensLookinBridge hierarchy]]);
+            LayerLensHTTPResponse *response = [LayerLensHTTPResponse JSONResponse:[LayerLensLookinBridge hierarchy]];
+            response.headers[@"X-LayerLens-Instance-Id"] = [LayerLensLookinBridge instanceId];
+            responder(response);
         }];
     }];
 

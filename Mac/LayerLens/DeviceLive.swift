@@ -15,6 +15,13 @@ final class DeviceLive {
     private let queue = DispatchQueue(label: "com.layerlens.device.live")
     private var sessions: [String: DeviceLiveSession] = [:]
 
+    func pressHome(udid: String, deadline: Date, completion: @escaping (Bool) -> Void) {
+        queue.async { [self] in
+            guard let session = sessions[udid] else { completion(false); return }
+            session.pressHome(deadline: deadline, completion: completion)
+        }
+    }
+
     func shutdown() {
         queue.sync {
             let current = Array(sessions.values)
@@ -103,6 +110,7 @@ private final class DeviceLiveSession {
     }
     private var resolver: Process?
     private var native: UnsafeMutableRawPointer?
+    private var homeRequests: [String: (Bool) -> Void] = [:]
     private var startupTimer: DispatchSourceTimer?
     private var idleStop: DispatchWorkItem?
     private var viewers: [ObjectIdentifier: WebSocketConnection] = [:]
@@ -201,6 +209,11 @@ private final class DeviceLiveSession {
         if kind == 254 { LiveLog.write(String(decoding: data, as: UTF8.self)); return }
         if kind == 255 { fail(String(decoding: data, as: UTF8.self)); return }
         if kind == 8, let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           info["type"] as? String == "home-result", let id = info["requestId"] as? String {
+            homeRequests.removeValue(forKey: id)?(info["ok"] as? Bool == true)
+            return
+        }
+        if kind == 8, let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            ["rotation-result", "input-error"].contains(info["type"] as? String ?? "") {
             if let orientation = info["orientation"] as? Int, (1...4).contains(orientation) { geometry?["orientation"] = orientation }
             for socket in viewers.values { message(info, to: socket) }
@@ -258,6 +271,19 @@ private final class DeviceLiveSession {
     private func write(_ text: String) {
         if let native, let api = NativeDeviceAPI.shared { text.withCString { api.input(native, $0) } }
     }
+    func pressHome(deadline: Date, completion: @escaping (Bool) -> Void) {
+        queue.async { [self] in
+            let remaining = deadline.timeIntervalSinceNow
+            guard native != nil, !stopping, remaining > 0 else { completion(false); return }
+            let id = UUID().uuidString
+            homeRequests[id] = completion
+            write("{\"type\":\"button\",\"button\":\"swipe-to-home\",\"homeRequestId\":\"\(id)\",\"deadline\":\(deadline.timeIntervalSince1970)}")
+            queue.asyncAfter(deadline: .now() + remaining) { [weak self] in
+                self?.homeRequests.removeValue(forKey: id)?(false)
+            }
+        }
+    }
+
     private func input(_ text: String, id: ObjectIdentifier) {
         guard text.utf8.count < 1_000_000, let data = text.data(using: .utf8),
               let item = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let type = item["type"] as? String else { return }
@@ -315,7 +341,11 @@ private final class DeviceLiveSession {
     func shutdown() { queue.sync { stop() } }
     private func stop() {
         guard !stopping else { return }
-        stopping = true; idleStop?.cancel(); startupTimer?.cancel(); latestPixels = nil
+        stopping = true
+        let requests = homeRequests
+        homeRequests.removeAll()
+        for completion in requests.values { completion(false) }
+        idleStop?.cancel(); startupTimer?.cancel(); latestPixels = nil
         for id in viewers.keys { LiveViewerBudget.shared.leave(id) }
         video.reset()
         captureQueue.async { [self] in encoder.invalidate() }

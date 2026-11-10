@@ -82,3 +82,48 @@ keyboard.git.selected = { kind: 'files', items: [{ path: 'x' }] };
 assert(key('ArrowLeft')); assert.equal(toggles, 2, 'A selected file does not toggle directories or the hierarchy tree');
 assert.equal(key('ArrowRight', { target: input }), false);
 console.log('PASS Git directory left/right expansion, repeated keys and selection/input isolation');
+
+(async () => {
+  const requests = [];
+  let reloads = 0;
+  const fields = {
+    gitMessage: { value: 'Commit in A' },
+    gitAmend: { checked: false },
+    gitPushAfter: { checked: true },
+  };
+  const targets = { deviceId: 'phone-a', bundleId: 'app' };
+  const git = { device: 'phone-a', key: 'app', repo: { root: '/repo/a' }, status: { hasRemote: true, branch: { head: 'main' } }, busy: new Set() };
+  const panel = vm.createContext({
+    git, targets, $: key => fields[key], t: text => text, toast() {}, gitFitMessage() {}, gitRenderHead() {},
+    gitConnect: () => { reloads++; },
+    fetch: (url, options) => new Promise(resolve => requests.push({ url, body: JSON.parse(options.body), resolve })),
+  });
+  for (const [start, end] of [
+    ['function gitIsCurrent()', 'function gitVisible()'],
+    ['function gitActionTarget()', 'function gitOnStatus('],
+    ['async function gitCommit()', 'function gitFitMessage()'],
+  ]) {
+    vm.runInContext(source.slice(source.indexOf(start), source.indexOf(end)), panel);
+  }
+
+  const commit = panel.gitCommit();
+  const refresh = panel.gitAction('refresh');
+  targets.deviceId = git.device = 'phone-b';
+  git.repo = { root: '/repo/b' };
+  git.busy = new Set();
+  git.committing = null;
+  fields.gitMessage.value = 'New draft in B';
+
+  requests[1].resolve({ status: 409, json: async () => ({ error: 'Repository changed', reason: 'repositoryChanged' }) });
+  assert.equal(await refresh, false);
+  assert.equal(reloads, 0, 'A stale response must not reconnect the new panel');
+  requests[0].resolve({ status: 200, json: async () => ({ ok: true }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests[2].url, '/api/hub/git/push');
+  assert.deepEqual(requests[2].body, { device: 'phone-a', app: 'app', root: '/repo/a', expectedBranch: 'main' });
+  requests[2].resolve({ status: 200, json: async () => ({ ok: true }) });
+  await commit;
+  assert.equal(fields.gitMessage.value, 'New draft in B');
+  assert.equal(git.repo.root, '/repo/b');
+  console.log('PASS commit and push stay on the original repository after switching targets');
+})().catch(error => { console.error(error); process.exitCode = 1; });

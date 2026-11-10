@@ -312,13 +312,14 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
 }
 
 /// 网页打开的子窗口, 可调整大小和全屏, 标题跟随网页
-private final class ChildWebWindow: NSObject, NSWindowDelegate {
+private final class ChildWebWindow: NSObject, NSWindowDelegate, WKNavigationDelegate {
     let window: NSWindow
     let webView: WKWebView
     var onClose: (() -> Void)?
     private var titleObservation: NSKeyValueObservation?
     private var zoomObserver: NSObjectProtocol?
     private var frameObservers: [NSObjectProtocol] = []
+    private var focusObservers: [NSObjectProtocol] = []
 
     init(configuration: WKWebViewConfiguration, appearance: NSAppearance?, backgroundColor: NSColor?) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -334,6 +335,7 @@ private final class ChildWebWindow: NSObject, NSWindowDelegate {
             webView.underPageBackgroundColor = backgroundColor
         }
         webView.isInspectable = true
+        webView.navigationDelegate = self
         zoomObserver = PageZoom.follow(webView)
         webView.setValue(false, forKey: "drawsBackground")
         window.contentView = webView
@@ -342,9 +344,24 @@ private final class ChildWebWindow: NSObject, NSWindowDelegate {
             window.center()
         }
         frameObservers = WindowFrameStore.track(window, name: "child")
+        focusObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                self?.syncWindowFocus()
+            }
+        }
         titleObservation = webView.observe(\.title) { [weak self] webView, _ in
             self?.window.title = webView.title.flatMap { $0.isEmpty ? nil : $0 } ?? "LayerLens"
         }
+    }
+
+    private func syncWindowFocus() {
+        let focused = window.isKeyWindow
+        webView.evaluateJavaScript("window.LAYERLENS_WINDOW_FOCUSED = \(focused ? "true" : "false"); window.dispatchEvent(new Event('layerlens-window-focus'));", completionHandler: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        syncWindowFocus()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -353,6 +370,8 @@ private final class ChildWebWindow: NSObject, NSWindowDelegate {
         zoomObserver = nil
         frameObservers.forEach(NotificationCenter.default.removeObserver)
         frameObservers = []
+        focusObservers.forEach(NotificationCenter.default.removeObserver)
+        focusObservers = []
         onClose?()
     }
 }

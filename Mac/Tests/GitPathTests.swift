@@ -15,6 +15,20 @@ import Foundation
         let names = ["page[id].txt", "pagei.txt", "paged.txt", ":(glob)*.txt", "literal*.txt", "literal1.txt"]
         for name in names { try Data("original".utf8).write(to: URL(fileURLWithPath: root).appendingPathComponent(name)) }
         let controller = GitController()
+        let build = URL(fileURLWithPath: root).appendingPathComponent("BuildCache")
+        let checkout = build.appendingPathComponent("SourcePackages/checkouts/LayerLens")
+        let sourceFile = checkout.appendingPathComponent("Bridge.m").path
+        let hostProject = URL(fileURLWithPath: root).appendingPathComponent("Host.xcodeproj")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: hostProject, withIntermediateDirectories: true)
+        assert(GitController.run(checkout.path, ["-c", "init.templateDir=", "init", "-q"], timeout: 10).ok)
+        assert(controller.repository(sourceFile: sourceFile) == nil, "A dependency checkout without host metadata must not become the active repository")
+        let info = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": hostProject.path], format: .xml, options: 0)
+        try info.write(to: build.appendingPathComponent("info.plist"))
+        assert(controller.repository(sourceFile: sourceFile) == root, "A SwiftPM checkout must resolve to the host Git repository")
+        assert(controller.repository(sourceFile: root + "/pagei.txt") == root)
+        try FileManager.default.removeItem(at: build)
+        try FileManager.default.removeItem(at: hostProject)
         func perform(_ action: String, _ paths: [String]) {
             let done = DispatchSemaphore(value: 0)
             controller.perform(action, repo: root, json: ["paths": paths]) { value, status in assert(status == 200, "\(value)"); done.signal() }
@@ -33,6 +47,18 @@ import Foundation
         perform("unstage", [names[4]])
         let staged = Set(run(["diff", "--cached", "--name-only", "-z"]).text.split(separator: "\0").map(String.init))
         assert(staged == Set([names[1], names[2], names[5]]))
+        let oldBranch = run(["branch", "--show-current"]).text.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = run(["switch", "-c", "other-branch"])
+        let beforeCommit = run(["rev-parse", "HEAD"]).text
+        for action in ["commit", "push"] {
+            let done = DispatchSemaphore(value: 0)
+            controller.perform(action, repo: root, json: ["message": "wrong branch", "expectedBranch": oldBranch]) { value, status in
+                assert(status == 409 && value["reason"] as? String == "branchChanged", "\(value)")
+                done.signal()
+            }
+            assert(done.wait(timeout: .now() + 15) == .success)
+        }
+        assert(run(["rev-parse", "HEAD"]).text == beforeCommit, "The other branch must not be committed")
         print("PASS actual Git stage, unstage and discard treat brackets, wildcards and pathspec-like names literally")
     }
 }

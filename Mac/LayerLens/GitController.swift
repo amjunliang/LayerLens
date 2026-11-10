@@ -68,8 +68,7 @@ final class GitController {
 
     /// 源文件所在的仓库根目录, 不在仓库中时为 nil
     func repository(sourceFile: String) -> String? {
-        guard !sourceFile.isEmpty else { return nil }
-        let directory = (sourceFile as NSString).deletingLastPathComponent
+        guard let directory = XcodeSourcePath.sourceDirectory(for: sourceFile) else { return nil }
         rootsLock.lock()
         let cached = roots[directory]
         rootsLock.unlock()
@@ -398,6 +397,17 @@ final class GitController {
                     // 没有上游分支时推到 origin 的同名分支并设为上游
                     let upstream = Self.run(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout: 10, readOnly: true)
                     arguments = upstream.ok ? ["push"] : ["push", "-u", "origin", "HEAD"]
+                }
+                if ["commit", "push"].contains(action), let expected = json["expectedBranch"] as? String {
+                    let branch = Self.run(repo, ["symbolic-ref", "--quiet", "HEAD"], timeout: 5, readOnly: true)
+                    let matches = expected == "(detached)" ? branch.status == 1 :
+                        branch.ok && branch.text.trimmingCharacters(in: .whitespacesAndNewlines) == "refs/heads/" + expected
+                    guard matches else {
+                        refreshNow(root: repo)
+                        completion(["error": "The checked-out branch changed. Review the current branch and try again.",
+                                    "reason": "branchChanged"], 409)
+                        return
+                    }
                 }
                 let output = Self.run(repo, arguments, timeout: command.timeout, input: input)
                 last = output

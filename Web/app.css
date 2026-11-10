@@ -1562,3 +1562,28 @@ body.log-open .log-pane { display: flex; }
 
 /* 当前切换任务的层级等待状态; 不阻挡工具栏和其他窗口。 */
 .target-task-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 12; display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 12px; background: var(--panel); color: var(--text); box-shadow: 0 4px 24px #0003; pointer-events: none; }
+
+/* MCP 设置 */
+.mcp-setup { display: flex; flex-direction: column; gap: 10px; }
+.mcp-head { display: flex; align-items: center; gap: 10px; }
+.mcp-url { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--r-control); background: none; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-url:hover { background: var(--hover); }
+.cache-btn.mcp-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cache-btn.mcp-primary:hover { background: var(--accent); filter: brightness(1.08); }
+.cache-btn:disabled { opacity: 0.5; cursor: default; }
+.mcp-client { display: flex; flex-direction: column; }
+.mcp-client-head { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); min-width: 0; }
+.mcp-client-head .cache-bundle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-part { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
+.mcp-part-name { width: 44px; flex: none; font-weight: 600; }
+.mcp-state { flex: 1; color: var(--muted); }
+.mcp-state-installed { color: var(--text); }
+.mcp-state-different, .mcp-state-outdated, .mcp-state-conflict, .mcp-state-unknown { color: var(--danger); }
+.mcp-part-actions { display: flex; gap: 6px; }
+.mcp-detail { padding: 0 10px 7px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.mcp-error { color: var(--danger); overflow-wrap: anywhere; }
+.mcp-errors { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.mcp-login { display: flex; align-items: center; gap: 8px; }
+.mcp-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.mcp-hint { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 32px); padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-float); background: var(--float-bg); color: var(--text); box-shadow: var(--shadow); }
+.mcp-hint-close { flex: none; }

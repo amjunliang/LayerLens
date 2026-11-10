@@ -642,6 +642,20 @@ final class AppLogRecorder {
         }
     }
 
+    /// MCP 只读查询: 当前启动在内存中的日志(最近 memoryLimit 条)。
+    /// 快照是否失效由 MCPContextStore 判断; 这里日志还属于别的启动时(新启动尚未连上), 视为还没有日志。
+    func mcpEntries(deviceId: String, bundleId: String, instanceId: String, completion: @escaping ([MCPRecords.LogEntry]) -> Void) {
+        queue.async { [self] in
+            guard let source = sources[deviceId + "|" + bundleId], source.instanceId == instanceId else {
+                completion([])
+                return
+            }
+            // 只给本次启动: 最后一个重启标记之后的日志
+            let start = source.entries.lastIndex { $0.kind != nil }.map { $0 + 1 } ?? 0
+            completion(source.entries[start...].map { MCPRecords.LogEntry(id: $0.id, time: $0.time, text: $0.text) })
+        }
+    }
+
     /// 日志面板实时显示的文件名和 App 进程, 启动列表据此标出当前启动
     func current(deviceId: String, bundleId: String, completion: @escaping (_ file: String?, _ instanceId: String) -> Void) {
         queue.async { [self] in

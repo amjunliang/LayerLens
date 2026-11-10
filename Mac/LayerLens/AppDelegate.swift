@@ -9,11 +9,12 @@
 import AppKit
 
 /// 界面全部由网页提供, 原生部分只有承载网页的窗口、系统菜单和菜单栏图标
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let registry = TargetRegistry()
     private lazy var server = HubServer(registry: registry)
     private lazy var windowController = MainWindowController(url: server.baseURL)
     private var statusItem: NSStatusItem?
+    private var mcpStatusItem: NSMenuItem?
     private var terminationSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -112,6 +113,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.openPanel("cache")
     }
 
+    @objc func showMCPSetup() {
+        openWindow()
+        windowController.openPanel("mcp")
+    }
+
+    @objc func copyMCPURL() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(HubServer.mcpURL, forType: .string)
+    }
+
+    /// 菜单打开时刷新: 显示 Agent 调用 get_context 会拿到哪个 App
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let item = mcpStatusItem else { return }
+        let status = server.mcpStatus()
+        let app = status["app"] as? String ?? ""
+        let device = status["device"] as? String ?? ""
+        if status["ready"] as? Bool == true {
+            let target = [app.isEmpty ? status["bundleId"] as? String ?? "" : app, device].filter { !$0.isEmpty }.joined(separator: " · ")
+            item.title = "MCP: \(target)"
+        } else {
+            item.title = L("MCP: 未选择 App", "MCP: No App Selected")
+        }
+    }
+
     // MARK: - Private
 
     private func setupStatusItem() {
@@ -121,6 +147,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: L("打开窗口", "Open Window"), action: #selector(openWindow), keyEquivalent: "").target = self
         menu.addItem(withTitle: L("在浏览器打开", "Open in Browser"), action: #selector(openInBrowser), keyEquivalent: "").target = self
         menu.addItem(.separator())
+        let mcpStatus = menu.addItem(withTitle: L("MCP: 未选择 App", "MCP: No App Selected"), action: nil, keyEquivalent: "")
+        mcpStatus.isEnabled = false
+        mcpStatusItem = mcpStatus
+        menu.addItem(withTitle: L("MCP 设置…", "MCP Setup…"), action: #selector(showMCPSetup), keyEquivalent: "").target = self
+        menu.addItem(withTitle: L("复制 MCP 地址", "Copy MCP URL"), action: #selector(copyMCPURL), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.delegate = self
         menu.addItem(withTitle: L("退出 LayerLens", "Quit LayerLens"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
         statusItem = item

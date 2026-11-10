@@ -22,6 +22,7 @@ const term = {
   // 空状态显示的将要打开的位置 { root, name, branch, home } 或 { error }, 按 App 缓存
   info: null,
   infoKey: '',
+  infoRequest: 0,
   infoAt: 0,
   timer: 0,
 };
@@ -115,31 +116,37 @@ function termRender() {
   if (session) termShow(session);
 }
 
+function termTargetKey(device = targets.deviceId, app = targets.bundleId) {
+  return app && device ? device + '|' + app : '';
+}
+
 // App 变化或距上次读取超过 10 秒时重新读取; force 用于刚显示页签
 async function termLoadInfo(force) {
-  const key = targets.bundleId || '';
+  const app = targets.bundleId || '', device = targets.deviceId || '';
+  const key = termTargetKey(device, app);
   if (term.sessions.length && !force) return;
-  if (key === term.infoKey && (!force || Date.now() - term.infoAt < 10000)) return;
-  term.infoKey = key;
-  term.infoAt = Date.now();
-  if (!key) {
+  if (key === term.infoKey && Date.now() - term.infoAt < 10000) return;
+  const request = ++term.infoRequest;
+  if (key !== term.infoKey) {
     term.info = null;
+    term.infoKey = key;
     termRender();
-    return;
   }
+  term.infoAt = Date.now();
+  if (!key) return;
   let info;
   try {
-    info = await (await fetch(`/api/hub/term/info?app=${encodeURIComponent(key)}`)).json();
+    info = await (await fetch(`/api/hub/term/info?${new URLSearchParams({ device, app })}`)).json();
   } catch (e) {
     info = { error: e.message };
   }
-  if (key !== term.infoKey) return;
+  if (request !== term.infoRequest || key !== termTargetKey()) return;
   term.info = info;
   termRender();
 }
 
 function termRenderInfo() {
-  const info = term.info;
+  const info = term.infoKey === termTargetKey() ? term.info : null;
   const ready = !!info?.root;
   $('termProject').hidden = !ready;
   const note = !targets.bundleId ? t('未选择 App') : info?.error
@@ -193,11 +200,9 @@ function termTab(session) {
 }
 
 async function termCreate() {
-  if (term.creating) return;
-  if (!targets.bundleId) {
-    toast(t('未选择 App'), true);
-    return;
-  }
+  const device = targets.deviceId, app = targets.bundleId, key = termTargetKey(device, app);
+  const root = term.info?.root;
+  if (term.creating || !key || key !== term.infoKey || !root) return;
   term.creating = true;
   termRender();
   let result;
@@ -205,13 +210,18 @@ async function termCreate() {
     const response = await fetch('/api/hub/term/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app: targets.bundleId }),
+      body: JSON.stringify({ device, app, root }),
     });
     result = await response.json().catch(() => ({ error: String(response.status) }));
+    if (response.status === 409 && key === termTargetKey()) {
+      term.infoAt = 0;
+      termLoadInfo(true);
+    }
   } catch (e) {
     result = { error: e.message };
   }
   term.creating = false;
+  if (key !== termTargetKey()) { termRender(); return; }
   if (result.error) {
     toast(result.reason === 'noSource' ? t('App 没有上报源码路径: 在模拟器上运行一次, 或更新 LayerLens Pod 后重新运行') : t('无法打开终端: {0}', result.error), true);
     termRender();

@@ -12,6 +12,14 @@ import Foundation
         try FileManager.default.createDirectory(at: schemeDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         try "<Workspace><FileRef location=\"group:Apps.xcodeproj\"/></Workspace>".write(to: workspace.appendingPathComponent("contents.xcworkspacedata"), atomically: true, encoding: .utf8)
+        let build = root.appendingPathComponent("Custom/Build/Cache")
+        let checkout = build.appendingPathComponent("SourcePackages/checkouts/LayerLens")
+        let source = checkout.appendingPathComponent("Bridge.m").path
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let info = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": workspace.path], format: .xml, options: 0)
+        try info.write(to: build.appendingPathComponent("info.plist"))
+        precondition(XcodeController.match(sourceFile: source, workspaces: [project.path, workspace.path]) == workspace.path)
+        precondition(XcodeController.match(sourceFile: source, workspaces: [project.path]) == nil)
         func scheme(_ name: String, target: String, configuration: String = "Debug", extra: String = "") throws {
             let text = """
             <Scheme><BuildAction><BuildableReference BlueprintName="Dependency"/></BuildAction>

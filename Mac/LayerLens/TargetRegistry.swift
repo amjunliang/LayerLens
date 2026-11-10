@@ -93,9 +93,9 @@ final class TargetRegistry {
     private var ready = false
     private var readyWaiters: [() -> Void] = []
     private static let readyTimeout: TimeInterval = 3
-    /// Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
-    private var sourceFiles: [String: String]
-    private static let sourceFilesKey = "LayerLensSourceFiles"
+    /// 设备 -> Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
+    private var sourceFiles: [String: [String: String]]
+    private static let sourceFilesKey = "LayerLensDeviceSourceFiles"
     /// 出现过的设备和 App, 断开后仍在菜单中显示; 网页和 App 窗口共用一份, 重启后保留
     /// { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version, capture } } } }
     private var history: [String: [String: Any]]
@@ -127,7 +127,7 @@ final class TargetRegistry {
         configuration.timeoutIntervalForRequest = 1
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: configuration)
-        sourceFiles = UserDefaults.standard.dictionary(forKey: Self.sourceFilesKey) as? [String: String] ?? [:]
+        sourceFiles = UserDefaults.standard.dictionary(forKey: Self.sourceFilesKey) as? [String: [String: String]] ?? [:]
         history = TargetHistory.sanitized(UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:])
         backfillHistory()
         UserDefaults.standard.set(history, forKey: Self.historyKey)
@@ -158,8 +158,28 @@ final class TargetRegistry {
     }
 
     /// 本机的配对身份, 设备上按此记住允许的 Mac
-    func sourceFile(bundleId: String) -> String {
-        queue.sync { sourceFiles[bundleId] ?? "" }
+    func sourceFile(deviceId: String, bundleId: String) -> String {
+        queue.sync { sourceFiles[deviceId]?[bundleId] ?? "" }
+    }
+
+    func foregroundApps(deviceId: String) -> [String] {
+        queue.sync {
+            appStates.compactMap { state in
+                guard state["deviceId"] as? String == deviceId, state["foreground"] as? Bool == true else { return nil }
+                return state["bundleId"] as? String
+            }
+        }
+    }
+
+    func confirmsBackground(deviceId: String, bundles: [String]) -> Bool {
+        queue.sync {
+            bundles.allSatisfy { bundle in
+                appStates.contains { state in
+                    state["deviceId"] as? String == deviceId && state["bundleId"] as? String == bundle &&
+                        state["foreground"] as? Bool == false
+                }
+            }
+        }
     }
 
     func start() {
@@ -640,8 +660,8 @@ final class TargetRegistry {
     private func rememberSourceFiles() {
         var changed = false
         for app in apps {
-            if let file = app.info["sourceFile"] as? String, !file.isEmpty, sourceFiles[app.bundleId] != file {
-                sourceFiles[app.bundleId] = file
+            if let file = app.info["sourceFile"] as? String, !file.isEmpty, sourceFiles[app.deviceId]?[app.bundleId] != file {
+                sourceFiles[app.deviceId, default: [:]][app.bundleId] = file
                 changed = true
             }
         }
