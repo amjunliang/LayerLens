@@ -92,6 +92,14 @@ static NSDictionary *gCachedAppInfo = nil;
     return result;
 }
 
+#if DEBUG
++ (NSDictionary *)swiftUILayout {
+    NSArray *roots = [self hierarchy];
+    NSUInteger count = [LayerLensLookinSerializer appendSwiftUILayoutToRoots:roots];
+    return @{@"roots": roots, @"count": @(count)};
+}
+#endif
+
 + (NSDictionary *)detailWithOid:(unsigned long)oid {
     CALayer *layer = [self layerWithOid:oid];
     if (!layer) {

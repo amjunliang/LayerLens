@@ -11,6 +11,7 @@
 #import "LayerLensRouter.h"
 #import "LayerLensAPIController.h"
 #import "LayerLensLookinBridge.h"
+#import "LayerLensLookinSerializer.h"
 #import "LayerLensLogger.h"
 #import "LayerLensNetworkHooks.h"
 #import "LayerLensNetworkRecorder.h"
@@ -38,6 +39,8 @@ static const NSInteger kLayerLensPortAttempts = 10;
 
 #if DEBUG
 + (void)load {
+    // SwiftUI reads this before constructing its first view graph.
+    setenv("SWIFTUI_VIEW_DEBUG", "287", 0);
     // 开启了抓包时尽早替换 NSURLSession 的实现, 以记录启动阶段的请求; 未开启时由 Mac 端开启后再安装
     if (LayerLensNetworkRecorder.captureEnabledAtLaunch) {
         [LayerLensNetworkHooks install];
@@ -52,6 +55,7 @@ static const NSInteger kLayerLensPortAttempts = 10;
             return;
         }
         store[startedKey] = @YES;
+        [LayerLensLookinSerializer enableSwiftUIAccessibility];
         [[LayerLens sharedInstance] start];
     });
 }

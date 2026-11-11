@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 递归转换节点, rect 为屏幕坐标
 + (NSDictionary *)nodeFromDisplayItem:(LayerLens_DisplayItem *)item parentRect:(CGRect)parentRect;
+#if DEBUG
++ (void)enableSwiftUIAccessibility;
++ (NSUInteger)appendSwiftUILayoutToRoots:(NSArray<NSDictionary *> *)roots;
+#endif
 
 + (NSArray<NSDictionary *> *)attrGroupsFromGroups:(nullable NSArray<LayerLens_AttributesGroup *> *)groups custom:(BOOL)custom;
 

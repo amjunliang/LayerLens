@@ -144,7 +144,14 @@ final class MCPHTTPService {
             }
             workQueue.async { [self] in
                 let sourceFile = registry.sourceFile(deviceId: context.deviceId, bundleId: context.bundleId)
-                let sourceRoot = git.repository(sourceFile: sourceFile) ?? XcodeSourcePath.sourceDirectory(for: sourceFile)
+                let sourceRoot: String?
+                if XcodeSourcePath.isLocalLayerLensPackage(sourceFile) {
+                    let derivedData = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData")
+                    let host = XcodeSourcePath.localPackageHost(bundleId: context.bundleId, derivedData: derivedData)
+                    sourceRoot = host.flatMap { git.repository(sourceFile: $0 + "/LayerLensHost") ?? $0 }
+                } else {
+                    sourceRoot = git.repository(sourceFile: sourceFile) ?? XcodeSourcePath.sourceDirectory(for: sourceFile)
+                }
                 guard let snapshot = store.snapshot(context: context, sourceRoot: sourceRoot) else {
                     completion(Self.toolError(Self.staleSnapshot))
                     return

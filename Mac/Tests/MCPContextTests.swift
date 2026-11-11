@@ -88,6 +88,9 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
                 "Selection update rejected")
         let compactSelected = store.snapshot(context: store.latest()!, sourceRoot: nil)!.json()["selected"] as? [String: Any]
         require(compactSelected.map { Set($0.keys) } == ["element", "vc"], "Extra selected fields were not dropped")
+        let swiftUI = MCPNodeInfo.compact(["element": "Text \"标题\"", "swiftUIPath": "Label", "unused": "drop"])
+        require(swiftUI["swiftUIPath"] as? String == "Label" && swiftUI["unused"] == nil,
+                "SwiftUI context must survive compaction")
         require(store.isCurrent(snapshot), "Fresh snapshot rejected")
 
         now += 1

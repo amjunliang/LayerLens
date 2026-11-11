@@ -36,7 +36,8 @@ const context = vm.createContext({
   targetAppName: () => 'DreamNovel',
   appState: { instanceId: 'launch-1' },
   currentApp: () => null,
-  elementLine: node => `${node.ivarTraces[0]} (${node.cls}) "${node.text}"`,
+  elementLine: node => `${node.ivarTraces[0]} (${node.cls}) "${node.text}" · id=${node.identifier}`,
+  swiftUIAncestors: node => (node.swiftUIContext || []).slice(0, -1),
   codeIvars: () => [{ text: 'DetailController.readButton' }],
   isCodeClass: cls => !cls.startsWith('UI'),
   fetch: (_url, options) => { requests.push(JSON.parse(options.body)); return Promise.resolve(); },
@@ -60,6 +61,11 @@ assert.match(requests[0].selected.element, /id=book_detail_read_now/);
 assert.equal(requests[0].selected.owner, 'DetailView');
 assert.equal(requests[0].selected.vc, 'DetailController');
 assert.deepEqual(Object.keys(requests[0].selected).sort(), ['element', 'owner', 'vc'], 'Selected node must stay compact');
+selected.swiftUIContext = ['ScrollView', 'Label', 'Text'];
+selected.cls = 'SwiftUI';
+assert.equal(context.mcpSelectedInfo().swiftUIPath, 'ScrollView / Label', 'Captured SwiftUI context must reach MCP');
+delete selected.swiftUIContext;
+selected.cls = 'UIButton';
 now = 2000;
 vm.runInContext('scheduleMCPContext(false);', context);
 timers.shift()();

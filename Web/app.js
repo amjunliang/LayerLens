@@ -109,10 +109,15 @@ function icon(name) {
 
 // 自上而下的 Markdown 嵌套列表, 与复制元素信息格式一致
 function nodePath(node) {
+  if (node.cls === 'SwiftUI' || node.swiftUILayout) return swiftUIPath(node);
   const parts = [];
   for (let n = node; n; n = n.parent) {
     const ivar = n.ivarTraces[0] ? n.ivarTraces[0].split('.').pop() : '';
-    parts.unshift(ivar ? `${n.cls} (${ivar})` : n.cls);
+    let line = ivar ? `${n.cls} (${ivar})` : n.cls;
+    const text = String(n.text || (n.cls === 'SwiftUI' ? n.title : '') || '').replace(/\s+/g, ' ').trim();
+    if (text) line += ` "${text.length > ELEMENT_TEXT_MAX ? text.slice(0, ELEMENT_TEXT_MAX) + '…' : text}"`;
+    if (n.identifier) line += ` · id=${n.identifier}`;
+    parts.unshift(line);
   }
   return markdownTree(parts);
 }
@@ -126,7 +131,7 @@ function lldbCommand(node) {
 }
 
 // 系统类在源码中搜不到, 生成元素定位信息时过滤
-const SYSTEM_CLASS = /^(_|UI|NS|CA|WK|AV|MK|PK|SK|SwiftUI\.)/;
+const SYSTEM_CLASS = /^(_|UI|NS|CA|WK|AV|MK|PK|SK|SwiftUI(?:\.|$))/;
 const isCodeClass = (cls) => !!cls && !SYSTEM_CLASS.test(cls);
 const CONTAINER_CONTROLLER = /(?:Navigation|TabBar|SplitView|PageView|ListContainer)(?:View)?Controller$/;
 const TREE_INDENT = 10;
@@ -168,15 +173,48 @@ function elementLine(node, ivars) {
     const [host, declaring = host] = trace.slice(0, dot).split(' : ');
     return `${declaring}.${trace.slice(dot + 1)}`;
   }))];
-  let line = names.length ? `${names.join(' and ')} (${node.cls})` : node.cls;
-  const text = String(node.text ?? '').replace(/\s+/g, ' ').trim();
+  const cls = node.swiftUIContext?.at(-1) || node.cls;
+  let line = names.length ? `${names.join(' and ')} (${cls})` : cls;
+  const text = String(node.text || (node.cls === 'SwiftUI' ? node.title : '') || '').replace(/\s+/g, ' ').trim();
   if (text) line += ` "${text.length > ELEMENT_TEXT_MAX ? text.slice(0, ELEMENT_TEXT_MAX) + '…' : text}"`;
+  if (node.identifier) line += ` · id=${node.identifier}`;
   return line;
+}
+
+function swiftUIAncestors(node) {
+  const types = (node.swiftUIContext || []).slice(0, -1);
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if ((parent.classChain || []).some((name) =>
+      /^(?:SwiftUI\._UIHostingView|_TtGC7SwiftUI14_UIHostingView|_TtCGC7SwiftUI\d+NavigationStackHostingController)/.test(name))) {
+      return ['HostingView', ...types];
+    }
+  }
+  return types;
+}
+
+function swiftUIPath(node) {
+  const parents = [];
+  const selectedLine = elementLine(node, codeIvars(node));
+  let app = '';
+  if (typeof targets !== 'undefined' && targets.bundleId) {
+    const name = targetAppName(targets.deviceId, targets.bundleId);
+    if (name) app = `App: ${name}`;
+  }
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.cls === 'SwiftUI' && (parent.text || parent.identifier)) {
+      const line = elementLine(parent, codeIvars(parent));
+      if (line !== selectedLine && !parents.includes(line)) parents.unshift(line);
+    } else if (isCodeClass(parent.cls)) {
+      parents.unshift(elementLine(parent, codeIvars(parent)));
+    }
+  }
+  return [app, ...parents, ...swiftUIAncestors(node), selectedLine].filter(Boolean).join(' / ');
 }
 
 // 从元素向上定位, 省略成员变量持有者和系统容器; 控制器跳过导航和列表等容器.
 // 输出为自上而下的 Markdown 嵌套列表, 人和 AI 都能直接看出层级
 function elementSummary(node) {
+  if (node.cls === 'SwiftUI' || node.swiftUILayout) return swiftUIPath(node);
   const ivars = codeIvars(node);
   const ownerClasses = new Set(ivars.flatMap((r) => [r.host, r.declaring]));
   const parts = [elementLine(node, ivars)];
@@ -264,6 +302,20 @@ function screenShotPNG() {
 
 // canvas 为 true 时(画布上呼出)未选中元素也显示菜单, 元素各项不可用, 末尾附带屏幕截图;
 // screenOnly 用于实时画面, 只有屏幕截图一项, 不显示标题
+function isSwiftUILayoutContext(node) {
+  return !!node && (node.swiftUILayout || node.classChain.some((name) =>
+    /^SwiftUI(?:Core)?(?:\.|$)|^_Tt[A-Za-z]*7SwiftUI|^_Tt[A-Za-z]*11SwiftUICore/.test(name)));
+}
+
+function canCaptureSwiftUILayout() {
+  return (state.mode === '2d' || state.mode === '3d') && !!targetTask?.bundleId &&
+    targetTask.phase !== 'hierarchy' && pageActivity.active && hierarchyAvailable();
+}
+
+function captureSwiftUILayout() {
+  if (canCaptureSwiftUILayout()) return readTaskHierarchy(targetTask, true);
+}
+
 function showMenu(x, y, node, canvas, screenOnly) {
   hideMenu();
   if (!node && !canvas) return;
@@ -298,6 +350,9 @@ function showMenu(x, y, node, canvas, screenOnly) {
     menu.appendChild(moreItem);
     menu.appendChild(el('div', 'menu-separator'));
     menu.appendChild(makeItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'), !node));
+    if (state.mode !== 'live' && isSwiftUILayoutContext(node)) {
+      menu.appendChild(makeItem(t('捕获 SwiftUI 布局'), captureSwiftUILayout, !canCaptureSwiftUILayout()));
+    }
   }
   if (canvas) menu.appendChild(makeItem(t('复制屏幕截图'), () => copyImage(screenShotPNG(), '复制屏幕截图')));
   document.body.appendChild(menu);
@@ -445,8 +500,7 @@ const mcpContext = {
 function mcpSelectedInfo() {
   const node = state.nodes.get(viewKeyOf(state.selected));
   if (!node) return null;
-  let element = elementLine(node, codeIvars(node));
-  if (node.identifier) element += ` · id=${node.identifier}`;
+  const element = elementLine(node, codeIvars(node));
   let owner = '';
   for (let p = node.parent; p; p = p.parent) {
     if (isCodeClass(p.cls)) { owner = p.cls; break; }
@@ -458,6 +512,8 @@ function mcpSelectedInfo() {
   const info = { element };
   if (owner && owner !== node.cls) info.owner = owner;
   if (viewController) info.vc = viewController;
+  const swiftPath = node.cls === 'SwiftUI' || node.swiftUILayout ? swiftUIAncestors(node) : [];
+  if (swiftPath.length) info.swiftUIPath = swiftPath.join(' / ');
   return info;
 }
 
@@ -749,6 +805,7 @@ function showRefreshError(e) {
 function applyHierarchy(roots) {
   state.stamp = Date.now();
   resetImages();
+  if (state.nodes.get(state.selected)?.swiftUILayout) state.selected = null;
   prepare(roots);
   if (state.selected && !state.nodes.has(state.selected)) state.selected = null;
   if (!state.selected) {
@@ -789,8 +846,9 @@ function prepare(roots) {
   state.roots = roots;
   state.nodes = new Map();
   let custom = 0;
+  let layout = 0;
   const walk = (node, parent, depth, win) => {
-    node.key = node.oid ? String(node.oid) : 'c' + custom++;
+    node.key = node.swiftUILayout ? 'layout-' + layout++ : node.oid ? String(node.oid) : 'c' + custom++;
     node.parent = parent;
     node.depth = depth;
     node.win = win || node;
@@ -1612,8 +1670,10 @@ function setupCanvasEvents() {
     if (state.mode === '2d') return hitTest(...stagePoint(point));
     return stage3DNodeAt(point.clientX, point.clientY);
   };
-  // 画布菜单始终针对当前选中节点, 不按点击位置重新选中, 空白处也可呼出
+  // 对有命中的节点显示其菜单，空白处仍可使用当前选中的节点。
   const openCanvasMenu = (point) => {
+    const node = nodeAtPoint(point);
+    if (node && node.key !== state.selected) select(node.key);
     showMenu(point.clientX, point.clientY, state.nodes.get(state.selected), true);
   };
   let pinch = null;
@@ -2956,7 +3016,7 @@ function hierarchyAvailable() {
   return !['background', 'offline', 'restarting'].includes(appState.value);
 }
 
-async function readTaskHierarchy(job) {
+async function readTaskHierarchy(job, swiftUILayout = false) {
   if (!hierarchyAvailable()) return;
   if (!taskCurrent(job) || !job.bundleId || state.mode === 'live') return;
   pageActivity.controller?.abort();
@@ -2966,17 +3026,29 @@ async function readTaskHierarchy(job) {
   const cancel = () => controller.abort();
   job.controller.signal.addEventListener('abort', cancel, {once: true});
   let expired = false;
-  const timer = setTimeout(() => { expired = true; controller.abort(); }, 5000);
+  const timer = setTimeout(() => { expired = true; controller.abort(); }, swiftUILayout ? 25000 : 5000);
   const seq = ++refreshSeq;
   setTaskPhase(job, 'hierarchy');
   try {
-    const roots = await api(`/api/hierarchy`, {signal: controller.signal});
+    const result = await api(swiftUILayout ? '/api/swiftui-layout' : '/api/hierarchy', {
+      method: swiftUILayout ? 'POST' : 'GET', signal: controller.signal,
+    });
     if (!taskCurrent(job) || seq !== refreshSeq || controller.signal.aborted || !hierarchyAvailable() || state.mode === 'live' || !pageActivity.active) return;
-    applyHierarchy(roots);
+    if (swiftUILayout && (!Array.isArray(result.roots) || !result.count)) {
+      toast(t('当前画面没有可选中的 SwiftUI 布局节点'));
+      setTaskPhase(job, 'done');
+      return;
+    }
+    applyHierarchy(swiftUILayout ? result.roots : result);
+    if (swiftUILayout) toast(t('已捕获 {0} 个 SwiftUI 布局节点', result.count));
     setTaskPhase(job, 'done');
   } catch (error) {
     if (!taskCurrent(job) || seq !== refreshSeq) return;
     if (error.name === 'AbortError' && !expired) return;
+    if (swiftUILayout) {
+      toast(t('SwiftUI 布局捕获失败: {0}', expired ? t('请求超时, 请重试') : error.message), true);
+      return;
+    }
     job.error = expired ? t('请求超时, 请重试') : error.message;
     setTaskPhase(job, 'failed');
     showRefreshError(new Error(job.error));
@@ -4972,6 +5044,7 @@ function objectCard(node) {
   }
   add(t('文字'), node.text);
   add(t('标题'), node.title);
+  if (node.swiftUILayout) add(t('屏幕边界 (pt)'), node.rect.map((v) => Number(v.toFixed(2))).join(', '));
   add(t('特殊'), node.specialTrace);
   add(t('地址'), node.address);
   add(t('屏幕坐标'), node.rect.map(round).join(', '));

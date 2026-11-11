@@ -422,6 +422,39 @@ enum XcodeRunPlan {
 
 /// Xcode 记录 SwiftPM checkout 对应的宿主工作区，自定义 DerivedData 路径也使用相同布局。
 enum XcodeSourcePath {
+    /// A local Swift package's __FILE__ points into the package, not its app.
+    /// Resolve only when built products identify one unambiguous host project.
+    static func localPackageHost(bundleId: String, derivedData: URL) -> String? {
+        guard !bundleId.isEmpty else { return nil }
+        let manager = FileManager.default
+        guard let builds = try? manager.contentsOfDirectory(at: derivedData, includingPropertiesForKeys: nil) else { return nil }
+        var projects = Set<String>()
+        for build in builds {
+            guard let project = hostProject(in: build) else { continue }
+            let products = build.appendingPathComponent("Build/Products")
+            guard let configurations = try? manager.contentsOfDirectory(at: products, includingPropertiesForKeys: nil) else { continue }
+            for configuration in configurations where configuration.lastPathComponent.hasSuffix("-iphonesimulator") || configuration.lastPathComponent.hasSuffix("-iphoneos") {
+                guard let apps = try? manager.contentsOfDirectory(at: configuration, includingPropertiesForKeys: nil) else { continue }
+                for app in apps where app.pathExtension == "app" {
+                    let info = app.appendingPathComponent("Info.plist")
+                    guard let data = try? Data(contentsOf: info),
+                          let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+                          plist["CFBundleIdentifier"] as? String == bundleId else { continue }
+                    projects.insert(project)
+                }
+            }
+        }
+        guard projects.count == 1, let project = projects.first else { return nil }
+        return (project as NSString).deletingLastPathComponent
+    }
+
+    static func isLocalLayerLensPackage(_ sourceFile: String) -> Bool {
+        let suffix = "/Pod/Classes/Lookin/LayerLensLookinBridge.m"
+        guard sourceFile.hasSuffix(suffix), packageBuildDirectory(containing: URL(fileURLWithPath: sourceFile).deletingLastPathComponent()) == nil else { return false }
+        let package = String(sourceFile.dropLast(suffix.count))
+        return FileManager.default.fileExists(atPath: package + "/Package.swift")
+    }
+
     static func packageBuildDirectory(containing sourceDirectory: URL) -> URL? {
         var directory = sourceDirectory
         while directory.path != "/" {

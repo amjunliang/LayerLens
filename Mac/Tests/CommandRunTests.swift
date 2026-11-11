@@ -65,6 +65,25 @@ import Foundation
         precondition(XcodeSourcePath.packageBuildDirectory(containing: checkout).flatMap(XcodeSourcePath.hostProject(in:)) == project.path,
                      "A SwiftPM checkout must resolve to its host Xcode project")
         precondition(XcodeSourcePath.packageBuildDirectory(containing: source.deletingLastPathComponent()) == nil)
+        let products = derived.appendingPathComponent("Build/Products/Debug-iphonesimulator/App.app")
+        try fm.createDirectory(at: products, withIntermediateDirectories: true)
+        try info.write(to: products.appendingPathComponent("Info.plist"))
+        precondition(XcodeSourcePath.localPackageHost(bundleId: bundle, derivedData: derived.deletingLastPathComponent()) == root.path,
+                     "Local package source must resolve to the unique app host")
+        precondition(XcodeSourcePath.localPackageHost(bundleId: "unknown", derivedData: derived.deletingLastPathComponent()) == nil,
+                     "Unknown app must not be assigned a source directory")
+        let otherBuild = derived.deletingLastPathComponent().appendingPathComponent("Other")
+        let otherProject = root.appendingPathComponent("Other.xcodeproj")
+        try fm.createDirectory(at: otherProject, withIntermediateDirectories: true)
+        let otherProducts = otherBuild.appendingPathComponent("Build/Products/Debug-iphonesimulator/App.app")
+        try fm.createDirectory(at: otherProducts, withIntermediateDirectories: true)
+        try info.write(to: otherProducts.appendingPathComponent("Info.plist"))
+        let otherWorkspaceInfo = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": otherProject.path], format: .xml, options: 0)
+        try otherWorkspaceInfo.write(to: otherBuild.appendingPathComponent("info.plist"))
+        precondition(XcodeSourcePath.localPackageHost(bundleId: bundle, derivedData: derived.deletingLastPathComponent()) == nil,
+                     "Multiple host projects must not be guessed")
+        try fm.removeItem(at: otherBuild)
+        try fm.removeItem(at: otherProject)
         let relative = CommandRunController.relativePath(from: source.deletingLastPathComponent(), to: project)
         precondition(!relative.hasPrefix("/") && CommandRunController.resolveRelative(relative, from: source.deletingLastPathComponent()) == project.standardizedFileURL.path)
         precondition(CommandRunController.resolveRelative(project.path, from: source.deletingLastPathComponent()) == nil, "Absolute saved paths must be rejected")

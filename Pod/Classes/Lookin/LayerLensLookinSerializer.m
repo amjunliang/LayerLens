@@ -19,9 +19,379 @@
 #import "NSObject+LayerLens_Server.h"
 #import "CALayer+LayerLens_Server.h"
 
+#if DEBUG
+#import <dlfcn.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
+
+static BOOL LayerLensIsSwiftUIHost(UIView *view) {
+    for (Class cls = view.class; cls && cls != UIView.class; cls = class_getSuperclass(cls)) {
+        NSString *name = NSStringFromClass(cls);
+        if ([name hasPrefix:@"SwiftUI._UIHostingView"] ||
+            [name hasPrefix:@"_TtGC7SwiftUI14_UIHostingView"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL LayerLensIsInSwiftUIHost(UIView *view) {
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+        if (LayerLensIsSwiftUIHost(ancestor)) return YES;
+    }
+    return NO;
+}
+
+#endif
+
 @implementation LayerLensLookinSerializer
 
 #pragma mark - Node
+
+#if DEBUG
++ (void)enableSwiftUIAccessibility {
+    // ViewMonitor uses this automation switch to expose SwiftUI elements without an AX client.
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void *handle = dlopen("/usr/lib/libAccessibility.dylib", RTLD_LAZY | RTLD_LOCAL);
+        if (!handle) return;
+        void (*setAutomationEnabled)(BOOL) = dlsym(handle, "_AXSSetAutomationEnabled");
+        if (setAutomationEnabled) setAutomationEnabled(YES);
+    });
+}
+
++ (void)collectSwiftUINodesFrom:(NSObject *)container
+                        window:(UIWindow *)window
+                          clip:(CGRect)clip
+                    parentRect:(CGRect)parentRect
+                       visited:(NSHashTable *)visited
+                         depth:(NSUInteger)depth
+                      children:(NSMutableArray<NSDictionary *> *)children {
+    if (depth >= 64 || visited.count >= 4096 || [visited containsObject:container]) return;
+    [visited addObject:container];
+
+    // Native views already have nodes in the layer hierarchy.
+    if (![container isKindOfClass:UIView.class] && container.isAccessibilityElement) {
+        CGRect localRect = [window convertRect:container.accessibilityFrame fromCoordinateSpace:window.screen.coordinateSpace];
+        if (isfinite(localRect.origin.x) && isfinite(localRect.origin.y) &&
+            isfinite(localRect.size.width) && isfinite(localRect.size.height)) {
+            CGRect visibleRect = CGRectIntersection(localRect, clip);
+            if (!CGRectIsEmpty(visibleRect)) {
+                CGRect rect = CGRectOffset(visibleRect, window.frame.origin.x, window.frame.origin.y);
+                NSString *label = container.accessibilityLabel;
+                NSString *identifier = [container respondsToSelector:@selector(accessibilityIdentifier)]
+                    ? [(id<UIAccessibilityIdentification>)container accessibilityIdentifier] : nil;
+                [children addObject:[@{
+                    @"oid": @0, @"viewOid": NSNull.null,
+                    @"classChain": @[@"SwiftUI"], @"address": @"", @"isLayer": @NO,
+                    @"vcClass": NSNull.null, @"vcOid": NSNull.null, @"ivarTraces": @[],
+                    @"specialTrace": NSNull.null,
+                    @"title": label.length ? label : (identifier.length ? identifier : @"SwiftUI"),
+                    @"text": label.length ? label : NSNull.null,
+                    @"identifier": identifier.length ? identifier : NSNull.null,
+                    @"frame": [self arrayFromRect:CGRectOffset(rect, -parentRect.origin.x, -parentRect.origin.y)],
+                    @"rect": [self arrayFromRect:rect], @"hidden": @NO, @"alpha": @1,
+                    @"keyWindow": @NO, @"children": @[],
+                } mutableCopy]];
+            }
+        }
+    }
+
+    NSArray *elements = container.accessibilityElements;
+    NSInteger count = elements ? (NSInteger)elements.count : container.accessibilityElementCount;
+    if (count == NSNotFound) return;
+    for (NSInteger index = 0; index < MIN(count, 4096); index++) {
+        if (visited.count >= 4096) break;
+        id element = elements ? elements[index] : [container accessibilityElementAtIndex:index];
+        if ([element isKindOfClass:NSObject.class] && ![element isKindOfClass:UIView.class]) {
+            [self collectSwiftUINodesFrom:element window:window clip:clip parentRect:parentRect
+                                 visited:visited depth:depth + 1 children:children];
+        }
+    }
+}
+
++ (void)appendSwiftUINodesForView:(UIView *)view rect:(CGRect)rect children:(NSMutableArray<NSDictionary *> *)children {
+    UIWindow *window = view.window;
+    if (!window || !LayerLensIsInSwiftUIHost(view)) return;
+    CGRect clip = window.bounds;
+    for (UIView *ancestor = view; ancestor && ancestor != window; ancestor = ancestor.superview) {
+        if (ancestor.hidden || ancestor.alpha < 0.01) return;
+        if (ancestor == view || ancestor.clipsToBounds) {
+            clip = CGRectIntersection(clip, [ancestor convertRect:ancestor.bounds toView:window]);
+        }
+    }
+    if (CGRectIsEmpty(clip)) return;
+
+    NSHashTable *visited = [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
+    [self collectSwiftUINodesFrom:view window:window clip:clip parentRect:rect
+                         visited:visited depth:0 children:children];
+}
+
+static NSDictionary *LayerLensLayoutProperties(NSDictionary *node) {
+    NSMutableDictionary *properties = [NSMutableDictionary dictionary];
+    for (NSDictionary *entry in node[@"properties"]) {
+        properties[entry[@"id"]] = entry[@"attribute"];
+    }
+    return properties;
+}
+
+static BOOL LayerLensReadLayoutPair(id value, CGFloat *x, CGFloat *y) {
+    if (![value isKindOfClass:NSArray.class] || [value count] != 2 ||
+        ![value[0] isKindOfClass:NSNumber.class] || ![value[1] isKindOfClass:NSNumber.class]) return NO;
+    *x = [value[0] doubleValue];
+    *y = [value[1] doubleValue];
+    return isfinite(*x) && isfinite(*y);
+}
+
+// Text storage may be localized or formatted. Only a literal key or verbatim
+// string is safe to compare with the text exposed on screen.
+static NSString *LayerLensDebugText(id attribute, NSUInteger depth) {
+    if (depth > 24 || ![attribute isKindOfClass:NSDictionary.class]) return nil;
+    NSString *name = attribute[@"name"];
+    id value = attribute[@"value"];
+    if (([name isEqualToString:@"key"] || [name isEqualToString:@"verbatim"]) &&
+        [value isKindOfClass:NSString.class] && [value length]) return value;
+    for (id child in attribute[@"subattributes"]) {
+        NSString *text = LayerLensDebugText(child, depth + 1);
+        if (text) return text;
+    }
+    return nil;
+}
+
+static NSString *LayerLensNormalizedText(NSString *text) {
+    NSArray *parts = [[text componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                      filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+    return [parts componentsJoinedByString:@" "];
+}
+
++ (NSUInteger)associateDebugTree:(NSArray *)tree withHost:(UIView *)host node:(NSDictionary *)hostNode scrollContent:(BOOL)scrollContent {
+    UIWindow *window = host.window;
+    if (!window) return 0;
+    NSMutableArray *candidates = [NSMutableArray array];
+    NSMutableArray *pending = [NSMutableArray array];
+    for (NSDictionary *node in tree) [pending addObject:@{@"node": node, @"context": scrollContent ? @[@"ScrollView"] : @[]}];
+    for (NSUInteger i = 0; i < pending.count && i < 20000; i++) {
+        NSDictionary *item = pending[i], *node = item[@"node"];
+        NSDictionary *properties = LayerLensLayoutProperties(node);
+        NSString *type = properties[@0][@"readableType"];
+        // Scroll coordinates require a separate physical-container mapping.
+        if ([type hasPrefix:@"SystemScrollView<"]) continue;
+        NSArray *context = item[@"context"];
+        NSString *kind = nil;
+        if ([type hasPrefix:@"Label<"]) kind = @"Label";
+        else if ([type hasPrefix:@"HStack<"]) kind = @"HStack";
+        else if ([type hasPrefix:@"VStack<"]) kind = @"VStack";
+        if (kind && ![context.lastObject isEqualToString:kind]) {
+            context = [context arrayByAddingObject:kind];
+            NSUInteger limit = scrollContent ? 5 : 4;
+            if (context.count > limit) {
+                NSArray *tail = [context subarrayWithRange:NSMakeRange(context.count - 4, 4)];
+                context = scrollContent ? [@[@"ScrollView"] arrayByAddingObjectsFromArray:tail] : tail;
+            }
+        }
+        for (NSDictionary *child in node[@"children"]) {
+            [pending addObject:@{@"node": child, @"context": context}];
+        }
+        if (![type isEqualToString:@"Text"]) continue;
+        CGFloat x, y, width, height;
+        NSString *text = LayerLensDebugText(properties[@1], 0);
+        if (!text.length || !LayerLensReadLayoutPair(properties[@3][@"value"], &x, &y) ||
+            !LayerLensReadLayoutPair(properties[@4][@"value"], &width, &height) ||
+            width <= 0 || height <= 0) continue;
+        CGRect rect = [host convertRect:CGRectMake(x, y, width, height) toView:window];
+        rect = CGRectOffset(rect, window.frame.origin.x, window.frame.origin.y);
+        NSUInteger labelIndex = [context indexOfObject:@"Label"];
+        if (labelIndex != NSNotFound) context = scrollContent ? @[@"ScrollView", @"Label"] : @[@"Label"];
+        [candidates addObject:@{@"text": LayerLensNormalizedText(text),
+                                @"rect": [self arrayFromRect:rect],
+                                @"context": [context arrayByAddingObject:@"Text"]}];
+    }
+
+    NSMutableArray *axNodes = [NSMutableArray array];
+    NSMutableArray *views = [NSMutableArray arrayWithArray:hostNode[@"children"] ?: @[]];
+    SEL capture = NSSelectorFromString(@"makeViewDebugData");
+    for (NSUInteger i = 0; i < views.count; i++) {
+        NSMutableDictionary *node = views[i];
+        CALayer *layer = (CALayer *)[NSObject layerlens_objectWithOid:[node[@"oid"] unsignedLongValue]];
+        if ([layer isKindOfClass:CALayer.class] && [layer.layerlens_hostView respondsToSelector:capture]) continue;
+        if ([node[@"classChain"] isEqual:@[@"SwiftUI"]] && [node[@"text"] isKindOfClass:NSString.class]) {
+            [axNodes addObject:node];
+        }
+        [views addObjectsFromArray:node[@"children"] ?: @[]];
+    }
+    NSUInteger matched = 0;
+    for (NSMutableDictionary *ax in axNodes) {
+        NSArray *coords = ax[@"rect"];
+        if (coords.count != 4) continue;
+        CGRect axRect = CGRectMake([coords[0] doubleValue], [coords[1] doubleValue],
+                                   [coords[2] doubleValue], [coords[3] doubleValue]);
+        NSString *text = LayerLensNormalizedText(ax[@"text"]);
+        NSDictionary *match = nil;
+        for (NSDictionary *candidate in candidates) {
+            if (![candidate[@"text"] isEqualToString:text]) continue;
+            NSArray *r = candidate[@"rect"];
+            CGRect rect = CGRectMake([r[0] doubleValue], [r[1] doubleValue], [r[2] doubleValue], [r[3] doubleValue]);
+            CGRect overlap = CGRectIntersection(rect, axRect);
+            if (CGRectIsNull(overlap) || overlap.size.width * overlap.size.height < rect.size.width * rect.size.height * 0.9) continue;
+            if (match) { match = nil; break; }
+            match = candidate;
+        }
+        NSUInteger matchingAX = 0;
+        if (match) {
+            NSArray *r = match[@"rect"];
+            CGRect rect = CGRectMake([r[0] doubleValue], [r[1] doubleValue], [r[2] doubleValue], [r[3] doubleValue]);
+            for (NSDictionary *other in axNodes) {
+                if (![LayerLensNormalizedText(other[@"text"]) isEqualToString:text]) continue;
+                NSArray *values = other[@"rect"];
+                if (values.count != 4) continue;
+                CGRect otherRect = CGRectMake([values[0] doubleValue], [values[1] doubleValue], [values[2] doubleValue], [values[3] doubleValue]);
+                CGRect overlap = CGRectIntersection(rect, otherRect);
+                if (!CGRectIsNull(overlap) && overlap.size.width * overlap.size.height >= rect.size.width * rect.size.height * 0.9) matchingAX++;
+            }
+        }
+        if (match && matchingAX == 1) {
+            ax[@"swiftUIContext"] = match[@"context"];
+            matched++;
+        }
+    }
+    return matched;
+}
+
+// A physical scroll content view and its logical root share a size. Skip
+// ambiguous matches instead of placing a node in the wrong coordinate space.
+static NSDictionary *LayerLensFindScrollLayout(NSArray *tree, CGSize size) {
+    NSMutableArray *pending = [tree mutableCopy];
+    NSDictionary *match = nil;
+    for (NSUInteger index = 0; index < pending.count && index < 20000; index++) {
+        NSDictionary *node = pending[index];
+        NSDictionary *properties = LayerLensLayoutProperties(node);
+        CGFloat width, height;
+        if ([node[@"children"] count] &&
+            LayerLensReadLayoutPair(properties[@4][@"value"], &width, &height) &&
+            fabs(width - size.width) < 0.5 && fabs(height - size.height) < 0.5) {
+            if (match) return nil;
+            match = node;
+        } else if (node[@"children"]) {
+            [pending addObjectsFromArray:node[@"children"]];
+        }
+    }
+    return match;
+}
+
+// A geometry wrapper can have the same size as the scroll content. Descend
+// through a unique scroll view before resolving the inner coordinate space.
+static NSDictionary *LayerLensScrollContentRoot(NSDictionary *root, CGSize size) {
+    NSMutableArray *pending = [NSMutableArray arrayWithArray:root[@"children"] ?: @[]];
+    NSDictionary *scroll = nil;
+    for (NSUInteger i = 0; i < pending.count && i < 20000; i++) {
+        NSDictionary *node = pending[i];
+        NSString *type = LayerLensLayoutProperties(node)[@0][@"readableType"];
+        if ([type hasPrefix:@"SystemScrollView<"]) {
+            if (scroll) return nil;
+            scroll = node;
+        } else {
+            [pending addObjectsFromArray:node[@"children"] ?: @[]];
+        }
+    }
+    return scroll ? LayerLensFindScrollLayout(scroll[@"children"] ?: @[], size) : root;
+}
+
++ (NSArray *)layoutNodesInScrollContent:(UIView *)view tree:(NSArray *)tree {
+    UIScrollView *scroll = (UIScrollView *)view.superview;
+    UIWindow *window = view.window;
+    if (!window || ![scroll isKindOfClass:UIScrollView.class]) return @[];
+    NSDictionary *root = LayerLensFindScrollLayout(tree, view.bounds.size);
+    if (!root) return @[];
+    CGRect clip = window.bounds;
+    for (UIView *ancestor = view; ancestor && ancestor != window; ancestor = ancestor.superview) {
+        if (ancestor.hidden || ancestor.alpha < 0.01) return @[];
+        if (ancestor == view || ancestor == scroll || ancestor.clipsToBounds) {
+            clip = CGRectIntersection(clip, [ancestor convertRect:ancestor.bounds toView:window]);
+        }
+    }
+    if (CGRectIsEmpty(clip)) return @[];
+
+    NSMutableArray *result = [NSMutableArray array];
+    NSMutableArray *pending = [NSMutableArray arrayWithArray:root[@"children"]];
+    for (NSUInteger index = 0; index < pending.count && index < 20000; index++) {
+        NSDictionary *node = pending[index];
+        NSDictionary *properties = LayerLensLayoutProperties(node);
+        NSString *type = properties[@0][@"readableType"];
+        if ([type hasPrefix:@"SystemScrollView<"] || properties[@2][@"value"]) continue;
+        if (node[@"children"]) [pending addObjectsFromArray:node[@"children"]];
+        // Keep layout wrappers out of hit testing. Prefer AX for semantic controls.
+        if (![type hasPrefix:@"_ShapeView<"]) continue;
+        CGFloat x, y, width, height;
+        if (!LayerLensReadLayoutPair(properties[@3][@"value"], &x, &y) ||
+            !LayerLensReadLayoutPair(properties[@4][@"value"], &width, &height) ||
+            width <= 0 || height <= 0) continue;
+        CGRect local = CGRectMake(x, y, width, height);
+        CGRect visible = CGRectIntersection(clip, [view convertRect:local toView:window]);
+        if (CGRectIsEmpty(visible)) continue;
+        CGRect rect = CGRectOffset(visible, window.frame.origin.x, window.frame.origin.y);
+        [result addObject:@{
+            @"oid": @0, @"viewOid": NSNull.null, @"classChain": @[type],
+            @"title": type, @"isLayer": @NO, @"address": @"", @"ivarTraces": @[],
+            @"frame": [self arrayFromRect:local], @"rect": [self arrayFromRect:rect],
+            @"hidden": @NO, @"alpha": @1, @"children": @[], @"swiftUILayout": @YES,
+        }];
+    }
+    return result;
+}
+
++ (NSUInteger)appendSwiftUILayoutToRoots:(NSArray<NSDictionary *> *)roots {
+    SEL capture = NSSelectorFromString(@"makeViewDebugData");
+    NSMapTable<UIView *, NSArray *> *trees = [NSMapTable strongToStrongObjectsMapTable];
+    NSMutableArray *pending = [roots mutableCopy];
+    NSUInteger count = 0;
+    for (NSUInteger index = 0; index < pending.count; index++) {
+        NSMutableDictionary *node = pending[index];
+        NSMutableArray *children = node[@"children"];
+        [pending addObjectsFromArray:children];
+        NSString *type = [node[@"classChain"] firstObject];
+        CALayer *hostLayer = (CALayer *)[NSObject layerlens_objectWithOid:[node[@"oid"] unsignedLongValue]];
+        UIView *possibleHost = [hostLayer isKindOfClass:CALayer.class] ? hostLayer.layerlens_hostView : nil;
+        if (possibleHost && [possibleHost respondsToSelector:capture] && ![trees objectForKey:possibleHost]) {
+            NSMethodSignature *signature = [possibleHost methodSignatureForSelector:capture];
+            if (signature && signature.numberOfArguments == 2 && signature.methodReturnType[0] == '@') {
+                id data = ((id (*)(id, SEL))objc_msgSend)(possibleHost, capture);
+                id json = [data isKindOfClass:NSData.class] ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+                NSArray *tree = [json isKindOfClass:NSArray.class] ? json : @[];
+                [trees setObject:tree forKey:possibleHost];
+                count += [self associateDebugTree:tree withHost:possibleHost node:node scrollContent:NO];
+            }
+        }
+        if (![type containsString:@"HostingScrollView"] || ![type containsString:@"PlatformGroupContainer"]) continue;
+        CALayer *layer = (CALayer *)[NSObject layerlens_objectWithOid:[node[@"oid"] unsignedLongValue]];
+        if (![layer isKindOfClass:CALayer.class]) continue;
+        UIView *view = layer.layerlens_hostView;
+        UIView *host = view.superview;
+        while (host && ![host respondsToSelector:capture]) host = host.superview;
+        if (!host) continue;
+        NSArray *tree = [trees objectForKey:host];
+        if (!tree) {
+            NSMethodSignature *signature = [host methodSignatureForSelector:capture];
+            if (!signature || signature.numberOfArguments != 2 || signature.methodReturnType[0] != '@') continue;
+            id data = ((id (*)(id, SEL))objc_msgSend)(host, capture);
+            id json = [data isKindOfClass:NSData.class] ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+            tree = [json isKindOfClass:NSArray.class] ? json : @[];
+            [trees setObject:tree forKey:host];
+        }
+        NSArray *shapes = [self layoutNodesInScrollContent:view tree:tree];
+        NSDictionary *scrollRoot = LayerLensFindScrollLayout(tree, view.bounds.size);
+        if (scrollRoot) {
+            scrollRoot = LayerLensScrollContentRoot(scrollRoot, view.bounds.size);
+        }
+        if (scrollRoot) {
+            count += [self associateDebugTree:scrollRoot[@"children"] ?: @[] withHost:view node:node scrollContent:YES];
+        }
+        // AX controls with overlapping bounds retain priority.
+        [children insertObjects:shapes atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, shapes.count)]];
+        count += shapes.count;
+    }
+    return count;
+}
+#endif
 
 + (NSDictionary *)nodeFromDisplayItem:(LayerLens_DisplayItem *)item parentRect:(CGRect)parentRect {
     LayerLens_Object *displayObject = item.viewObject ?: item.layerObject;
@@ -39,6 +409,11 @@
     for (LayerLens_DisplayItem *subitem in item.subitems) {
         [children addObject:[self nodeFromDisplayItem:subitem parentRect:rect]];
     }
+#if DEBUG
+    if (item.viewObject && [layer isKindOfClass:CALayer.class]) {
+        [self appendSwiftUINodesForView:layer.layerlens_hostView rect:rect children:children];
+    }
+#endif
 
     NSMutableArray<NSString *> *traces = [NSMutableArray array];
     for (LayerLens_IvarTrace *trace in displayObject.ivarTraces) {

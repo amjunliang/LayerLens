@@ -177,7 +177,7 @@ enum MCPNodeInfo {
     static let textMax = 40
 
     static func isSystemClass(_ name: String) -> Bool {
-        ["_", "UI", "NS", "CA", "WK", "AV", "MK", "PK", "SK", "SwiftUI."].contains { name.hasPrefix($0) }
+        name == "SwiftUI" || ["_", "UI", "NS", "CA", "WK", "AV", "MK", "PK", "SK", "SwiftUI."].contains { name.hasPrefix($0) }
     }
 
     /// 与网页 elementLine 一致："Host : Declaring.ivar" 输出 "Declaring.ivar"，优先声明在业务类中的，
@@ -206,7 +206,7 @@ enum MCPNodeInfo {
         var element = cls
         let ivars = ivarNames(ivarTraces)
         if !ivars.isEmpty { element = "\(ivars.joined(separator: " and ")) (\(cls))" }
-        let shown = clipped(text.isEmpty ? title : text)
+        let shown = clipped(text.isEmpty ? (title == cls ? "" : title) : text)
         if !shown.isEmpty { element += " \"\(shown)\"" }
         if !identifier.isEmpty { element += " · id=\(identifier)" }
         var value: [String: Any] = ["element": element]
@@ -218,7 +218,7 @@ enum MCPNodeInfo {
     /// 网页上报的 selected 只保留同样的三个字段。
     static func compact(_ node: [String: Any]) -> [String: Any] {
         var value: [String: Any] = [:]
-        for key in ["element", "owner", "vc"] {
+        for key in ["element", "owner", "vc", "swiftUIPath"] {
             if let text = node[key] as? String, !text.isEmpty { value[key] = text }
         }
         return value

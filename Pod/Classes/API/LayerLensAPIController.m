@@ -106,6 +106,14 @@
         }];
     }];
 
+#if DEBUG
+    [router addRoute:@"POST" path:@"/api/swiftui-layout" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
+        [self onMain:^{
+            responder([LayerLensHTTPResponse JSONResponse:[LayerLensLookinBridge swiftUILayout]]);
+        }];
+    }];
+#endif
+
     [router addRoute:@"GET" path:@"/api/detail" handler:^(LayerLensHTTPRequest *request, LayerLensResponder responder) {
         unsigned long oid = [self oidFromString:request.query[@"oid"]];
         [self onMain:^{

@@ -26,6 +26,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 所有 window 的层级树
 + (NSArray<NSDictionary *> *)hierarchy;
+#if DEBUG
++ (NSDictionary *)swiftUILayout;
+#endif
 
 /// layer oid 对应的属性分组/自定义属性/事件, 找不到返回 nil
 + (nullable NSDictionary *)detailWithOid:(unsigned long)oid;
