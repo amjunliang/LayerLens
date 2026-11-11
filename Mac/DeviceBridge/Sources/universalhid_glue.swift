@@ -569,6 +569,33 @@ public func uhidMakeEdgeTouchHIDReport(_ x: Double, _ y: Double, _ touching: Int
     return Int32(MemoryLayout<UHIDHIDReport>.size)
 }
 
+// Two-finger DigitizerReport, laid out as UniversalHID's own setContact(_:atIndex:)
+// writes it: byte 1 contact count, byte 2 contact maximum, then 5 bytes per
+// contact (flags with the index in the low bits and Touch 0x40 / Range 0x80,
+// x and y as 0...1 UInt16). A lift keeps both contacts with Touch/Range off.
+func makeTwoTouchWireBytes(_ points: [(x: Double, y: Double)], touching: Bool) -> [UInt8] {
+    var bytes = [UInt8](repeating: 0, count: digitizerReportBitCount / 8)
+    bytes[0] = 9; bytes[1] = UInt8(points.count); bytes[2] = UInt8(points.count)
+    for (index, point) in points.enumerated() {
+        let base = 3 + index * 5
+        bytes[base] = UInt8(index) | (touching ? 0xc0 : 0)
+        putLE(scaledUInt16(point.x), &bytes, base + 1); putLE(scaledUInt16(point.y), &bytes, base + 3)
+    }
+    return bytes
+}
+
+@_cdecl("uhid_make_two_touch_hid_report")
+public func uhidMakeTwoTouchHIDReport(_ x1: Double, _ y1: Double, _ x2: Double, _ y2: Double,
+    _ touching: Int32, _ output: UnsafeMutableRawPointer?) -> Int32 {
+    let bytes = makeTwoTouchWireBytes([(x1, y1), (x2, y2)], touching: touching != 0)
+    var report = reportFromBytes(bytes, bitCount: digitizerReportBitCount, reportID: 9)
+    retainedHIDReports.append(report)
+    if let output {
+        withUnsafeBytes(of: &report) { output.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+    }
+    return Int32(MemoryLayout<UHIDHIDReport>.size)
+}
+
 @_cdecl("uhid_make_absolute_pointer_hid_report")
 public func uhidMakeAbsolutePointerHIDReport(
     _ x: Double,

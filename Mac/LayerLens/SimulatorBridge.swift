@@ -264,34 +264,37 @@ final class SimTouch {
         }
     }
 
-    /// point 为 0~1 的归一化坐标; edge: 0 无, 1 底部(上滑回桌面), 8 顶部
+    /// point 为 0~1 的归一化坐标; second 为第二指(双指缩放), 两指成对按下、移动、抬起; edge: 0 无, 1 底部(上滑回桌面), 8 顶部
     @discardableResult
-    func send(phase: Phase, x: Double, y: Double, edge: UInt8 = 0) -> Bool {
+    func send(phase: Phase, x: Double, y: Double, second: (x: Double, y: Double)? = nil, edge: UInt8 = 0) -> Bool {
         if phase == .down {
-            identifier &+= 1
-            if identifier == 0 { identifier = 1 }
+            identifier &+= 2
+            if identifier < 2 { identifier = 2 }
         }
         let mask: UInt32 = phase == .up ? 0x06 : 0x07
         let touching = phase != .up
         let now = mach_absolute_time()
-        guard let parent = createDigitizer(nil, now, 2, 0, identifier, mask, 0, x, y, 0, 0, 0, touching, touching, 0)?.takeRetainedValue() else { return false }
-        if let finger = createFinger(nil, now, 0, identifier, mask, x, y, 0, 0, 0, touching, touching, 0)?.takeRetainedValue() {
-            append(parent, finger, 0)
+        let fingers = [(x: x, y: y)] + (second.map { [$0] } ?? [])
+        let center = (x: fingers.map(\.x).reduce(0, +) / Double(fingers.count), y: fingers.map(\.y).reduce(0, +) / Double(fingers.count))
+        guard let parent = createDigitizer(nil, now, 2, 0, identifier, mask, 0, center.x, center.y, 0, 0, 0, touching, touching, 0)?.takeRetainedValue() else { return false }
+        for (index, finger) in fingers.enumerated() {
+            if let event = createFinger(nil, now, UInt32(index), identifier &+ UInt32(index), mask, finger.x, finger.y, 0, 0, 0, touching, touching, 0)?.takeRetainedValue() {
+                append(parent, event, 0)
+            }
         }
         let raw: UnsafeMutableRawPointer? = withExtendedLifetime(parent) {
             wrap(Unmanaged.passUnretained(parent as AnyObject).toOpaque())
         }
         guard let msg = raw else { return false }
-        // 包装函数未初始化的字段: 两条记录的目标(0x6c / 0x10c)和边缘标记(0x3a~0x3b / 0xda~0xdb)
+        // 包装函数未初始化的字段: 每条记录(数字化仪本身 + 每根手指, 自 0x20 起每条 0xa0)的目标(+0x4c)和边缘标记(+0x1a~0x1b)
         let size = malloc_size(msg)
-        msg.storeBytes(of: Self.touchTarget, toByteOffset: 0x6c, as: UInt32.self)
-        if size >= 0x110 { msg.storeBytes(of: Self.touchTarget, toByteOffset: 0x10c, as: UInt32.self) }
         let present: UInt8 = edge == 0 ? 0 : 0x04
-        msg.storeBytes(of: present, toByteOffset: 0x3a, as: UInt8.self)
-        msg.storeBytes(of: edge, toByteOffset: 0x3b, as: UInt8.self)
-        if size >= 0xdc {
-            msg.storeBytes(of: present, toByteOffset: 0xda, as: UInt8.self)
-            msg.storeBytes(of: edge, toByteOffset: 0xdb, as: UInt8.self)
+        for record in 0...fingers.count {
+            let base = 0x20 + record * 0xa0
+            guard size >= base + 0x50 else { break }
+            msg.storeBytes(of: Self.touchTarget, toByteOffset: base + 0x4c, as: UInt32.self)
+            msg.storeBytes(of: present, toByteOffset: base + 0x1a, as: UInt8.self)
+            msg.storeBytes(of: edge, toByteOffset: base + 0x1b, as: UInt8.self)
         }
         return send(msg)
     }

@@ -28,7 +28,9 @@ function settleBootLaunch() {
 function syncOfflineView() {
   const gone = !!targets.deviceId && currentDeviceGone();
   const hasApp = !!targets.bundleId;
-  const show = gone || (state.mode !== 'live' && appState.value === 'offline' && appState.blank && hasApp);
+  // 打开页面时 App 已在后台: 还没有任何层级可看, 画布空白时说明原因
+  const away = !gone && hasApp && state.mode !== 'live' && appState.value === 'background' && !state.roots?.length;
+  const show = gone || away || (state.mode !== 'live' && appState.value === 'offline' && appState.blank && hasApp);
   if (!show) {
     if (!offlineViewShown) return false;
     offlineViewShown = false;
@@ -49,15 +51,15 @@ function syncOfflineView() {
   const queued = booting && bootLaunch?.deviceId === targets.deviceId && bootLaunch.bundleId === targets.bundleId;
   const launching = pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId;
   // 菜单每次刷新都会调用, 内容不变时不重建, 避免按钮在鼠标下闪动
-  const key = [targets.deviceId, targets.bundleId, name, deviceName, gone, !!simulator, booting, queued, launching, !!currentDevice()].join('|');
+  const key = [targets.deviceId, targets.bundleId, name, deviceName, gone, away, !!simulator, booting, queued, launching, !!currentDevice()].join('|');
   if (offlineViewShown && key === offlineViewKey) return true;
   const body = simulator ? t('模拟器 {0} 未启动, 启动后自动连接', deviceName)
     : gone ? t('设备 {0} 已断开, 重新连接后自动恢复', deviceName)
     : t('{0} 上没有运行, 启动后自动连接', deviceName);
-  const title = hasApp ? t('{0} 未连接', name) : simulator
+  const title = away ? t('{0} 在后台', name) : hasApp ? t('{0} 未连接', name) : simulator
     ? (booting ? `${deviceName} · ${t('启动中…')}` : t('{0} 未启动', deviceName))
     : t('{0} 已断开', deviceName);
-  const detail = hasApp ? body + (LANG === 'en' ? '. ' : '。') + t('可以先查看本机保存的日志和抓包') : body;
+  const detail = away ? t('回到前台后自动显示视图层级') : hasApp ? body + (LANG === 'en' ? '. ' : '。') + t('可以先查看本机保存的日志和抓包') : body;
   showEmptyState(title, detail);
   $('emptyState').classList.add('offline-state');
   document.body.classList.add('has-offline-state');
@@ -82,7 +84,7 @@ function syncOfflineView() {
     boot.addEventListener('click', () => hasApp ? bootAndLaunch(simulator, targets.bundleId, name) : simulatorAction(simulator.id, 'boot', false));
     actions.append(boot);
   } else if (hasApp && !gone && currentDevice()) {
-    const launch = el('button', 'offline-action primary', launching ? t('启动中…') : t('启动 App'));
+    const launch = el('button', 'offline-action primary', launching ? t('启动中…') : away ? t('切到前台') : t('启动 App'));
     launch.disabled = launching;
     launch.addEventListener('click', () => launchAwayApp(targets.deviceId, targets.bundleId, name));
     actions.append(launch);

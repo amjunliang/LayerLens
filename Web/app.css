@@ -618,6 +618,17 @@ body.log-max .live-home-dock { visibility: hidden; }
 body:has(.run-progress:not([hidden])) .live-pixel-hint { top: 48px; }
 body.log-max .live-pixel-hint { visibility: hidden; }
 .live-wrap.inspecting .live-canvas { cursor: crosshair; }
+.live-wrap.alt .live-canvas, .live-wrap.pinching .live-canvas { cursor: crosshair; }
+/* ⌥ 双指缩放的手指位置 */
+.live-pinch { position: fixed; left: 0; top: 0; pointer-events: none; z-index: 30; display: none; }
+.live-pinch.show { display: block; }
+/* 摆放: 空心虚线圈; 按下: 实心强调色圆点, 略缩小并有一圈涟漪.
+   位置由 JS 的 transform 决定, 圆点本身不能用 scale (会连同位移一起缩放) */
+.live-pinch i { position: absolute; left: -15px; top: -15px; width: 30px; height: 30px; box-sizing: border-box; border-radius: 50%; border: 2px dashed rgba(255,255,255,.9); background: transparent; box-shadow: 0 0 0 1px rgba(0,0,0,.4), inset 0 0 0 1px rgba(0,0,0,.4); transition: background-color .12s, border-color .12s; }
+.live-pinch.down i { left: -12px; top: -12px; width: 24px; height: 24px; border: 2px solid #fff; background: color-mix(in srgb, var(--accent) 85%, transparent); box-shadow: 0 0 0 1px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.35); }
+.live-pinch.down i::after { content: ''; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid var(--accent); animation: live-pinch-ripple .4s ease-out forwards; }
+@keyframes live-pinch-ripple { from { opacity: .9; scale: 1; } to { opacity: 0; scale: 2; } }
+@media (prefers-reduced-motion: reduce) { .live-pinch i { transition: none; } .live-pinch.down i::after { animation: none; display: none; } }
 /* 取色: 放大镜跟随指针, 中心格为取到的像素 */
 .picking .stage-wrap, .picking .live-canvas { cursor: crosshair; }
 .loupe {

@@ -63,6 +63,7 @@ extern xpc_object_t xpc_remote_connection_send_message_with_reply_sync(xrc_t,xpc
 
 extern int uhid_make_digitizer_hid_report(double,double,int,int,void*);
 extern int uhid_make_edge_touch_hid_report(double,double,int,int,int,void*);
+extern int uhid_make_two_touch_hid_report(double,double,double,double,int,void*);
 extern int uhid_make_scroll_hid_report(int64_t,int64_t,uint32_t,uint32_t,uint32_t,double,double,void*);
 extern int uhid_make_scroll_wire_hid_report(int32_t,int32_t,uint32_t,uint32_t,double,double,void*);
 extern int uhid_make_absolute_pointer_hid_report(double,double,uint32_t,void*);
@@ -103,8 +104,8 @@ extern int layerlens_native_service_ids(xrc_t,uint64_t *,uint64_t *);
     xrc_t media, input, buttons, digitizer;
     int mediaFD, rtpFD, inputFD, buttonFD, digitizerFD;
     uint64_t touchService, keyboardService;
-    BOOL touching, edge;
-    double x,y;
+    BOOL touching, edge, pinching;
+    double x,y,x2,y2;
     IPBDisplayInfo display;
     CMSampleBufferRef latest;
     BOOL writing;
@@ -447,7 +448,10 @@ static void installNativeSink(void){
 }
 - (void)touch:(BOOL)down {
     uint64_t words[2]={0};
-    if(uhid_make_edge_touch_hid_report(x,y,down,down,edge?display.contentQuarter:-1,words)!=sizeof words){ [self fail:@"Touch report construction failed"];return; }
+    // 双指缩放: 两指同一份报告按下、移动、抬起
+    int built=pinching?uhid_make_two_touch_hid_report(x,y,x2,y2,down,words)
+        :uhid_make_edge_touch_hid_report(x,y,down,down,edge?display.contentQuarter:-1,words);
+    if(built!=sizeof words){ [self fail:@"Touch report construction failed"];return; }
     NSData *data=[NSData dataWithBytes:words length:sizeof words];
     [self send:^{ return coredevice_send_universalhid_hid_report(self->input,data.bytes,self->touchService); }];
     if(!down) [self send:^{ return coredevice_send_universalhid_barrier(self->input); }];
@@ -562,7 +566,12 @@ static void installNativeSink(void){
             if(width<=0 || height<=0) return;
             self->x=fmax(0,fmin(1,[message[@"x"] doubleValue]/width));
             self->y=fmax(0,fmin(1,[message[@"y"] doubleValue]/height));
-            if([type isEqual:@"touch1-down"]){ self->touching=YES;self->edge=self->y>=.98; }
+            BOOL second=message[@"x2"]!=nil && message[@"y2"]!=nil;
+            if([type isEqual:@"touch1-down"]){ self->touching=YES;self->pinching=second;self->edge=!second && self->y>=.98; }
+            if(self->pinching && second){
+                self->x2=fmax(0,fmin(1,[message[@"x2"] doubleValue]/width));
+                self->y2=fmax(0,fmin(1,[message[@"y2"] doubleValue]/height));
+            }
             if(!self->touching) return;
             BOOL up=[type isEqual:@"touch1-up"];
             [self touch:!up];if(up) self->touching=NO;

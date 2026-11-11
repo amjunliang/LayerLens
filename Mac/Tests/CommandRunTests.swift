@@ -108,9 +108,22 @@ import Foundation
         precondition(restoredController.status(id: failingBuild)?.1.contains("forced build error") == true, "Build failures must be reported")
         let afterFailBuild = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         let settingsAfterFailBuild = try String(contentsOf: root.appendingPathComponent("settings-events"), encoding: .utf8)
-        precondition(afterFailBuild == afterCache && settingsAfterFailBuild.dropFirst(settingsAfterCache.count).split(separator: "\n").count == 1,
-                     "A build error must stop after the required build settings query")
+        precondition(afterFailBuild == afterCache && settingsAfterFailBuild.count == settingsAfterCache.count,
+                     "An unchanged project must reuse the cached build settings, and a build error must stop the run")
         try fm.removeItem(at: root.appendingPathComponent("fail-build"))
+        // 产物与缓存配置不符(如 xcconfig 改了 Bundle ID)时重新查询一次, 不再按旧配置安装。
+        let otherInfo = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": bundle + ".changed"], format: .xml, options: 0)
+        try otherInfo.write(to: root.appendingPathComponent("app-info.plist"))
+        let staleCache = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true)
+        let staleDeadline = Date().addingTimeInterval(10)
+        while restoredController.status(id: staleCache)?.0 != "failed" && Date() < staleDeadline { Thread.sleep(forTimeInterval: 0.02) }
+        precondition(restoredController.status(id: staleCache)?.1.contains("Bundle ID") == true, "A mismatched product must not be installed")
+        let settingsAfterStale = try String(contentsOf: root.appendingPathComponent("settings-events"), encoding: .utf8)
+        precondition(settingsAfterStale.dropFirst(settingsAfterFailBuild.count).split(separator: "\n").count == 1,
+                     "A mismatched product must refresh the cached build settings once")
+        let afterStale = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        precondition(!afterStale.dropFirst(afterFailBuild.count).contains("install"), "A mismatched product must not be installed")
+        try info.write(to: root.appendingPathComponent("app-info.plist"))
         var invalidated = UserDefaults.standard.dictionary(forKey: "LayerLensCommandRunRelativeProjects") as? [String: [String: String]] ?? [:]
         invalidated[bundle]?["scheme"] = "Missing"
         UserDefaults.standard.set(invalidated, forKey: "LayerLensCommandRunRelativeProjects")
@@ -119,7 +132,7 @@ import Foundation
         while restoredController.status(id: retry)?.0 != "failed" && Date() < retryDeadline { Thread.sleep(forTimeInterval: 0.02) }
         precondition(restoredController.status(id: retry)?.0 == "failed", "A stale saved scheme must report an error")
         let afterRetry = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
-        precondition(afterRetry == afterCache, "Invalid saved settings must not trigger discovery or build")
+        precondition(afterRetry == afterStale, "Invalid saved settings must not trigger discovery or build")
         invalidated[bundle]?["scheme"] = "App"
         invalidated[bundle]?["path"] = "../Missing.xcworkspace"
         UserDefaults.standard.set(invalidated, forKey: "LayerLensCommandRunRelativeProjects")
@@ -137,6 +150,9 @@ import Foundation
         retargetedBuild["PRODUCT_BUNDLE_IDENTIFIER"] = bundle + ".other"
         retargeted[0]["buildSettings"] = retargetedBuild
         try JSONSerialization.data(withJSONObject: retargeted).write(to: root.appendingPathComponent("settings.json"))
+        // 真实的改绑会修改项目文件, 让缓存的构建配置失效。
+        func editProject() { try! UUID().uuidString.write(to: project.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8) }
+        editProject()
         let wrongTarget = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true)
         let wrongTargetDeadline = Date().addingTimeInterval(5)
         while restoredController.status(id: wrongTarget)?.0 != "failed" && Date() < wrongTargetDeadline {
@@ -297,6 +313,7 @@ import Foundation
         let afterRelocation = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         precondition(!afterRelocation.dropFirst(beforeRelocation.count).contains("list"), "Relocating DerivedData must reuse the host project’s saved Scheme")
         try JSONSerialization.data(withJSONObject: retargeted).write(to: root.appendingPathComponent("retargeted-settings.json"))
+        editProject()
         try "{\"project\":{\"schemes\":[\"App\",\"AppCopy\"]}}".write(to: root.appendingPathComponent("schemes.json"), atomically: true, encoding: .utf8)
         runPackage(customCheckout)
         let afterRecovery = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)

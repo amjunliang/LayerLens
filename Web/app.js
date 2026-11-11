@@ -2347,6 +2347,19 @@ function livePoint(e) {
   return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, inside: rx >= 0 && rx <= 1 && ry >= 0 && ry <= 1 };
 }
 
+// livePoint 的逆变换: 设备坐标 -> 页面坐标
+function liveClient(x, y) {
+  const canvas = $('liveCanvas');
+  const rect = canvas.getBoundingClientRect();
+  const [sw, sh] = live.screen;
+  const rad = -(LIVE_ROTATION[live.orientation] || 0) * Math.PI / 180;
+  const ux = (x / sw - 0.5) * canvas.offsetWidth, uy = (y / sh - 0.5) * canvas.offsetHeight;
+  return {
+    x: rect.left + rect.width / 2 + ux * Math.cos(rad) + uy * Math.sin(rad),
+    y: rect.top + rect.height / 2 - ux * Math.sin(rad) + uy * Math.cos(rad),
+  };
+}
+
 function liveRotate() {
   if (live.rotatePending) return;
   if (!live.real) {
@@ -4239,6 +4252,12 @@ async function inspectAt(point) {
 const LIVE_PRESS_DELAY_MS = 300;
 const LIVE_DRAG_SLOP = 3;
 const LIVE_TAP_MS = 40;
+// 选择模式或 ⌥ 下拖动即双指: 先拖动摆放两指(虚线), 停住片刻两指同时按下, 再拖动缩放和旋转.
+// 移动多少点(设备坐标)后显示两指; 停住多久按下; 停住时允许的抖动; 两指至少相距多少点才按下(太近时比例跳变)
+const LIVE_PINCH_SLOP = 3;
+const LIVE_PINCH_HOLD_MS = 300;
+const LIVE_PINCH_STILL = 2;
+const LIVE_PINCH_MIN_GAP = 20;
 // 触摸失效检测: 拖动超过多少点才计入; 松开后等多久看画面是否变化; 连续几次无变化提示修复; 修复后等待界面恢复的时长
 const LIVE_HEAL_DRAG = 40;
 const LIVE_HEAL_WAIT_MS = 600;
@@ -4265,8 +4284,9 @@ function setupLiveEvents() {
       // pointerId 无效时忽略
     }
     const point = livePoint(e);
-    if (canInspect() && (live.inspect || e.altKey)) {
-      live.touch = { inspect: true, point };
+    // ⌥ 或选择模式: 点击选中元素, 拖动是双指缩放和旋转
+    if (e.altKey || (canInspect() && live.inspect)) {
+      live.touch = { inspect: canInspect(), alt: e.altKey, point, pinch: false };
       return;
     }
     // 起点贴近上下边缘时作为系统手势(下拉通知中心 / 上滑回桌面)
@@ -4290,7 +4310,40 @@ function setupLiveEvents() {
   };
   canvas.addEventListener('pointermove', (e) => {
     const touch = live.touch;
-    if (!touch || touch.inspect) return;
+    if (!touch) return;
+    if (touch.point) {
+      const point = livePoint(e);
+      // 阈值以 point 计, 真机坐标是像素, 需按比例换算
+      const unit = live.real ? (live.sourceGeometry?.pointScale || 1) : 1;
+      if (!touch.moved && Math.hypot(point.x - touch.point.x, point.y - touch.point.y) < LIVE_PINCH_SLOP * unit) return;
+      // 拖动过就不再算点击
+      touch.moved = true;
+      // 按下前: 按下处和光标是两指的摆放位置, 停住后同时按下. 之后两指中点固定, 另一指与光标对称,
+      // 靠近缩小、远离放大、绕转旋转. 中点移动时 SwiftUI 的 MagnifyGesture 常被拖动手势抢走而失效
+      touch.end = point;
+      $('liveWrap').classList.add('pinching');
+      if (touch.pinch) {
+        touch.mirror = pinchMirror(touch);
+        showPinchDots(true, touch.mirror, point);
+        sendPinch(touch, 'touch1-move');
+        return;
+      }
+      showPinchDots(false, touch.point, point);
+      if (touch.still && Math.hypot(point.x - touch.still.x, point.y - touch.still.y) <= LIVE_PINCH_STILL * unit) return;
+      touch.still = point;
+      clearTimeout(touch.hold);
+      touch.hold = setTimeout(() => {
+        if (live.touch !== touch || touch.pinch) return;
+        const p = touch.end;
+        if (Math.hypot(p.x - touch.point.x, p.y - touch.point.y) < LIVE_PINCH_MIN_GAP * unit) return;
+        touch.center = { x: (touch.point.x + p.x) / 2, y: (touch.point.y + p.y) / 2 };
+        touch.mirror = pinchMirror(touch);
+        touch.pinch = true;
+        showPinchDots(true, touch.mirror, p);
+        sendPinch(touch, 'touch1-down');
+      }, LIVE_PINCH_HOLD_MS);
+      return;
+    }
     const point = livePoint(e);
     const distance = Math.hypot(point.x - touch.start.x, point.y - touch.start.y);
     touch.distance = Math.max(touch.distance, distance);
@@ -4298,13 +4351,56 @@ function setupLiveEvents() {
     flushDown(touch);
     liveSend({ type: 'touch1-move', x: point.x, y: point.y, width: w(), height: h() });
   });
+  const pinchMirror = ({ center: c, end: p }) => ({
+    x: Math.min(w(), Math.max(0, 2 * c.x - p.x)),
+    y: Math.min(h(), Math.max(0, 2 * c.y - p.y)),
+  });
+  const sendPinch = (touch, type) => {
+    const { mirror: a, end: b } = touch;
+    liveSend({ type, x: b.x, y: b.y, x2: a.x, y2: a.y, width: w(), height: h() });
+  };
+  // 拖动时显示两指位置: 按下处和光标处
+  const dots = el('div', 'live-pinch');
+  dots.append(el('i'), el('i'));
+  document.body.append(dots);
+  const showPinchDots = (down, ...points) => {
+    dots.classList.toggle('down', down);
+    points.forEach((p, i) => {
+      const at = liveClient(p.x, p.y);
+      dots.children[i].style.transform = `translate(${at.x}px, ${at.y}px)`;
+    });
+    dots.classList.add('show');
+  };
+  const hidePinchDots = () => dots.classList.remove('show');
+  // 按住 ⌥ 时十字光标, 表示点击即选中
+  const altCursor = (e) => wrap.classList.toggle('alt', !!e.altKey);
+  canvas.addEventListener('pointermove', altCursor);
+  window.addEventListener('keydown', altCursor);
+  window.addEventListener('keyup', altCursor);
+  window.addEventListener('blur', () => wrap.classList.remove('alt'));
   const endTouch = (e) => {
     const touch = live.touch;
     live.touch = null;
     if (!touch) return;
     const point = livePoint(e);
-    if (touch.inspect) {
-      if (e.type === 'pointerup' && point.inside) inspectAt(point);
+    if (touch.point) {
+      clearTimeout(touch.hold);
+      if (touch.moved) {
+        $('liveWrap').classList.remove('pinching');
+        hidePinchDots();
+      }
+      if (touch.pinch) {
+        sendPinch(touch, 'touch1-up');
+        return;
+      }
+      if (touch.moved || e.type !== 'pointerup' || !point.inside) return;
+      if (touch.inspect) {
+        inspectAt(point);
+      } else {
+        // 没有可选择的 App 时 ⌥ + 点击仍是普通点击
+        liveSend({ type: 'touch1-down', x: point.x, y: point.y, width: w(), height: h() });
+        setTimeout(() => liveSend({ type: 'touch1-up', x: point.x, y: point.y, width: w(), height: h() }), LIVE_TAP_MS);
+      }
       return;
     }
     if (e.type === 'pointerup') checkLiveDrag(touch);

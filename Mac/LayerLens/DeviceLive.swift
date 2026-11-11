@@ -293,10 +293,15 @@ private final class DeviceLiveSession {
         }
         guard video.isActive(id) || ["resume", "release", "size"].contains(type) else { return }
         if type.hasPrefix("touch1-") {
+            // x2/y2 为可选的第二指(双指缩放), 须成对出现
+            guard (item["x2"] == nil) == (item["y2"] == nil) else { return }
             guard ["x", "y", "width", "height"].allSatisfy({ key in
                 (item[key] as? NSNumber)?.doubleValue.isFinite == true
             }), let width = item["width"] as? NSNumber, let height = item["height"] as? NSNumber,
                   width.doubleValue > 0, height.doubleValue > 0 else { return }
+            if item["x2"] != nil {
+                guard ["x2", "y2"].allSatisfy({ ((item[$0] as? NSNumber)?.doubleValue.isFinite) == true }) else { return }
+            }
         }
         if type == "button" { guard let button = item["button"] as? String, ["swipe-to-home", "app-switcher", "sleep-wake"].contains(button) else { return } }
         if type == "rotate" {

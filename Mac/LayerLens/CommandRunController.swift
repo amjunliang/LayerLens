@@ -33,6 +33,8 @@ final class CommandRunController {
     private var latestOrders: [String: Int] = [:]
     private struct Selection { let device: String; let bundle: String; let order: Int }
     private var selections: [String: Selection] = [:]
+    // 已保存 Scheme 的构建配置: 项目和 Scheme 文件未变时直接复用, 省掉每次运行前的 -showBuildSettings。
+    private var settingsCache: [String: (fingerprint: String, value: [String: Any])] = [:]
     private let worker = DispatchQueue(label: "com.layerlens.command-run", attributes: .concurrent)
     private let defaultsKey = "LayerLensCommandRunRelativeProjects"
     private let executable: String
@@ -253,7 +255,7 @@ final class CommandRunController {
     }
     private func fail(_ job: Job, _ message: String) { _ = update(job, "failed", String(message.suffix(4000))) }
 
-    private func run(_ job: Job, useSavedScheme: Bool = true) {
+    private func run(_ job: Job, useSavedScheme: Bool = true, refreshed: Bool = false) {
         guard update(job, "resolving") else { return }
         if !job.xcodePath.isEmpty && !XcodeController.installedXcodes().contains(where: { $0.path == URL(fileURLWithPath: job.xcodePath).resolvingSymlinksInPath().path }) {
             fail(job, "所选 Xcode 不可用，请重新选择"); return
@@ -354,18 +356,30 @@ final class CommandRunController {
         let digest = SHA256.hash(data: Data(cacheKey.utf8)).map { String(format: "%02x", $0) }.joined()
         let derived = cacheRoot.appendingPathComponent(digest, isDirectory: true).path
         let base = ["xcodebuild", flag, project, "-scheme", plan.scheme, "-configuration", plan.configuration, "-destination", "id=\(job.device)", "-derivedDataPath", derived]
-        guard let settings = runProcess(job, base + ["-showBuildSettings", "-json"], cancellable: true, timeout: queryTimeout) else { return }
-        guard settings.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(settings.1.utf8)) else {
-            fail(job, settings.1.isEmpty ? "无法读取当前 Scheme 的构建配置" : settings.1); return
-        }
-        guard let value = values.first(where: { XcodeRunPlan.matchesBundle([$0], candidate: plan, bundleId: job.bundle) }) else {
-            if hostProject != nil && hasSavedProject {
-                // Scheme 仍存在但已改绑目标。只重新发现一次，不重复发送 Home。
-                run(job, useSavedScheme: false)
-            } else {
-                fail(job, "当前 Scheme 不再构建所选 App")
+        let settingsKey = ([job.bundle] + base).joined(separator: "\n")
+        let fingerprint = Self.projectFingerprint([project, plan.project])
+        lock.lock()
+        let cached = hasSavedProject ? settingsCache[settingsKey].flatMap { $0.fingerprint == fingerprint ? $0.value : nil } : nil
+        lock.unlock()
+        let value: [String: Any]
+        if let cached {
+            value = cached
+        } else {
+            guard let settings = runProcess(job, base + ["-showBuildSettings", "-json"], cancellable: true, timeout: queryTimeout) else { return }
+            guard settings.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(settings.1.utf8)) else {
+                fail(job, settings.1.isEmpty ? "无法读取当前 Scheme 的构建配置" : settings.1); return
             }
-            return
+            guard let match = values.first(where: { XcodeRunPlan.matchesBundle([$0], candidate: plan, bundleId: job.bundle) }) else {
+                if hostProject != nil && hasSavedProject {
+                    // Scheme 仍存在但已改绑目标。只重新发现一次，不重复发送 Home。
+                    run(job, useSavedScheme: false, refreshed: refreshed)
+                } else {
+                    fail(job, "当前 Scheme 不再构建所选 App")
+                }
+                return
+            }
+            value = match
+            lock.lock(); settingsCache[settingsKey] = (fingerprint, match); lock.unlock()
         }
         guard let build = value["buildSettings"] as? [String: Any],
               let directory = build["TARGET_BUILD_DIR"] as? String, !directory.isEmpty,
@@ -427,10 +441,15 @@ final class CommandRunController {
             }
             lock.unlock()
         }
-        if shouldPressHome(job) { job.beforeBuild() }
+        if !refreshed && shouldPressHome(job) { job.beforeBuild() }
         guard let built = runProcess(job, base + ["build"], cancellable: true, marksBuild: true) else { return }
         guard built.0 == 0 else { fail(job, built.1); return }
         guard Self.appMatchesBundle(app, bundleId: job.bundle) else {
+            if cached != nil {
+                // 缓存的配置可能已过期(如 xcconfig 改了 Bundle ID 或产物位置): 重新查询一次。
+                lock.lock(); settingsCache[settingsKey] = nil; lock.unlock()
+                run(job, useSavedScheme: useSavedScheme, refreshed: true); return
+            }
             fail(job, "构建成功，但指定产物的 Bundle ID 与当前 App 不匹配"); return
         }
         guard update(job, "installing") else { return }
@@ -441,6 +460,28 @@ final class CommandRunController {
         guard let launched = runProcess(job, command, cancellable: false, environment: environment, requireSelection: true) else { return }
         guard launched.0 == 0 else { fail(job, launched.1); return }
         _ = update(job, "succeeded")
+    }
+    /// 项目与 Scheme 文件的修改时间和大小; 任一变化都让缓存的构建配置失效。
+    static func projectFingerprint(_ containers: [String]) -> String {
+        let fm = FileManager.default
+        var files: [String] = []
+        for container in Set(containers).sorted() {
+            files += ["project.pbxproj", "contents.xcworkspacedata"].map { container + "/" + $0 }
+            var schemeDirs = [container + "/xcshareddata/xcschemes"]
+            for user in (try? fm.contentsOfDirectory(atPath: container + "/xcuserdata")) ?? [] {
+                schemeDirs.append(container + "/xcuserdata/" + user + "/xcschemes")
+            }
+            for dir in schemeDirs {
+                for name in ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).sorted() where name.hasSuffix(".xcscheme") {
+                    files.append(dir + "/" + name)
+                }
+            }
+        }
+        return files.compactMap { path in
+            guard let attributes = try? fm.attributesOfItem(atPath: path) else { return nil }
+            let time = (attributes[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+            return "\(path):\(time):\(attributes[.size] as? Int ?? 0)"
+        }.joined(separator: "\n")
     }
     static func appMatchesBundle(_ app: URL, bundleId: String) -> Bool {
         guard let data = try? Data(contentsOf: app.appendingPathComponent("Info.plist")),

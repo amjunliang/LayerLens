@@ -31,6 +31,8 @@ final class SimulatorStream {
     // touchQueue 上访问: 正在按下的观看者和位置, 断开时据此补发抬起
     private var touchOwner: ObjectIdentifier?
     private var lastTouch = (x: 0.5, y: 0.5)
+    private var lastSecond: (x: Double, y: Double)?
+    private var pinching = false
     private var lastEdge: UInt8 = 0
     private var holdTimer: DispatchSourceTimer?
 
@@ -269,7 +271,7 @@ final class SimulatorStream {
         guard touchOwner == id, let touch else { return }
         touchOwner = nil
         stopHold()
-        touch.send(phase: .up, x: lastTouch.x, y: lastTouch.y)
+        touch.send(phase: .up, x: lastTouch.x, y: lastTouch.y, second: pinching ? lastSecond : nil)
         LiveLog.write("release touch of closed viewer")
     }
 
@@ -284,7 +286,7 @@ final class SimulatorStream {
                     self.stopHold()
                     return
                 }
-                touch.send(phase: .move, x: self.lastTouch.x, y: self.lastTouch.y, edge: self.lastEdge)
+                touch.send(phase: .move, x: self.lastTouch.x, y: self.lastTouch.y, second: self.pinching ? self.lastSecond : nil, edge: self.lastEdge)
             }
             timer.resume()
             holdTimer = timer
@@ -339,9 +341,18 @@ final class SimulatorStream {
             let edge = Self.edges[message["edge"] as? String ?? ""] ?? 0
             // 拖出画面时停在屏幕边缘, 与手指滑出屏幕一致
             let point = (x: min(max(x / width, 0), 1), y: min(max(y / height, 0), 1))
-            touch.send(phase: phase, x: point.x, y: point.y, edge: edge)
+            // 双指缩放: 第二指随同一条消息发送, 按下时确定本次触摸是单指还是双指
+            var second: (x: Double, y: Double)?
+            if let x2 = message["x2"] as? Double, let y2 = message["y2"] as? Double, x2.isFinite, y2.isFinite {
+                second = (min(max(x2 / width, 0), 1), min(max(y2 / height, 0), 1))
+            }
+            if phase == .down { pinching = second != nil }
+            if pinching && second == nil { second = lastSecond }
+            if !pinching { second = nil }
+            touch.send(phase: phase, x: point.x, y: point.y, second: second, edge: edge)
             touchOwner = phase == .up ? nil : id
             lastTouch = point
+            lastSecond = second
             lastEdge = edge
             if phase == .up {
                 stopHold()
