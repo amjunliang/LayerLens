@@ -21,6 +21,8 @@ typedef NS_ENUM(NSInteger, LayerLensBodyState) {
     LayerLensBodyStateStream,
     /// 来自文件上传或下载到文件
     LayerLensBodyStateFile,
+    /// 请求已完成, 响应数据没有经过可捕获的回调
+    LayerLensBodyStateUnavailable,
 };
 
 /// 一次请求的记录, 只在 LayerLensNetworkRecorder 的内部队列上读写
@@ -29,7 +31,8 @@ typedef NS_ENUM(NSInteger, LayerLensBodyState) {
 @property (nonatomic, assign) uint64_t identifier;
 /// 每次变化后更新, 网页据此增量同步
 @property (nonatomic, assign) uint64_t seq;
-@property (nonatomic, weak, nullable) NSURLSessionTask *task;
+/// Retain only until capture completion so fallback can read the real task result.
+@property (nonatomic, strong, nullable) NSURLSessionTask *task;
 @property (nonatomic, copy) NSString *taskType;
 @property (nonatomic, copy) NSString *method;
 @property (nonatomic, copy) NSString *url;
@@ -41,6 +44,7 @@ typedef NS_ENUM(NSInteger, LayerLensBodyState) {
 @property (nonatomic, copy, nullable) NSString *mimeType;
 @property (nonatomic, copy, nullable) NSDictionary<NSString *, NSString *> *responseHeaders;
 @property (nonatomic, copy, nullable) NSString *errorMessage;
+@property (nonatomic, copy, nullable) NSString *captureNote;
 /// 任务已结束但还没收到结束回调的时间, 超时后按任务当前状态补记
 @property (nonatomic, strong, nullable) NSDate *completedSeenDate;
 

@@ -90,6 +90,12 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
         value = MCPRecords.requests(records, after: 2, limit: 1)
         require((value["lines"] as? String)?.hasPrefix("#4 ") == true && value["omittedOlder"] as? Int == 1, "Cursor and limit")
 
+        let uncaptured: [String: Any] = ["state": "unavailable", "status": 0, "captureNote": "Result not captured"]
+        require(!MCPRecords.failed(uncaptured), "Uncaptured results are not network failures")
+        let uncapturedLines = MCPRecords.requests([(5, uncaptured)], after: 0, limit: 10)["lines"] as? String ?? ""
+        require(uncapturedLines.contains("UNKNOWN") && uncapturedLines.contains("capture=Result not captured"), "Unknown capture status explained")
+        require(MCPRecords.bodyUnavailable(["_f": true, "resBody": "unavailable"], side: "res").contains("not captured"), "Uncaptured response body explained")
+
         let mixed: [(id: UInt64, record: [String: Any])] = [
             (1, ["url": "https://a.example.com/x"]), (2, ["url": "https://b.example.com/y?q=1"]),
         ]

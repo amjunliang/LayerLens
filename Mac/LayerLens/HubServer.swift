@@ -9,6 +9,7 @@
 import Foundation
 import ServiceManagement
 import Network
+import CoreGraphics
 
 /// Mac 端 HTTP 服务: 提供网页、设备列表, 并把 /t/<设备>/<App>/... 转发给对应的 iOS App.
 /// 只监听 127.0.0.1, 并校验 Host 防止 DNS 重绑定
@@ -38,9 +39,11 @@ final class HubServer {
     private let mcpClients = MCPClientInstaller(url: HubServer.mcpURL)
     /// 安装和移除串行执行, 避免两个请求同时改同一份客户端配置
     private let mcpSetupQueue = DispatchQueue(label: "com.layerlens.hub.mcp-setup")
-    private let captureCanvas: (MCPWindowContext, @escaping (Data?) -> Void) -> Void
+    private lazy var pageCapture = MCPPageCaptureBroker(queue: queue)
     private lazy var mcp = MCPHTTPService(store: mcpContexts, registry: registry, git: git,
-                                              appLogs: appLogs, network: network, workQueue: workQueue, captureCanvas: captureCanvas)
+        appLogs: appLogs, network: network, workQueue: workQueue, captureCanvas: { [weak self] context, completion in
+            self?.pageCapture.capture(context, completion: completion) ?? completion(nil)
+        })
     private var pendingTargetState: [String: Any]?
     private var targetStateFlush: DispatchWorkItem?
     let terminal = TerminalController()
@@ -72,10 +75,15 @@ final class HubServer {
     private let webRoot: URL
     private var listener: NWListener?
     private let allowedHosts: Set<String> = ["127.0.0.1:\(HubServer.port)", "localhost:\(HubServer.port)"]
+    private let pickScreenColor: (String, @escaping (String?, Bool) -> Void) -> Void
+    private let cancelScreenColor: (String) -> Void
 
-    init(registry: TargetRegistry, captureCanvas: @escaping (MCPWindowContext, @escaping (Data?) -> Void) -> Void) {
-        self.captureCanvas = captureCanvas
+    init(registry: TargetRegistry, pickScreenColor: @escaping (String, @escaping (String?, Bool) -> Void) -> Void,
+         cancelScreenColor: @escaping (String) -> Void,
+         captureCanvas: @escaping (MCPWindowContext, @escaping (Data?) -> Void) -> Void) {
         self.registry = registry
+        self.pickScreenColor = pickScreenColor
+        self.cancelScreenColor = cancelScreenColor
         network = NetworkRecorder { [weak registry] deviceId, bundleId in
             registry?.captureEnabled(deviceId: deviceId, bundleId: bundleId) ?? false
         }
@@ -174,6 +182,15 @@ final class HubServer {
             connection.respond(.error(403, "Forbidden origin"))
             return
         }
+        if head.path == "/api/hub/mcp/page" {
+            guard head.method == "GET", head.header("Upgrade")?.lowercased() == "websocket",
+                  head.header("Sec-WebSocket-Key") != nil,
+                  let window = head.query["window"], !window.isEmpty, window.count <= 128 else {
+                connection.respond(.error(400, "Invalid page connection")); return
+            }
+            pageCapture.accept(window: window, head: head, leftover: leftover, connection: connection.detach())
+            return
+        }
         if head.path == "/api/hub/target-states" {
             guard head.method == "GET", head.header("Upgrade")?.lowercased() == "websocket", head.header("Sec-WebSocket-Key") != nil else {
                 connection.respond(.error(400, "WebSocket required")); return
@@ -230,6 +247,8 @@ final class HubServer {
         switch head.path {
         case "/":
             connection.respond(staticFile("index.html"))
+        case "/api/hub/screen-color/status":
+            connection.respond(.json(["screenCaptureAllowed": CGPreflightScreenCaptureAccess()]))
         case "/api/targets":
             let hubInfo = self.hubInfo
             registry.snapshot { devices, simulators, history in
@@ -460,6 +479,26 @@ final class HubServer {
     private func handlePost(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
         switch head.path {
+        case "/api/hub/screen-color", "/api/hub/screen-color/cancel":
+            // Screen sampling is only available to a page served by this local hub.
+            guard let origin = head.header("Origin"), allowedHosts.contains(where: { origin.lowercased() == "http://" + $0 }),
+                  head.header("Content-Type")?.lowercased().hasPrefix("application/json") == true else {
+                connection.respond(.error(403, "Forbidden origin")); return
+            }
+            guard let owner = json["id"] as? String, UUID(uuidString: owner) != nil else {
+                connection.respond(.error(400, "Invalid picker request")); return
+            }
+            if head.path.hasSuffix("/cancel") {
+                cancelScreenColor(owner)
+                connection.respond(.json(["ok": true])); return
+            }
+            guard CGPreflightScreenCaptureAccess() else {
+                connection.respond(.error(403, "screen_capture_denied")); return
+            }
+            pickScreenColor(owner) { hex, busy in
+                if busy { connection.respond(.error(409, "Color picker is already active")); return }
+                connection.respond(.json(hex.map { ["color": $0] } ?? [:]))
+            }
         case "/api/hub/mcp/context":
             guard mcpContexts.update(json) else {
                 connection.respond(.error(400, "Invalid MCP context"))
@@ -1194,5 +1233,78 @@ enum LoginItem {
         } catch {
             return error.localizedDescription
         }
+    }
+}
+
+/// One short-lived screenshot request is routed to its exact page, never to the
+/// currently focused page after the request has been pinned.
+private final class MCPPageCaptureBroker {
+    private struct Pending {
+        let window: String
+        let socket: WebSocketConnection
+        let completion: (Data?) -> Void
+        var data = Data()
+    }
+    private let queue: DispatchQueue
+    private var pages: [String: WebSocketConnection] = [:]
+    private var pending: [String: Pending] = [:]
+    private let maxImageBytes = 8 * 1024 * 1024
+    init(queue: DispatchQueue) { self.queue = queue }
+
+    func accept(window: String, head: HTTPRequestHead, leftover: Data, connection: NWConnection) {
+        let socket = WebSocketConnection(connection: connection, leftover: leftover)
+        socket.onText = { [weak self, weak socket] text in
+            guard let self, let socket else { return }
+            self.queue.async { self.receive(text, window: window, socket: socket) }
+        }
+        socket.onClose = { [weak self, weak socket] in
+            guard let self, let socket else { return }
+            self.queue.async {
+                if self.pages[window] === socket { self.pages[window] = nil }
+                for id in self.pending.keys.filter({ self.pending[$0]?.socket === socket }) { self.finish(id, data: nil) }
+            }
+        }
+        guard socket.accept(head) else { connection.cancel(); return }
+        if let old = pages.updateValue(socket, forKey: window), old !== socket { old.close() }
+    }
+
+    func capture(_ context: MCPWindowContext, completion: @escaping (Data?) -> Void) {
+        queue.async { [self] in
+            guard let socket = pages[context.windowId], pending.count < 8 else { completion(nil); return }
+            let id = UUID().uuidString
+            pending[id] = Pending(window: context.windowId, socket: socket, completion: completion)
+            let request: [String: Any] = ["type": "capture", "id": id, "window": context.windowId,
+                "device": context.deviceId, "app": context.bundleId, "instance": context.instanceId,
+                "mode": context.mode, "annotationRevision": context.annotationRevision,
+                "selectedElement": context.annotation.isEmpty ? (context.selected["element"] as? String ?? "") : ""]
+            guard let data = try? JSONSerialization.data(withJSONObject: request), let text = String(data: data, encoding: .utf8) else {
+                finish(id, data: nil); return
+            }
+            socket.sendText(text) { [weak self] ok in
+                if !ok { self?.queue.async { self?.finish(id, data: nil) } }
+            }
+            queue.asyncAfter(deadline: .now() + 8) { [weak self] in self?.finish(id, data: nil) }
+        }
+    }
+
+    private func receive(_ text: String, window: String, socket: WebSocketConnection) {
+        guard let payload = text.data(using: .utf8), let message = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let id = message["id"] as? String, var request = pending[id], request.window == window, request.socket === socket else { return }
+        if message["error"] != nil { finish(id, data: nil); return }
+        if let chunk = message["chunk"] as? String {
+            guard let bytes = Data(base64Encoded: chunk), request.data.count + bytes.count <= maxImageBytes else { finish(id, data: nil); return }
+            request.data.append(bytes)
+            pending[id] = request
+        }
+        if message["done"] as? Bool == true {
+            let png = request.data
+            guard png.starts(with: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) else { finish(id, data: nil); return }
+            finish(id, data: png)
+        }
+    }
+
+    private func finish(_ id: String, data: Data?) {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        request.completion(data)
     }
 }

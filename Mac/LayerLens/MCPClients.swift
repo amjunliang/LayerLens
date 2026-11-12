@@ -308,10 +308,10 @@ final class MCPClientInstaller {
     # LayerLens
 
     1. Call the `layerlens` MCP tool `get_context`.
-    2. `selected.element` reads `ivar (Class) "text" · id=identifier`. Search `sourceRoot` for the ivar first, then the class, the identifier, `selected.owner` and `selected.vc`.
-    3. Only when nothing useful is selected, call `find_nodes` with the returned `snapshotId` and a visible text, class or identifier.
-    4. Call `get_canvas_screenshot` with the returned `snapshotId` when the user asks to see the canvas or when appearance matters (e.g. clipping, overlap, alignment). The image includes the canvas's existing selection. Keep source lookup, logs, and network diagnosis text-only when they do not need visual evidence.
-    5. Do not ask for the full view hierarchy.
+    2. When `focus.type` is `element`, use `selected.element`, `selected.owner`, `selected.vc`, and `selected.hints` to search `sourceRoot`. System SwiftUI containers are weak clues; prefer visible text or business classes.
+    3. When `focus.type` is `annotation`, use `focus.hints` only as candidates. If they are absent or ambiguous, call `get_canvas_screenshot` with the returned `snapshotId`; the user's marks identify the intended region.
+    4. If no target is selected or marked and the user refers to visible UI without clear text, capture the canvas and search for distinctive visible text. Screenshots are also appropriate for visual questions. Do not infer that the canvas and hierarchy are the same frame.
+    5. Keep output compact. Do not ask for the full view hierarchy.
 
     Runtime issues (`get_context.activity` counts this launch's logs and requests):
     - Logs: `search_logs` with a specific `query` (keywords joined by `|`, e.g. `error|fail`). Avoid reading all logs.

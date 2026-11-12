@@ -51,6 +51,28 @@ xcrun clang -fobjc-arc -fblocks -framework Foundation -I Pod/Classes/Network \
   Pod/Classes/Network/LayerLensNetworkHooks.m Mac/Tests/NetworkHooksTests.m -o "$run_dir/network-hooks"
 "$run_dir/network-hooks"
 
+printf '[Swift] async URLSession network hooks\n'
+xcrun clang -fobjc-arc -fblocks -I Pod/Classes/Network -c \
+  Pod/Classes/Network/LayerLensNetworkHooks.m -o "$run_dir/network-swift-hooks.o"
+xcrun clang -fobjc-arc -fblocks -I Pod/Classes/Network -c \
+  Mac/Tests/NetworkSwiftFixture.m -o "$run_dir/network-swift-fixture.o"
+xcrun swiftc -parse-as-library -module-cache-path "$run_dir/modules" \
+  Mac/Tests/NetworkSwiftAsyncTests.swift "$run_dir/network-swift-hooks.o" "$run_dir/network-swift-fixture.o" \
+  -o "$run_dir/network-swift-async"
+"$run_dir/network-swift-async"
+
+printf '[Swift] streaming network recorder\n'
+xcrun clang -fobjc-arc -fblocks -I Pod/Classes/Network -I Pod/Classes/Storage -I Pod/Classes -c \
+  Mac/Tests/NetworkRecorderFixture.m -o "$run_dir/network-real-fixture.o"
+xcrun clang -fobjc-arc -fblocks -I Pod/Classes/Network -I Pod/Classes/Storage -I Pod/Classes -c \
+  Pod/Classes/Network/LayerLensNetworkRecorder.m -o "$run_dir/network-real-recorder.o"
+xcrun clang -fobjc-arc -fblocks -I Pod/Classes/Network -c \
+  Pod/Classes/Network/LayerLensNetworkRecord.m -o "$run_dir/network-real-record.o"
+xcrun swiftc -parse-as-library -module-cache-path "$run_dir/modules" \
+  Mac/Tests/NetworkRecorderStreamTests.swift "$run_dir/network-real-fixture.o" "$run_dir/network-real-recorder.o" \
+  "$run_dir/network-real-record.o" "$run_dir/network-swift-hooks.o" -o "$run_dir/network-recorder-stream"
+"$run_dir/network-recorder-stream"
+
 printf '[Objective-C] display-geometry\n'
 xcrun clang -fobjc-arc -fblocks -framework Foundation -framework CoreGraphics \
   -I Mac/DeviceBridge/Sources Mac/Tests/DisplayGeometryTests.m -o "$run_dir/display-geometry"
@@ -61,6 +83,7 @@ swift_test live-video Mac/LayerLens/LiveVideo.swift Mac/Tests/LiveVideoTests.swi
 swift_test target-history Mac/LayerLens/TargetHistory.swift Mac/Tests/TargetHistoryTests.swift
 swift_test target-state Mac/LayerLens/TargetStateHub.swift Mac/Tests/TargetStateHubTests.swift
 swift_test mcp-context Mac/LayerLens/MCPContext.swift Mac/Tests/MCPContextTests.swift
+swift_test screen-color-picker Mac/LayerLens/ScreenColorPicker.swift Mac/Tests/ScreenColorPickerTests.swift
 swift_test mcp-records Mac/LayerLens/MCPRecords.swift Mac/Tests/MCPRecordsTests.swift
 swift_test mcp-clients Mac/LayerLens/MCPClients.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/MCPClientsTests.swift
 swift_test git-paths Mac/LayerLens/GitController.swift Mac/LayerLens/XcodeController.swift Mac/LayerLens/BoundedProcess.swift Mac/Tests/GitPathTests.swift
@@ -82,7 +105,7 @@ swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift 
 
 for file in \
   GitViewStateTests.cjs GitInteractionTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs TargetTaskTests.cjs AutoFollowTests.cjs PageActivityTests.cjs LiveVideoDecoderTests.cjs LiveBudgetWebTests.cjs NetworkAsyncStateTests.cjs \
-  NetworkCaptureActionTests.cjs NetworkSmallScreenTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs Stage3DPaintOrderTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LivePixelZoomTests.cjs MCPContextWebTests.cjs; do
+  NetworkCaptureActionTests.cjs NetworkSmallScreenTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs Stage3DPaintOrderTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LiveCaptureDeadlineTests.cjs LiveManualReconnectTests.cjs LiveTouchCaptureStateTests.cjs LivePixelZoomTests.cjs MCPContextWebTests.cjs MCPCanvasTests.cjs SystemColorPickerTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"
 done

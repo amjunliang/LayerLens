@@ -41,6 +41,7 @@ const context = vm.createContext({
   swiftUIAncestors: node => (node.swiftUIContext || []).slice(0, -1),
   codeIvars: () => [{ text: 'DetailController.readButton' }],
   isCodeClass: cls => !cls.startsWith('UI'),
+  isSwiftUILayoutContext: node => node.cls === 'SwiftUI',
   fetch: (_url, options) => { requests.push(JSON.parse(options.body)); return Promise.resolve(); },
   navigator: { sendBeacon: (_url, body) => { beacons.push(body); return true; } },
   Blob,
@@ -72,6 +73,16 @@ selected.swiftUIContext = ['ScrollView', 'Label', 'Text'];
 selected.cls = 'SwiftUI';
 assert.equal(context.mcpSelectedInfo().swiftUIPath, 'ScrollView / Label', 'Captured SwiftUI context must reach MCP');
 delete selected.swiftUIContext;
+context.state.mode = '2d';
+selected.children = [
+  {cls: 'SwiftUI', text: '关闭模型信息', children: []},
+  {cls: 'SwiftUI', text: 'GPT-6.1 Sol', children: []},
+  {cls: 'SwiftUI', text: '隐藏内容', effHidden: true, children: []},
+  {cls: 'SwiftUI', text: '关闭模型信息', children: []},
+];
+assert.deepEqual(Array.from(context.mcpSelectedInfo().hints), ['关闭模型信息', 'GPT-6.1 Sol'], 'Visible SwiftUI hints must be compact and unique');
+context.state.mode = 'live';
+assert.equal(context.mcpSelectedInfo().hints, undefined, 'Live frames must not claim cached hierarchy hints');
 selected.cls = 'UIButton';
 now = 2000;
 vm.runInContext('scheduleMCPContext(false);', context);

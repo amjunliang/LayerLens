@@ -19,7 +19,7 @@ const context = vm.createContext({
   live, VideoDecoder: Decoder, EncodedVideoChunk: class {constructor(value) {Object.assign(this, value);}},
   performance: {now: () => 1000}, clearTimeout() {}, Uint8Array,
   pageActivity: {active: false}, state: {mode: 'live'}, console: {warn() {}},
-  liveSend: item => sent.push(item), paintLive: frame => painted.push(frame),
+  markLiveCaptureReady() {}, liveSend: item => sent.push(item), paintLive: frame => painted.push(frame),
   showLiveGuide: message => errors.push(message), $: () => ({hidden: false}),
 });
 vm.runInContext(source.slice(start, end), context);

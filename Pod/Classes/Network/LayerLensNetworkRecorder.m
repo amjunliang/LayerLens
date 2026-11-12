@@ -250,7 +250,9 @@ static NSString * const kLayerLensNetworkCaptureKey = @"LayerLensNetworkCapture"
     } else if (record.responseBodySize == 0 && received > 0) {
         // 没有拿到数据回调时只记录大小
         record.responseBodySize = received;
+        record.responseBodyState = LayerLensBodyStateUnavailable;
     }
+    record.task = nil;
     record.receivingData = nil;
     [self markChanged:record];
 }
@@ -383,8 +385,10 @@ static NSString * const kLayerLensNetworkCaptureKey = @"LayerLensNetworkCapture"
             pending = YES;
             continue;
         }
-        NSError *error = task ? task.error : [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorUnknown userInfo:@{NSLocalizedDescriptionKey: @"Result not captured"}];
-        [self finishRecord:record response:task.response request:task.currentRequest data:nil error:error sent:task.countOfBytesSent received:task.countOfBytesReceived];
+        NSURLResponse *response = task.response;
+        NSError *error = task.error;
+        if (!task || (!response && !error)) { record.captureNote = @"Result not captured"; }
+        [self finishRecord:record response:response request:task.currentRequest data:nil error:error sent:task.countOfBytesSent received:task.countOfBytesReceived];
     }
     if (!pending) {
         dispatch_source_cancel(self.sweepTimer);
@@ -430,7 +434,7 @@ static NSString * const kLayerLensNetworkCaptureKey = @"LayerLensNetworkCapture"
             completion(data, contentType, nil);
             return;
         }
-        NSDictionary *messages = @{@"none": @"No content", @"tooLarge": @"Content over 5 MB is not saved", @"stream": @"Sent as a stream, content is not available", @"file": @"File content is not saved", @"evicted": @"Removed by cache cleanup", @"stored": @"Removed by cache cleanup"};
+        NSDictionary *messages = @{@"none": @"No content", @"tooLarge": @"Content over 5 MB is not saved", @"stream": @"Sent as a stream, content is not available", @"unavailable": @"Response content was not captured", @"file": @"File content is not saved", @"evicted": @"Removed by cache cleanup", @"stored": @"Removed by cache cleanup"};
         NSString *state = [record detail][isRequest ? @"reqBody" : @"resBody"];
         completion(nil, contentType, messages[state] ?: @"No content");
     });

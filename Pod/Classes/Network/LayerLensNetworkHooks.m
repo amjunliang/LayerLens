@@ -47,6 +47,21 @@ static void LayerLensHookMethod(Class cls, SEL sel, id (^factory)(IMP original))
     [LayerLensHookLock unlock];
 }
 
+// Private Foundation entry points are optional and vary across OS versions.
+static BOOL LayerLensCompatibleMethod(Class cls, SEL sel, unsigned int count, int blockIndex) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method || method_getNumberOfArguments(method) != count) { return NO; }
+    char type[16] = {0};
+    method_getReturnType(method, type, sizeof(type));
+    if (type[0] != '@') { return NO; }
+    for (unsigned int index = 2; index < count; index++) {
+        memset(type, 0, sizeof(type));
+        method_getArgumentType(method, index, type, sizeof(type));
+        if (type[0] != '@' || (index == blockIndex && type[1] != '?')) { return NO; }
+    }
+    return YES;
+}
+
 // 子类实现中调用 super 时只记录一次
 static BOOL LayerLensEnter(NSString *key) {
     NSMutableDictionary *store = NSThread.currentThread.threadDictionary;
@@ -102,6 +117,7 @@ static BOOL LayerLensIsProxyClass(Class cls) {
 
     for (Class cls in taskClasses) {
         [self hookResumeOfClass:cls];
+        [self hookTaskDelegateOfClass:cls];
     }
     [self hookTaskCreationOfClass:sessionClass];
     [self hookSessionFactory];
@@ -119,17 +135,102 @@ static BOOL LayerLensIsProxyClass(Class cls) {
     });
 }
 
+// Swift AsyncBytes assigns its per-task delegate after task creation.
++ (void)hookTaskDelegateOfClass:(Class)cls {
+    SEL sel = NSSelectorFromString(@"setDelegate:");
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method || method_getNumberOfArguments(method) != 3) { return; }
+    char result[8] = {0}, argument[8] = {0};
+    method_getReturnType(method, result, sizeof(result));
+    method_getArgumentType(method, 2, argument, sizeof(argument));
+    if (result[0] != 'v' || argument[0] != '@') { return; }
+    LayerLensHookMethod(cls, sel, ^id(IMP original) {
+        return ^(NSURLSessionTask *task, id delegate) {
+            if (delegate) { [self hookDelegate:delegate]; }
+            ((void (*)(id, SEL, id))original)(task, sel, delegate);
+        };
+    });
+}
+
 // 带 completionHandler 的任务不回调代理的数据方法, 包一层 handler 拿到结果
 + (void)hookTaskCreationOfClass:(Class)cls {
     LayerLensNetworkRecorder *recorder = LayerLensNetworkRecorder.sharedRecorder;
 
     // Plain delegate tasks can also be created on a session predating installation.
-    for (NSString *name in @[@"dataTaskWithRequest:", @"dataTaskWithURL:", @"downloadTaskWithRequest:", @"downloadTaskWithURL:"]) {
+    for (NSString *name in @[@"dataTaskWithRequest:", @"dataTaskWithURL:", @"downloadTaskWithRequest:", @"downloadTaskWithURL:", @"uploadTaskWithStreamedRequest:"]) {
         SEL sel = NSSelectorFromString(name);
         LayerLensHookMethod(cls, sel, ^id(IMP original) {
             return ^NSURLSessionTask *(NSURLSession *session, id target) {
                 if (session.delegate) { [self hookDelegate:session.delegate]; }
                 return ((NSURLSessionTask * (*)(id, SEL, id))original)(session, sel, target);
+            };
+        });
+    }
+
+    // Swift async URLSession APIs use Foundation's per-task delegate entry
+    // point on supported OS versions, bypassing the public completion method.
+    // Resolve it dynamically and only hook the expected Objective-C signature.
+    for (NSString *name in @[@"_dataTaskWithRequest:delegate:completionHandler:", @"_dataTaskWithURL:delegate:completionHandler:"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (!LayerLensCompatibleMethod(cls, sel, 5, 4)) { continue; }
+        LayerLensHookMethod(cls, sel, ^id(IMP original) {
+            return ^NSURLSessionDataTask *(NSURLSession *session, id target, id delegate, LayerLensDataHandler handler) {
+                if (!handler) {
+                    return ((NSURLSessionDataTask * (*)(id, SEL, id, id, id))original)(session, sel, target, delegate, handler);
+                }
+                __block __weak NSURLSessionTask *weakTask = nil;
+                NSURLSessionDataTask *task = ((NSURLSessionDataTask * (*)(id, SEL, id, id, id))original)(session, sel, target, delegate, [self wrapDataHandler:handler task:^NSURLSessionTask *{
+                    return weakTask;
+                }]);
+                weakTask = task;
+                [recorder markHandlerTask:task];
+                return task;
+            };
+        });
+    }
+
+    // AsyncBytes uses the per-task delegate rather than a completion handler.
+    for (NSString *name in @[@"_dataTaskWithRequest:delegate:", @"_dataTaskWithURL:delegate:"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (!LayerLensCompatibleMethod(cls, sel, 4, -1)) { continue; }
+        LayerLensHookMethod(cls, sel, ^id(IMP original) {
+            return ^NSURLSessionDataTask *(NSURLSession *session, id target, id delegate) {
+                if (delegate) { [self hookDelegate:delegate]; }
+                return ((NSURLSessionDataTask * (*)(id, SEL, id, id))original)(session, sel, target, delegate);
+            };
+        });
+    }
+
+    for (NSString *name in @[@"_uploadTaskWithRequest:fromData:delegate:completionHandler:", @"_uploadTaskWithRequest:fromFile:delegate:completionHandler:"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (!LayerLensCompatibleMethod(cls, sel, 6, 5)) { continue; }
+        LayerLensHookMethod(cls, sel, ^id(IMP original) {
+            return ^NSURLSessionUploadTask *(NSURLSession *session, NSURLRequest *request, id body, id delegate, LayerLensDataHandler handler) {
+                __block __weak NSURLSessionTask *weakTask = nil;
+                LayerLensDataHandler wrapped = handler ? [self wrapDataHandler:handler task:^NSURLSessionTask *{ return weakTask; }] : nil;
+                NSURLSessionUploadTask *task = ((NSURLSessionUploadTask * (*)(id, SEL, id, id, id, id))original)(session, sel, request, body, delegate, wrapped);
+                weakTask = task;
+                [recorder setUploadBody:body forTask:task];
+                if (handler) { [recorder markHandlerTask:task]; }
+                return task;
+            };
+        });
+    }
+
+    for (NSString *name in @[@"_downloadTaskWithRequest:delegate:completionHandler:", @"_downloadTaskWithURL:delegate:completionHandler:", @"_downloadTaskWithResumeData:delegate:completionHandler:"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (!LayerLensCompatibleMethod(cls, sel, 5, 4)) { continue; }
+        LayerLensHookMethod(cls, sel, ^id(IMP original) {
+            return ^NSURLSessionDownloadTask *(NSURLSession *session, id target, id delegate, LayerLensDownloadHandler handler) {
+                __block __weak NSURLSessionTask *weakTask = nil;
+                LayerLensDownloadHandler wrapped = handler ? ^(NSURL *location, NSURLResponse *response, NSError *error) {
+                    [recorder task:weakTask didCompleteWithData:nil error:error fromHandler:YES];
+                    handler(location, response, error);
+                } : nil;
+                NSURLSessionDownloadTask *task = ((NSURLSessionDownloadTask * (*)(id, SEL, id, id, id))original)(session, sel, target, delegate, wrapped);
+                weakTask = task;
+                if (handler) { [recorder markHandlerTask:task]; }
+                return task;
             };
         });
     }

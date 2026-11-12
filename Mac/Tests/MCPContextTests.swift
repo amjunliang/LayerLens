@@ -80,7 +80,7 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
         require(latest.hasTarget, "A window with device and App must count as a target")
         let snapshot = store.snapshot(context: latest, sourceRoot: "/repo/b")!
         require(snapshot.json()["sourceRoot"] as? String == "/repo/b", "Source root missing")
-        require(Set(snapshot.json().keys) == ["app", "bundleId", "selected", "snapshotId", "sourceRoot"],
+        require(Set(snapshot.json().keys) == ["app", "bundleId", "selected", "focus", "snapshotId", "sourceRoot"],
                 "get_context must only return fields that help locate source")
         require(store.update(["windowId": "b", "deviceId": "sim", "bundleId": "app.b", "instanceId": "launch-b",
                               "revision": 3, "selected": ["element": "BView3", "vc": "BController",
@@ -125,6 +125,20 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
         require(!store.update(["windowId": "b", "revision": 6, "focusRequested": true, "focusEpoch": 99]),
                 "A delayed update resurrected a closed window")
         require(store.latest()?.windowId == "a", "Closing a window did not restore the previous focus")
+
+        let annotated = MCPContextStore(now: { now })
+        require(annotated.update(["windowId": "browser", "deviceId": "sim", "bundleId": "app", "instanceId": "launch",
+            "revision": 1, "mode": "2d", "annotationRevision": 3,
+            "annotation": ["shape": "rectangle", "count": 1, "hints": ["标题", "关闭"]],
+            "selected": ["element": "OldButton"]]), "Annotation context rejected")
+        let marked = annotated.snapshot(context: annotated.latest()!, sourceRoot: nil)!
+        let focus = marked.json()["focus"] as? [String: Any]
+        require(focus?["type"] as? String == "annotation" && focus?["shape"] as? String == "rectangle", "Annotation must take focus")
+        require((focus?["hints"] as? [String]) == ["标题", "关闭"], "Annotation hints missing")
+        require(annotated.isCanvasCurrent(marked), "Fresh annotation snapshot rejected")
+        require(annotated.update(["windowId": "browser", "deviceId": "sim", "bundleId": "app", "instanceId": "launch",
+            "revision": 2, "mode": "2d", "annotationRevision": 4]), "Updated annotation rejected")
+        require(annotated.isCurrent(marked) && !annotated.isCanvasCurrent(marked), "Changed mark must invalidate only canvas capture")
 
         let roots: [[String: Any]] = [[
             "oid": 1,

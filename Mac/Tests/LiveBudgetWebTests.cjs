@@ -16,6 +16,7 @@ const live = {
 };
 const context = vm.createContext({
   live,
+  clearTimeout() {}, startLiveDeadline() {}, invalidateLiveTouchChecks() {},
   WebSocket: { OPEN: 1 },
   pageHasFocus: () => true,
   showLiveGuide: message => guides.push(message),

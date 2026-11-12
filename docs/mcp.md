@@ -59,8 +59,7 @@ url = "http://127.0.0.1:9523/mcp"
 | 工具 | 用途 |
 | --- | --- |
 | `get_context` | 当前窗口的 App、源码目录、选中节点，以及日志和请求数量 |
-| `get_canvas_screenshot` | 当前 macOS 窗口的完整可见画布，包含已有选中态 |
-| `find_nodes` | 没有选中节点时按文字、类名等搜索 |
+| `get_canvas_screenshot` | 固定的 LayerLens 页面画布，包含选中态和标注 |
 | `search_logs` | 按关键词搜索本次启动的日志 |
 | `list_requests` | 本次启动的请求列表，每个请求一行 |
 | `get_request` | 单个请求的摘要或内容 |
@@ -89,7 +88,8 @@ url = "http://127.0.0.1:9523/mcp"
 | --- | --- |
 | `app` / `bundleId` | 当前窗口选中的 App |
 | `sourceRoot` | App 源码所在的 Git 仓库根目录；不在仓库中时为源文件所在目录 |
-| `snapshotId` | 传给 `find_nodes`，固定本次窗口和 App |
+| `snapshotId` | 传给截图、日志与抓包工具，固定本次窗口和 App |
+| `mode` / `focus` | 画布模式和当前关注对象；标注优先于旧选中项 |
 | `selected.element` | `ivar (类名) "文字" · id=accessibilityIdentifier`，各部分没有时省略。优先使用声明在业务类中的 ivar，没有时退回系统类的；文字超过 40 个字符时截断，前缀仍可用于搜索 |
 | `selected.owner` | 最近的业务代码祖先类 |
 | `selected.vc` | 最近的 ViewController |
@@ -100,31 +100,9 @@ url = "http://127.0.0.1:9523/mcp"
 
 ### `get_canvas_screenshot`
 
-传入 `get_context` 返回的 `snapshotId`，返回一张 MCP `image/png` 图片。画面来自 LayerLens macOS 窗口中当前可见的画布，包含画布已有的选中态。用户要求看画面，或需要判断裁切、遮挡、对齐等视觉问题时调用。
+传入 `get_context` 返回的 `snapshotId`，返回一张 MCP `image/png` 图片。画面来自固定的 LayerLens 页面，支持 Mac 内置窗口和独立浏览器，包含已有选中态和标注。
 
-如果快照对应的画布不在可截图的 macOS 窗口中，返回 `canvas_unavailable`。
-
-### `find_nodes`
-
-在 `snapshotId` 固定的窗口和 App 中搜索节点：
-
-```json
-{
-  "snapshotId": "SNAPSHOT_ID",
-  "query": "立即阅读",
-  "visibleOnly": true,
-  "limit": 5
-}
-```
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `snapshotId` | string，必填 | `get_context` 返回的值 |
-| `query` | string，必填 | 文字、类名、ivar 或 accessibility identifier |
-| `visibleOnly` | boolean，默认 `true` | 跳过隐藏和屏幕外节点 |
-| `limit` | integer 1–10，默认 5 | 返回候选数 |
-
-返回 `{ "nodes": [...] }`，每个候选与 `selected` 相同，只有 `element`、`owner`、`vc`，按可信度排序。参数类型不对或有未知参数时返回 `invalid_arguments`。没有合适的选中节点时，Agent 应使用候选 `element` 中的 ivar、类名或 identifier 在 `sourceRoot` 中搜索源码。
+如果页面已关闭、连接断开或无法渲染，返回 `canvas_unavailable`；模式、选中项或标注变化时返回 `canvas_changed`。截图不保证与 App 层级是同一帧。
 
 ### `search_logs`
 
@@ -210,5 +188,4 @@ url = "http://127.0.0.1:9523/mcp"
 - 窗口关闭、切换 App 或 App 重启后返回 `snapshot_stale`，重新调用 `get_context` 即可。
 - 快照 1 小时后过期，返回 `snapshot_not_found`。
 - 日志和抓包工具只读取本次启动的数据；App 重启后快照失效，重新调用 `get_context`。
-- `find_nodes` 整次请求限时 8 秒，App 不响应时返回 `target_timeout`；App 未连接或在后台时返回 `target_unavailable`。
 - 所有工具只读，不注入触摸，也不控制设备。

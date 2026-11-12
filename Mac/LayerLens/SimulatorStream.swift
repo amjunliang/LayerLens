@@ -35,11 +35,19 @@ final class SimulatorStream {
     private var pinching = false
     private var lastEdge: UInt8 = 0
     private var holdTimer: DispatchSourceTimer?
+    private var startupTouchSamples = 0
 
     // queue 上访问
     private lazy var video = LiveVideoBroadcaster(queue: queue) { [weak self] in self?.encodeKeyFrame() }
     private var device: NSObject?
     private var running = false
+    private var captureHealthTimer: DispatchSourceTimer?
+    private var keyFrameWatchdog: DispatchWorkItem?
+    private var captureStalled = false
+    private var viewerIDs: Set<ObjectIdentifier> = []
+    // The broadcaster is confined to queue; capture and input use this snapshot.
+    private let viewerLock = NSLock()
+    private var activeViewerIDs: Set<ObjectIdentifier> = []
     /// 最近一次设置的方向, 新观看者据此旋转画面; 默认竖屏
     private var orientation: UInt32 = 1
 
@@ -51,6 +59,9 @@ final class SimulatorStream {
     private var pendingSurface: IOSurface?
     private var encoding = false
     private var captureGeneration = 0
+    private var lastScreenFrame: TimeInterval = 0
+    private var lastEncodeSubmitted: TimeInterval = 0
+    private var lastEncodeCompleted: TimeInterval = 0
 
     init(udid: String) {
         self.udid = udid
@@ -60,6 +71,14 @@ final class SimulatorStream {
         encoder.onOutput = { [weak self] type, data in
             self?.queue.async {
                 guard let self, self.running else { return }
+                if type == 0x02 {
+                    self.keyFrameWatchdog?.cancel()
+                    self.keyFrameWatchdog = nil
+                    if self.captureStalled {
+                        self.captureStalled = false
+                        self.video.forEachSocket { $0.sendText("{\"type\":\"capture-recovered\"}") }
+                    }
+                }
                 self.video.broadcast(type, data)
             }
         }
@@ -82,7 +101,10 @@ final class SimulatorStream {
                 self?.queue.async { self?.setViewerActive(id, active) }
             }
             socket.sendText(Self.budgetMessage(active))
+            viewerIDs.insert(id)
+            updateViewer(id, active: active)
             video.add(socket, active: active)
+            if captureStalled { socket.sendText("{\"type\":\"capture-stalled\"}") }
             socket.sendText(orientationMessage)
         }
     }
@@ -96,10 +118,18 @@ final class SimulatorStream {
         }
         self.device = device
         running = true
+        // A static screen normally emits no frames. Periodically ask for a
+        // fresh keyframe so a stale capture is detected even without new viewers.
+        let healthTimer = DispatchSource.makeTimerSource(queue: queue)
+        healthTimer.schedule(deadline: .now() + 10, repeating: 10, leeway: .seconds(1))
+        healthTimer.setEventHandler { [weak self] in self?.requestKeyFrame() }
+        captureHealthTimer = healthTimer
+        healthTimer.resume()
         captureQueue.async { [self] in
             captureGeneration += 1
             self.screen = screen
             screen.onFrame = { [weak self] surface in
+                self?.lastScreenFrame = ProcessInfo.processInfo.systemUptime
                 self?.capture(surface, trailing: false)
             }
             screen.start()
@@ -107,7 +137,10 @@ final class SimulatorStream {
         // 预先建立触摸通道, 首次触摸不必等待
         touchQueue.async { [self] in
             if touch == nil {
+                let start = ProcessInfo.processInfo.systemUptime
                 touch = SimTouch(device: device)
+                startupTouchSamples = 3
+                LiveLog.write("simulator \(udid) touch initialization: ready=\(touch != nil) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))")
                 homeButton = SimHomeButton(device: device)
             }
         }
@@ -116,10 +149,17 @@ final class SimulatorStream {
 
     private func remove(_ id: ObjectIdentifier) {
         LiveViewerBudget.shared.leave(id)
+        viewerIDs.remove(id)
+        updateViewer(id, active: false)
         video.remove(id)
         touchQueue.async { [weak self] in self?.releaseTouch(of: id) }
         guard video.isEmpty, running else { return }
         running = false
+        captureHealthTimer?.cancel()
+        captureHealthTimer = nil
+        keyFrameWatchdog?.cancel()
+        keyFrameWatchdog = nil
+        captureStalled = false
         video.reset()
         captureQueue.async { [self] in
             captureGeneration += 1
@@ -142,7 +182,21 @@ final class SimulatorStream {
         "{\"type\":\"video-budget\",\"active\":\(active)}"
     }
 
+    private func updateViewer(_ id: ObjectIdentifier, active: Bool) {
+        viewerLock.lock()
+        if active { activeViewerIDs.insert(id) } else { activeViewerIDs.remove(id) }
+        viewerLock.unlock()
+    }
+
+    private func hasActiveViewer(_ id: ObjectIdentifier? = nil) -> Bool {
+        viewerLock.lock()
+        defer { viewerLock.unlock() }
+        return id.map { activeViewerIDs.contains($0) } ?? !activeViewerIDs.isEmpty
+    }
+
     private func setViewerActive(_ id: ObjectIdentifier, _ active: Bool) {
+        guard viewerIDs.contains(id) else { return }
+        updateViewer(id, active: active)
         video.forEachSocket { socket in
             guard ObjectIdentifier(socket) == id else { return }
             socket.sendText(Self.budgetMessage(active))
@@ -155,6 +209,28 @@ final class SimulatorStream {
 
     private func encodeKeyFrame() {
         guard running else { return }
+        // A live socket and cached codec configuration do not guarantee that the
+        // simulator's old screen surface still produces frames after a restart.
+        if keyFrameWatchdog == nil && !captureStalled {
+            let watchdog = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.keyFrameWatchdog = nil
+                guard self.running, self.video.hasActiveViewers else { return }
+                self.captureStalled = true
+                LiveLog.write("simulator \(self.udid) keyframe timed out; waiting for user to reconnect")
+                self.video.forEachSocket { $0.sendText("{\"type\":\"capture-stalled\"}") }
+                self.captureQueue.async { [weak self] in
+                    guard let self else { return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    func age(_ value: TimeInterval) -> String {
+                        value == 0 ? "never" : String(format: "%.1fs", now - value)
+                    }
+                    LiveLog.write("simulator \(self.udid) capture timeout: surface=\(self.screen?.surface() != nil) encoding=\(self.encoding) frame_age=\(age(self.lastScreenFrame)) submit_age=\(age(self.lastEncodeSubmitted)) completion_age=\(age(self.lastEncodeCompleted))")
+                }
+            }
+            keyFrameWatchdog = watchdog
+            queue.asyncAfter(deadline: .now() + 4, execute: watchdog)
+        }
         captureQueue.async { [self] in
             encoder.requestKeyFrame()
             if let surface = screen?.surface() { capture(surface, trailing: false) }
@@ -165,9 +241,30 @@ final class SimulatorStream {
     private func restartCapture() {
         guard running else { return }
         LiveLog.write("restart capture \(udid) by request")
-        guard let device, let screen = SimScreen(device: device, queue: captureQueue) else {
+        guard let device = SimBridge.device(udid: udid), let screen = SimScreen(device: device, queue: captureQueue) else {
             LiveLog.write("simulator \(udid) not available")
             return
+        }
+        self.device = device
+        // Screen capture and HID use separate simulator connections. Rebuilding
+        // only the screen can leave a stale HID client after a simulator restart.
+        touchQueue.async { [self] in
+            if let owner = touchOwner { releaseTouch(of: owner) }
+            stopHold()
+            touchOwner = nil
+            lastSecond = nil
+            pinching = false
+            lastEdge = 0
+            moveLock.lock()
+            pendingMove = nil
+            moveLock.unlock()
+            homeButton?.stop()
+            let start = ProcessInfo.processInfo.systemUptime
+            touch = SimTouch(device: device)
+            startupTouchSamples = 3
+            LiveLog.write("simulator \(udid) touch initialization: ready=\(touch != nil) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))")
+            homeButton = SimHomeButton(device: device)
+            LiveLog.write("simulator \(udid) input connection rebuilt: \(touch != nil ? "ready" : "unavailable")")
         }
         captureQueue.async { [self] in
             captureGeneration += 1
@@ -177,6 +274,7 @@ final class SimulatorStream {
             encoder.invalidate()
             self.screen = screen
             screen.onFrame = { [weak self] surface in
+                self?.lastScreenFrame = ProcessInfo.processInfo.systemUptime
                 self?.capture(surface, trailing: false)
             }
             screen.start()
@@ -206,13 +304,15 @@ final class SimulatorStream {
     }
 
     private func encodePending() {
-        guard video.hasActiveViewers, screen != nil, let surface = pendingSurface else { encoding = false; return }
+        guard hasActiveViewer(), screen != nil, let surface = pendingSurface else { encoding = false; return }
         pendingSurface = nil
         let generation = captureGeneration
         // 模拟器也始终保留原始分辨率, 避免小窗口下采样影响文字和细节清晰度。
+        lastEncodeSubmitted = ProcessInfo.processInfo.systemUptime
         encoder.encode(surface) { [weak self] in
             self?.captureQueue.async { [weak self] in
                 guard let self, generation == self.captureGeneration else { return }
+                self.lastEncodeCompleted = ProcessInfo.processInfo.systemUptime
                 self.encoding = false
                 if self.pendingSurface != nil {
                     self.encoding = true
@@ -246,7 +346,18 @@ final class SimulatorStream {
     /// 移动只保留最新一条: 注入跟不上输入时丢弃中间位置, 不会越积越多导致拖动滞后; 其他消息照常排队, 顺序不变
     private func receive(_ text: String, from id: ObjectIdentifier) {
         guard text.contains("\"touch1-move\"") else {
-            touchQueue.async { [weak self] in self?.handle(text, from: id) }
+            let isTouchDown = text.contains("\"touch1-down\"")
+            let received = isTouchDown ? ProcessInfo.processInfo.systemUptime : 0
+            touchQueue.async { [weak self] in
+                guard let self else { return }
+                let started = isTouchDown ? ProcessInfo.processInfo.systemUptime : 0
+                self.handle(text, from: id)
+                if isTouchDown && self.startupTouchSamples > 0 {
+                    self.startupTouchSamples -= 1
+                    let finished = ProcessInfo.processInfo.systemUptime
+                    LiveLog.write("simulator \(self.udid) startup touch: queue_ms=\(Int((started - received) * 1000)) submit_ms=\(Int((finished - started) * 1000))")
+                }
+            }
             return
         }
         moveLock.lock()
@@ -318,7 +429,12 @@ final class SimulatorStream {
             return
         }
         if type == "viewer-focus" {
-            queue.async { LiveViewerBudget.shared.focus(id) }
+            queue.async { [weak self] in
+                LiveViewerBudget.shared.focus(id)
+                if let self, self.video.isActive(id) {
+                    self.requestKeyFrame()
+                }
+            }
             return
         }
         if type == "restart" {
@@ -330,7 +446,7 @@ final class SimulatorStream {
             queue.async { [weak self] in self?.setSize((width, height), of: id) }
             return
         }
-        guard video.isActive(id) || ["release", "size"].contains(type) else { return }
+        guard hasActiveViewer(id) || ["release", "size"].contains(type) else { return }
         guard let touch else { return }
         switch type {
         case "touch1-down", "touch1-move", "touch1-up":

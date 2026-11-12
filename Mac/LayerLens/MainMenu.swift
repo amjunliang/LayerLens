@@ -18,6 +18,10 @@ enum MainMenu {
         app.addItem(withTitle: L("App 集成…", "App Integration…"), action: #selector(AppDelegate.showIntegration), keyEquivalent: "").target = target
         app.addItem(withTitle: L("缓存管理…", "Manage Cache…"), action: #selector(AppDelegate.showCache), keyEquivalent: "").target = target
         app.addItem(withTitle: L("MCP 设置…", "MCP Setup…"), action: #selector(AppDelegate.showMCPSetup), keyEquivalent: "").target = target
+        let color = app.addItem(withTitle: L("屏幕取色…", "Pick Screen Color…"), action: #selector(AppDelegate.pickScreenColor), keyEquivalent: "c")
+        color.keyEquivalentModifierMask = [.command, .shift]
+        color.target = target
+        app.addItem(withTitle: L("屏幕录制权限设置…", "Screen Recording Settings…"), action: #selector(AppDelegate.openScreenCaptureSettings), keyEquivalent: "").target = target
         app.addItem(.separator())
         let reload = app.addItem(withTitle: L("重新加载页面", "Reload Page"), action: #selector(AppDelegate.reloadPage), keyEquivalent: "r")
         reload.keyEquivalentModifierMask = [.command, .shift]

@@ -46,7 +46,7 @@ const startContext = vm.createContext({
     constructor(url) { this.url = url; this.readyState = 0; started.push(url); }
   },
   VideoDecoder: class {},
-  clearTimeout() {},
+  clearTimeout() {}, startLiveDeadline() {},
   liveAvailable: () => true,
   liveSupported: () => true,
   layoutLive() {},

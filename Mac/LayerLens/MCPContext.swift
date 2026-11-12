@@ -16,6 +16,9 @@ struct MCPWindowContext {
     let revision: Int
     let targetGeneration: Int
     let selected: [String: Any]
+    let mode: String
+    let annotation: [String: Any]
+    let annotationRevision: Int
     let updatedAt: TimeInterval
 
     /// 窗口已选中一个 App；未选中时 get_context 返回错误而不是空快照。
@@ -29,6 +32,15 @@ struct MCPWindowContext {
         ]
         if let element = selected["element"] as? String, !element.isEmpty {
             value["selected"] = MCPNodeInfo.compact(selected)
+        }
+        if ["live", "2d", "3d"].contains(mode) { value["mode"] = mode }
+        if let shape = annotation["shape"] as? String, ["rectangle", "freehand"].contains(shape) {
+            var focus: [String: Any] = ["type": "annotation", "shape": shape]
+            if let count = annotation["count"] as? Int, count > 0 { focus["count"] = min(count, 20) }
+            if let hints = annotation["hints"] as? [String], !hints.isEmpty { focus["hints"] = Array(hints.prefix(3)) }
+            value["focus"] = focus
+        } else if value["selected"] != nil {
+            value["focus"] = ["type": "element"]
         }
         if let sourceRoot, !sourceRoot.isEmpty {
             value["sourceRoot"] = sourceRoot
@@ -93,6 +105,9 @@ final class MCPContextStore {
             revision: revision,
             targetGeneration: targetGeneration,
             selected: value["selected"] as? [String: Any] ?? [:],
+            mode: value["mode"] as? String ?? "",
+            annotation: value["annotation"] as? [String: Any] ?? [:],
+            annotationRevision: (value["annotationRevision"] as? NSNumber)?.intValue ?? 0,
             updatedAt: timestamp
         )
         contexts[windowId] = context
@@ -163,6 +178,17 @@ final class MCPContextStore {
         return now() - snapshot.createdAt < 3600 && matchingContext(for: snapshot.context) != nil
     }
 
+    func isCanvasCurrent(_ snapshot: MCPContextSnapshot) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard now() - snapshot.createdAt < 3600, let current = matchingContext(for: snapshot.context) else { return false }
+        guard current.mode == snapshot.context.mode, current.annotationRevision == snapshot.context.annotationRevision else { return false }
+        if snapshot.context.annotation.isEmpty {
+            return NSDictionary(dictionary: current.selected).isEqual(to: snapshot.context.selected)
+        }
+        return true
+    }
+
     private func matchingContext(for context: MCPWindowContext) -> MCPWindowContext? {
         guard let current = contexts[context.windowId],
               current.targetGeneration == context.targetGeneration else { return nil }
@@ -220,6 +246,9 @@ enum MCPNodeInfo {
         var value: [String: Any] = [:]
         for key in ["element", "owner", "vc", "swiftUIPath"] {
             if let text = node[key] as? String, !text.isEmpty { value[key] = text }
+        }
+        if let hints = node["hints"] as? [String], !hints.isEmpty {
+            value["hints"] = Array(hints.prefix(3).map { clipped($0) })
         }
         return value
     }

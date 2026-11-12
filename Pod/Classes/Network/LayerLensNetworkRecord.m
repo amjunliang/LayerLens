@@ -25,7 +25,8 @@
     if (self.endDate) {
         result[@"duration"] = @((long long)([self.endDate timeIntervalSinceDate:self.startDate] * 1000));
     }
-    result[@"state"] = !self.finished ? @"pending" : self.errorMessage ? @"failed" : @"done";
+    result[@"state"] = !self.finished ? @"pending" : self.errorMessage ? @"failed" : self.captureNote ? @"unavailable" : @"done";
+    if (self.captureNote) { result[@"captureNote"] = self.captureNote; }
     if (self.errorMessage) {
         result[@"error"] = self.errorMessage;
     }
@@ -52,6 +53,8 @@
             return @"stream";
         case LayerLensBodyStateFile:
             return @"file";
+        case LayerLensBodyStateUnavailable:
+            return @"unavailable";
         default:
             return @"none";
     }

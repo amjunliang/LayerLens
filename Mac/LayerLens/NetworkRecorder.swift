@@ -29,7 +29,7 @@ final class NetworkRecorder {
     static let releaseBatch = 50
     /// App 每 15 秒发一次心跳, 超过这个时间没有数据视为连接已失效
     static let staleInterval: TimeInterval = 40
-    static let summaryKeys = ["id", "type", "method", "url", "status", "mime", "reqSize", "resSize", "start", "duration", "state", "error"]
+    static let summaryKeys = ["id", "type", "method", "url", "status", "mime", "reqSize", "resSize", "start", "duration", "state", "error", "captureNote"]
     static let sessionFile = "session.json"
     static let harBodyLimit = 1024 * 1024
 
@@ -476,9 +476,10 @@ final class NetworkRecorder {
         for id in session.order {
             guard var record = session.records[id] else { continue }
             let message = "Capture interrupted: app process restarted; result unavailable"
-            guard record["state"] as? String == "pending" || record["error"] as? String == message else { continue }
-            record["state"] = "failed"
-            record["error"] = message
+            guard record["state"] as? String == "pending" || record["captureNote"] as? String == message || record["error"] as? String == message else { continue }
+            record["state"] = "unavailable"
+            record["captureNote"] = message
+            record["error"] = nil
             record["_missing"] = ["req", "res"]
             session.records[id] = record
             session.seq += 1

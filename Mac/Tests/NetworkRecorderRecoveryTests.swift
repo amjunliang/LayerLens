@@ -136,8 +136,8 @@ import Network
         next.queue.sync { next.mode = "pending" }
         let restarted = NetworkRecorder(folder: pendingFolder) { _, _ in true }
         restarted.update(apps: [app(next)])
-        wait { NetworkRecorder.readJSON(oldFile)?["state"] as? String == "failed" }
-        assert((NetworkRecorder.readJSON(oldFile)?["error"] as? String)?.contains("interrupted") == true)
+        wait { NetworkRecorder.readJSON(oldFile)?["state"] as? String == "unavailable" }
+        assert((NetworkRecorder.readJSON(oldFile)?["captureNote"] as? String)?.contains("interrupted") == true)
         assert(NetworkRecorder.readJSON(original)?["_f"] as? Bool == true)
         assert(next.queue.sync { next.released.isEmpty && next.detailRequests.isEmpty })
         restarted.stop()

@@ -24,6 +24,7 @@ const stage3D = {
   colors: null,
   frame: 0,
   dirty: false,
+  drawVersion: 0,
   // 画布位置, 尺寸变化时失效
   origins: null,
   lost: false,
@@ -349,6 +350,7 @@ function stage3DOrder(model) {
 
 function stage3DDraw() {
   if (state.mode !== '3d' || !stage3DReady()) return;
+  stage3D.drawVersion++;
   const gl = stage3D.gl;
   const canvas = stage3D.canvas;
   const dpr = window.devicePixelRatio || 1;

@@ -82,6 +82,10 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
         webView.evaluateJavaScript("window.LAYERLENS_WINDOW_FOCUSED = \(focused ? "true" : "false"); window.dispatchEvent(new Event('layerlens-window-focus'));", completionHandler: nil)
     }
 
+    func showSampledColor(_ hex: String) {
+        webView.callAsyncJavaScript("toast(t('已复制颜色: {0}', color));", arguments: ["color": hex], in: nil, in: .page, completionHandler: nil)
+    }
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
@@ -344,6 +348,8 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
+        case "pickScreenColor":
+            (NSApp.delegate as? AppDelegate)?.pickScreenColor()
         case "theme":
             applyTheme(body["theme"] as? String ?? "auto")
         default:

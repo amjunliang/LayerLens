@@ -10,16 +10,12 @@ import Foundation
 final class MCPHTTPService {
     /// 由新到旧。客户端请求的版本在列表中就原样返回，否则返回第一个。
     static let supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
-    /// 一次 find_nodes 的总时限，低于常见客户端 10s 以上的工具超时。
-    private static let hierarchyDeadline: TimeInterval = 8
-
     private let store: MCPContextStore
     private let registry: TargetRegistry
     private let git: GitController
     private let appLogs: AppLogRecorder
     private let network: NetworkRecorder
     private let workQueue: DispatchQueue
-    private let baseURL: URL
     private let captureCanvas: (MCPWindowContext, @escaping (Data?) -> Void) -> Void
 
     init(store: MCPContextStore, registry: TargetRegistry, git: GitController,
@@ -32,7 +28,6 @@ final class MCPHTTPService {
         self.appLogs = appLogs
         self.network = network
         self.workQueue = workQueue
-        baseURL = URL(string: "http://127.0.0.1:\(HubServer.port)/")!
     }
 
     static func negotiatedVersion(_ requested: String?) -> String {
@@ -172,12 +167,12 @@ final class MCPHTTPService {
                 let snapshot = try pinned(MCPRecords.Arguments(arguments, known: ["snapshotId"]))
                 DispatchQueue.main.async { [self] in
                     captureCanvas(snapshot.context) { data in
-                        guard self.store.isCurrent(snapshot) else {
-                            completion(Self.toolError(Self.staleSnapshot))
+                        guard self.store.isCanvasCurrent(snapshot) else {
+                            completion(Self.toolError("canvas_changed: the target, mode or annotation changed; call get_context again."))
                             return
                         }
                         guard let data else {
-                            completion(Self.toolError("canvas_unavailable: open the selected App's canvas in the LayerLens macOS window."))
+                            completion(Self.toolError("canvas_unavailable: the pinned LayerLens page is unavailable or could not capture its canvas."))
                             return
                         }
                         completion(["content": [["type": "image", "mimeType": "image/png",
@@ -186,33 +181,6 @@ final class MCPHTTPService {
                 }
             } catch {
                 completion(Self.toolError(Self.message(error)))
-            }
-        case "find_nodes":
-            let find: (query: String, visibleOnly: Bool, limit: Int)
-            let snapshot: MCPContextSnapshot
-            do {
-                let args = try MCPRecords.Arguments(arguments, known: ["snapshotId", "query", "visibleOnly", "limit"])
-                snapshot = try pinned(args)
-                find = (try args.string("query", required: true), try args.bool("visibleOnly", default: true),
-                        try args.int("limit", default: 5, range: 1...MCPNodeSearch.maxLimit))
-            } catch {
-                completion(Self.toolError(Self.message(error)))
-                return
-            }
-            hierarchy(snapshot: snapshot) { [weak self] result in
-                guard let self else { return }
-                guard self.store.isCurrent(snapshot) else {
-                    completion(Self.toolError(Self.staleSnapshot))
-                    return
-                }
-                switch result {
-                case .success(let roots):
-                    let nodes = MCPNodeSearch.find(in: roots, query: find.query,
-                                                   visibleOnly: find.visibleOnly, limit: find.limit)
-                    completion(Self.toolValue(["nodes": nodes]))
-                case .failure(let error):
-                    completion(Self.toolError(error.localizedDescription))
-                }
             }
         case "search_logs":
             do {
@@ -358,79 +326,6 @@ final class MCPHTTPService {
     /// inBody 只读取最新这么多条请求的响应内容。
     private static let bodyScanMax = 300
 
-    // MARK: - Hierarchy
-
-    /// 新 SDK 在 hierarchy 响应头里带 instanceId，只需一次请求；旧 SDK 再查一次 /api/app。
-    /// 全部请求共享一个总时限，避免多次各自超时叠加成客户端超时。
-    private func hierarchy(snapshot: MCPContextSnapshot, completion: @escaping (Result<[[String: Any]], Error>) -> Void) {
-        let segment = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
-        let device = snapshot.context.deviceId.addingPercentEncoding(withAllowedCharacters: segment) ?? ""
-        let app = snapshot.context.bundleId.addingPercentEncoding(withAllowedCharacters: segment) ?? ""
-        let base = "/t/\(device)/\(app)/api/"
-        guard let infoURL = URL(string: base + "app", relativeTo: baseURL),
-              let hierarchyURL = URL(string: base + "hierarchy", relativeTo: baseURL) else {
-            completion(.failure(MCPFailure("Invalid target URL")))
-            return
-        }
-        let expected = snapshot.context.instanceId
-        guard !expected.isEmpty else {
-            completion(.failure(MCPFailure(Self.staleSnapshot)))
-            return
-        }
-        let deadline = Date().addingTimeInterval(Self.hierarchyDeadline)
-        let stale: Result<[[String: Any]], Error> = .failure(MCPFailure(Self.staleSnapshot))
-        request(hierarchyURL, deadline: deadline) { [self] result in
-            switch result {
-            case .success(let (data, response)):
-                guard let roots = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-                    completion(.failure(MCPFailure("Invalid App hierarchy")))
-                    return
-                }
-                if let instance = response.value(forHTTPHeaderField: "X-LayerLens-Instance-Id") {
-                    completion(instance == expected ? .success(roots) : stale)
-                    return
-                }
-                // instanceId 每次启动唯一，事后仍是同一实例即可确认层级来自该实例。
-                request(infoURL, deadline: deadline) { result in
-                    switch result {
-                    case .success(let (data, _)):
-                        let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                        completion(info?["instanceId"] as? String == expected ? .success(roots) : stale)
-                    case .failure(let error):
-                        completion(.failure(error))
-                    }
-                }
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        }
-    }
-
-    private func request(_ url: URL, deadline: Date, completion: @escaping (Result<(Data, HTTPURLResponse), Error>) -> Void) {
-        let remaining = deadline.timeIntervalSinceNow
-        guard remaining > 0.1 else {
-            completion(.failure(MCPFailure("target_timeout: the App did not respond in time.")))
-            return
-        }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-        request.timeoutInterval = remaining
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error as? URLError, error.code == .timedOut {
-                completion(.failure(MCPFailure("target_timeout: the App did not respond in time.")))
-                return
-            }
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200, let data else {
-                completion(.failure(MCPFailure("target_unavailable: the App is not connected or is in the background.")))
-                return
-            }
-            completion(.success((data, http)))
-        }.resume()
-    }
-
     // MARK: - JSON-RPC
 
     private static func rpcResult(id: Any, _ result: [String: Any]) -> [String: Any] {
@@ -477,7 +372,7 @@ final class MCPHTTPService {
     static let instructions = """
     For questions about the UI currently shown in LayerLens, call get_context first. \
     selected.element reads "ivar (Class) \"text\" · id=identifier"; search sourceRoot for those parts, selected.owner and selected.vc to locate code. \
-    Call find_nodes with the returned snapshotId only when nothing useful is selected. \
+    Use visible selected or annotated hints to search sourceRoot; if hints are insufficient, capture the pinned canvas. \
     For runtime behavior, get_context.activity counts this launch's logs and requests: use search_logs with a query, \
     list_requests (failedOnly first), then get_request for one request; pass back cursor to read only new entries. \
     Use get_canvas_screenshot with snapshotId only when the user asks to see the canvas or the answer depends on its visible appearance. Do not request the full hierarchy. On snapshot_stale or no_app_selected, ask the user to select the App or call get_context again.
@@ -485,7 +380,7 @@ final class MCPHTTPService {
 
     private static let readOnly: [String: Any] = ["readOnlyHint": true, "destructiveHint": false, "openWorldHint": false]
 
-    private static let toolNames: Set<String> = ["get_context", "get_canvas_screenshot", "find_nodes", "search_logs", "list_requests", "get_request"]
+    private static let toolNames: Set<String> = ["get_context", "get_canvas_screenshot", "search_logs", "list_requests", "get_request"]
 
     static let toolDefinitions: [[String: Any]] = [
         [
@@ -503,30 +398,12 @@ final class MCPHTTPService {
         [
             "name": "get_canvas_screenshot",
             "title": "Get LayerLens canvas screenshot",
-            "description": "Return one PNG of the visible canvas in the LayerLens macOS window pinned by get_context, "
+            "description": "Return one PNG of the canvas in the LayerLens page pinned by get_context, "
                 + "including the selection as rendered. Use only for screenshot requests or questions about appearance.",
             "inputSchema": [
                 "type": "object",
                 "properties": ["snapshotId": snapshotIdProperty],
                 "required": ["snapshotId"],
-                "additionalProperties": false,
-            ],
-            "annotations": readOnly,
-        ],
-        [
-            "name": "find_nodes",
-            "title": "Find LayerLens nodes",
-            "description": "Search nodes of the App pinned by get_context by text, class, ivar or accessibility identifier. "
-                + "Returns a few ranked candidates.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "snapshotId": snapshotIdProperty,
-                    "query": ["type": "string", "description": "Visible text, class name, ivar name or accessibility identifier."],
-                    "visibleOnly": ["type": "boolean", "default": true, "description": "Skip hidden and offscreen nodes."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": MCPNodeSearch.maxLimit, "default": 5],
-                ],
-                "required": ["snapshotId", "query"],
                 "additionalProperties": false,
             ],
             "annotations": readOnly,

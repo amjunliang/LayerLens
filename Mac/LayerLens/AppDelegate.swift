@@ -11,13 +11,22 @@ import AppKit
 /// 界面全部由网页提供, 原生部分只有承载网页的窗口、系统菜单和菜单栏图标
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let registry = TargetRegistry()
-    private lazy var server: HubServer = HubServer(registry: registry) { [weak self] context, completion in
+    private lazy var server: HubServer = HubServer(registry: registry, pickScreenColor: { [weak self] owner, completion in
+        guard let self else { completion(nil, true); return }
+        self.startScreenColorPicker(owner: owner, completion: completion)
+    }, cancelScreenColor: { [weak self] owner in
+        self?.cancelScreenColorPicker(owner: owner)
+    }) { [weak self] context, completion in
         guard let self else { completion(nil); return }
         self.windowController.captureCanvas(context, completion: completion)
     }
     private lazy var windowController: MainWindowController = MainWindowController(url: server.baseURL)
     private var statusItem: NSStatusItem?
     private var mcpStatusItem: NSMenuItem?
+    private var sampledColorItem: NSMenuItem?
+    private var screenColorPicker: ScreenColorPicker?
+    private var screenColorOwner: String?
+    private var cancelledScreenColorOwners: Set<String> = []
     private var terminationSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -127,6 +136,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pasteboard.setString(HubServer.mcpURL, forType: .string)
     }
 
+    @objc func openScreenCaptureSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// 跨应用和显示器取色，取消时保留原剪贴板。
+    @objc func pickScreenColor() {
+        startScreenColorPicker(owner: nil, completion: nil)
+    }
+
+    private func startScreenColorPicker(owner: String?, completion: ((String?, Bool) -> Void)?) {
+        Task { @MainActor [weak self] in
+            guard let self else { completion?(nil, true); return }
+            if let owner, self.cancelledScreenColorOwners.remove(owner) != nil { completion?(nil, false); return }
+            guard self.screenColorPicker == nil else { completion?(nil, true); return }
+            let picker = ScreenColorPicker { [weak self] hex in
+                guard let self else { completion?(nil, true); return }
+                self.screenColorPicker = nil
+                self.screenColorOwner = nil
+                completion?(hex, false)
+                guard let hex else { return }
+                self.sampledColorItem?.title = L("已复制颜色: \(hex)", "Copied color: \(hex)")
+                self.statusItem?.button?.toolTip = L("已复制颜色: \(hex)", "Copied color: \(hex)")
+                if completion == nil { self.windowController.showSampledColor(hex) }
+            }
+            self.screenColorPicker = picker
+            self.screenColorOwner = owner
+            picker.start()
+        }
+    }
+
+    private func cancelScreenColorPicker(owner: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.screenColorOwner == owner { self.screenColorPicker?.cancel(); return }
+            // Cancellation may arrive before the start task reaches the main queue.
+            if self.cancelledScreenColorOwners.count >= 128 { self.cancelledScreenColorOwners.removeAll() }
+            self.cancelledScreenColorOwners.insert(owner)
+        }
+    }
+
     /// 菜单打开时刷新: 显示 Agent 调用 get_context 会拿到哪个 App
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard let item = mcpStatusItem else { return }
@@ -149,6 +199,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: L("打开窗口", "Open Window"), action: #selector(openWindow), keyEquivalent: "").target = self
         menu.addItem(withTitle: L("在浏览器打开", "Open in Browser"), action: #selector(openInBrowser), keyEquivalent: "").target = self
+        menu.addItem(withTitle: L("屏幕取色…", "Pick Screen Color…"), action: #selector(pickScreenColor), keyEquivalent: "").target = self
+        menu.addItem(withTitle: L("屏幕录制权限设置…", "Screen Recording Settings…"), action: #selector(openScreenCaptureSettings), keyEquivalent: "").target = self
+        let colorStatus = menu.addItem(withTitle: L("选取颜色后自动复制", "Selected color is copied"), action: nil, keyEquivalent: "")
+        colorStatus.isEnabled = false
+        sampledColorItem = colorStatus
         menu.addItem(.separator())
         let mcpStatus = menu.addItem(withTitle: L("MCP: 未选择 App", "MCP: No App Selected"), action: nil, keyEquivalent: "")
         mcpStatus.isEnabled = false

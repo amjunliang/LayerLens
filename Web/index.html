@@ -57,6 +57,8 @@
     <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
     <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M10 14l-7 7M14 10l7-7"/></symbol>
     <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l1.2-4.6L15.6 5a2 2 0 0 1 2.8 0l.6.6a2 2 0 0 1 0 2.8L8.6 18.8z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-mark-rect" viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 8 5 12l4 4"/><path d="M5 12h8a6 6 0 0 1 6 6v1"/></symbol>
     <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 4.5-4 6-11 8.2"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></symbol>
     <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
@@ -147,7 +149,14 @@
         <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
         <button class="icon-btn toggle live-only pixel-zoom" id="livePixelZoom" title="原始像素 1:1" aria-label="原始像素 1:1">1:1</button>
         <button class="icon-btn flat-only toggle" id="colorPick" title="取色 (C)" aria-label="取色" aria-pressed="false"><svg class="icon"><use href="#i-picker"/></svg></button>
+        <button class="icon-btn toggle native-color-pick" id="systemColorPick" title="取色 (C)" aria-label="取色" aria-pressed="false"><svg class="icon"><use href="#i-picker"/></svg></button>
         <button class="icon-btn three-only toggle" id="subtreeOnly" title="只看选中子树" aria-label="只看选中子树" aria-pressed="false"><svg class="icon"><use href="#i-focus"/></svg></button>
+      </div>
+      <div class="float-group annotation-tools">
+        <button class="icon-btn toggle" id="annotationRect" title="矩形标注 (B)" aria-label="矩形标注" aria-pressed="false"><svg class="icon"><use href="#i-mark-rect"/></svg></button>
+        <button class="icon-btn toggle" id="annotationPen" title="自由划线 (P)" aria-label="自由划线" aria-pressed="false"><svg class="icon"><use href="#i-pencil"/></svg></button>
+        <button class="icon-btn" id="annotationUndo" title="撤销标注 (⌘Z)" aria-label="撤销标注" disabled><svg class="icon"><use href="#i-undo"/></svg></button>
+        <button class="icon-btn" id="annotationClear" title="清除标注" aria-label="清除标注" disabled><svg class="icon"><use href="#i-trash"/></svg></button>
       </div>
       <div class="float-group three-only">
         <div class="popover-anchor">
@@ -174,6 +183,11 @@
       <span class="app-banner-text" id="appBannerText"></span>
       <button class="app-banner-link" id="appBannerLink" hidden></button>
       <button class="app-banner-run" id="appBannerRun" hidden>运行</button>
+    </div>
+    <div class="app-banner live-only" id="liveCaptureWarning" role="status" hidden>
+      <span class="app-banner-text" id="liveCaptureWarningText">画面可能已停止更新</span>
+      <button class="app-banner-run" id="liveCaptureReconnect">重新连接</button>
+      <button class="app-banner-link" id="liveCaptureDismiss">忽略</button>
     </div>
     <div class="app-banner live-only" id="liveHeal" hidden>
       <span class="app-banner-text" id="liveHealText"></span>
@@ -425,6 +439,7 @@
 <script src="/assets/cache.js"></script>
 <script src="/assets/mcp-setup.js"></script>
 <script src="/assets/net-filters.js"></script>
+<script src="/assets/mcp-canvas.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

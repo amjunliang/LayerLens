@@ -20,5 +20,5 @@ assert.equal(live.mediaState, '');
 assert.equal(toasts.length, 2);
 context.applyLiveVideoState({ state: 'unknown', active: false });
 assert.equal(live.mediaState, 'stalled');
-assert.match(source, /if \(live\.real\) \{\n      liveRestart\(\);/);
+assert.match(source, /\$\('liveRetry'\)\.addEventListener\('click', \(\) => \{\s*live\.error = '';\s*liveRestart\(\);/);
 console.log('PASS video state: non-blocking transition notices and full rebuild retry');

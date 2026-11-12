@@ -187,13 +187,14 @@ enum MCPRecords {
             let method = record["method"] as? String ?? "GET"
             let status = (record["status"] as? NSNumber)?.intValue ?? 0
             let state = record["state"] as? String ?? ""
-            let statusText = status > 0 ? String(status) : (state == "pending" ? "…" : "ERR")
+            let statusText = status > 0 ? String(status) : (state == "pending" ? "…" : state == "failed" ? "ERR" : "UNKNOWN")
             let duration = (record["duration"] as? NSNumber).map { "\($0.intValue)ms" } ?? "-"
             var parts = ["#\(item.id)", method, statusText, duration, shortURL(record["url"] as? String ?? "", host: sharedHost)]
             let bytes = (record["resSize"] as? NSNumber)?.intValue ?? 0
             if bytes > 0 { parts.append(size(bytes)) }
             if let mime = record["mime"] as? String, !mime.isEmpty { parts.append(shortMime(mime)) }
             if let error = record["error"] as? String, !error.isEmpty { parts.append("error=\(clip(error, 120))") }
+            if let note = record["captureNote"] as? String, !note.isEmpty { parts.append("capture=\(clip(note, 120))") }
             return parts.joined(separator: " ")
         }
         var value: [String: Any] = [
@@ -232,7 +233,7 @@ enum MCPRecords {
     /// get_request part=summary: 一次看清请求, 头部打码。尚未取回详情时注明。
     static func summary(id: UInt64, record: [String: Any]) -> [String: Any] {
         var value: [String: Any] = ["id": id]
-        for key in ["method", "url", "status", "duration", "mime", "reqSize", "resSize", "error", "state"] {
+        for key in ["method", "url", "status", "duration", "mime", "reqSize", "resSize", "error", "captureNote", "state"] {
             guard let item = record[key] else { continue }
             if let text = item as? String, text.isEmpty { continue }
             if key == "url", let text = item as? String { value[key] = clip(text, 2000); continue }
@@ -255,11 +256,12 @@ enum MCPRecords {
     static func bodyUnavailable(_ record: [String: Any], side: String) -> String {
         let state = record[side == "req" ? "reqBody" : "resBody"] as? String ?? ""
         if record["state"] as? String == "pending" { return "body_unavailable: request is still pending." }
+        if side == "res" && record["state"] as? String == "unavailable" { return "body_unavailable: request result was not captured." }
         if record["_f"] == nil && record["_missing"] == nil || state == "stored" {
             return "body_unavailable: content is not fetched from the App yet; retry shortly."
         }
         let reasons = ["none": "there is no content", "tooLarge": "content over 5 MB is not saved",
-                       "stream": "it was sent as a stream", "file": "file content is not saved",
+                       "stream": "it was sent as a stream", "unavailable": "response content was not captured", "file": "file content is not saved",
                        "evicted": "it was removed by cache cleanup"]
         return "body_unavailable: " + (reasons[state] ?? "there is no content") + "."
     }

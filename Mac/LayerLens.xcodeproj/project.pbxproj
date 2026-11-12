@@ -27,6 +27,7 @@
 		4C7A1E2B9D3F5A6B7C8D9E03 /* MCPRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A1E2B9D3F5A6B7C8D9E04 /* MCPRecords.swift */; };
 		488F8631D3E0739EFA344175 /* MCPContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6FFB5311419345E8F84A154 /* MCPContext.swift */; };
 		4B606CC7F77C28B4B516E660 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */; };
+		A6F138AB22E74D2FA9C31301 /* ScreenColorPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F138AB22E74D2FA9C31302 /* ScreenColorPicker.swift */; };
 		538F7587F1F1C6A0B880085C /* CacheStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D760766C30BE0F6534EE073 /* CacheStore.swift */; };
 		5D8E4F770F00BF68B28FF8FE /* Usbmux.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018BD14CAF3AA5013A6E67EA /* Usbmux.swift */; };
 		5F009A6E01078B4AC92E0086 /* XcodeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BEB09D7814382476662F06E /* XcodeController.swift */; };
@@ -93,6 +94,7 @@
 		D7C59B1F29096CC4C182FE43 /* TargetHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetHistory.swift; sourceTree = "<group>"; };
 		D9DC1FC312061B8E396D03F6 /* GitController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitController.swift; sourceTree = "<group>"; };
 		DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		A6F138AB22E74D2FA9C31302 /* ScreenColorPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenColorPicker.swift; sourceTree = "<group>"; };
 		DB1A4B00E5E141A81FF61999 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		E5FFCAA8F7749680E8F92C31 /* DeviceLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLive.swift; sourceTree = "<group>"; };
 		F5C2EB56B8282FC54D99ECC2 /* CommandRunController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandRunController.swift; sourceTree = "<group>"; };
@@ -121,6 +123,7 @@
 			isa = PBXGroup;
 			children = (
 				DA2AFC8EB5DBAB1F670590B4 /* AppDelegate.swift */,
+				A6F138AB22E74D2FA9C31302 /* ScreenColorPicker.swift */,
 				353D69E7087CD0D9F57B081F /* AppEventStream.swift */,
 				591B590B9F1B317AD096335C /* AppLogRecorder.swift */,
 				3C8CE72D1DFF6E56990FF617 /* Assets.xcassets */,
@@ -271,6 +274,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4B606CC7F77C28B4B516E660 /* AppDelegate.swift in Sources */,
+				A6F138AB22E74D2FA9C31301 /* ScreenColorPicker.swift in Sources */,
 				149635ECF12E46A8E0D757DE /* AppEventStream.swift in Sources */,
 				EFFB1F8A6ACE5C4B93B2CC80 /* AppLogRecorder.swift in Sources */,
 				0A190873D8DFBB1C9BE43BA1 /* BoundedProcess.swift in Sources */,

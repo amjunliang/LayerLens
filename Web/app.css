@@ -337,6 +337,7 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 body:not(.mode-3d) .three-only { display: none !important; }
 body:not(.mode-live) .live-only { display: none !important; }
 body.mode-3d .flat-only { display: none !important; }
+#colorPick { display: none !important; }
 body:not(.has-live) .has-live-only { display: none; }
 /* 只选了设备时没有可运行的 App */
 body:not(.has-app) #xcodeRun, body:not(.has-app) .run-mode-anchor { display: none; }
@@ -662,7 +663,8 @@ body.log-max .live-pixel-hint { visibility: hidden; }
 .float-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .canvas-float .icon-btn { border-radius: 50%; }
 /* 分组间短分隔线: 中间分组总是显示, 实时分组在它之前、3D 分组在它之后, 各自只画靠近中间的一侧 */
-.float-group.live-only::after, .float-group.three-only::before { content: ''; flex: none; align-self: stretch; height: 1px; margin: 4px 6px; background: var(--float-line); }
+.float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { content: ''; flex: none; align-self: stretch; height: 1px; margin: 4px 6px; background: var(--float-line); }
+.annotation-mode .canvas-float > .float-group:not(.annotation-tools) { opacity: .4; }
 /* 层间距从按钮左侧弹出, 不遮挡下方按钮 */
 .spacing-pop { top: 0; right: calc(100% + 8px); transform-origin: right center; display: flex; align-items: center; gap: 8px; padding: 8px 10px; white-space: nowrap; color: var(--text-2); }
 .spacing-pop input { width: 120px; }
@@ -1417,7 +1419,8 @@ body.log-open .log-pane { display: flex; }
   body:not(.mode-3d) .float-group { flex-direction: column; }
   body:not(.mode-3d) .float-group.live-only::after { width: auto; height: 1px; margin: 4px 6px; }
   .float-group { flex-direction: row; }
-  .float-group.live-only::after, .float-group.three-only::before { width: 1px; height: auto; margin: 6px 4px; }
+  .float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { width: 1px; height: auto; margin: 6px 4px; }
+  body:not(.mode-3d) .float-group.annotation-tools::before, body:not(.mode-3d) .float-group.three-only::before { width: auto; height: 1px; margin: 4px 6px; }
   /* 层间距弹层向上弹出, 以整个工具条为参照水平居中, 不超出窗口 */
   .canvas-float .popover-anchor { position: static; }
   .spacing-pop { top: auto; left: 0; right: 0; bottom: calc(100% + 8px); width: max-content; margin: 0 auto; transform-origin: bottom center; }
@@ -1598,3 +1601,8 @@ body.log-open .log-pane { display: flex; }
 .mcp-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .mcp-hint { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 32px); padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-float); background: var(--float-bg); color: var(--text); box-shadow: var(--shadow); }
 .mcp-hint-close { flex: none; }
+
+/* MCP annotations sit inside each canvas so screenshots and pointer input share coordinates. */
+.mcp-annotation-layer { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 5; overflow: hidden; pointer-events: none; }
+.mcp-annotation-layer.active { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.mcp-annotation-layer rect, .mcp-annotation-layer polyline { fill: none; stroke: #ff4d4f; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }

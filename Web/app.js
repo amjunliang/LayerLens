@@ -522,12 +522,24 @@ function mcpSelectedInfo() {
   if (viewController) info.vc = viewController;
   const swiftPath = node.cls === 'SwiftUI' || node.swiftUILayout ? swiftUIAncestors(node) : [];
   if (swiftPath.length) info.swiftUIPath = swiftPath.join(' / ');
+  if (state.mode !== 'live' && isSwiftUILayoutContext(node)) {
+    const hints = [], stack = [...node.children];
+    while (stack.length && hints.length < 3) {
+      const child = stack.shift();
+      if (child.effHidden || child.isLayer) continue;
+      const value = String(child.text || (child.title !== child.cls ? child.title : '') || '').replace(/\s+/g, ' ').trim();
+      if (value && !hints.includes(value)) hints.push(value.length > 40 ? value.slice(0, 40) + '…' : value);
+      stack.push(...child.children);
+    }
+    if (hints.length) info.hints = hints;
+  }
   return info;
 }
 
 function publishMCPContext() {
   mcpContext.timer = 0;
   if (mcpContext.closed) return;
+  if (typeof mcpCanvas !== 'undefined') mcpCanvas.syncTarget();
   const device = currentDevice();
   const payload = {
     windowId: mcpContext.windowId,
@@ -540,6 +552,9 @@ function publishMCPContext() {
     appName: targets.bundleId ? targetAppName(targets.deviceId, targets.bundleId) : '',
     instanceId: appState.instanceId || currentApp()?.instanceId || '',
     selected: mcpSelectedInfo(),
+    mode: state.mode,
+    annotation: typeof mcpCanvas !== 'undefined' ? mcpCanvas.focus() : null,
+    annotationRevision: typeof mcpCanvas !== 'undefined' ? mcpCanvas.revision : 0,
   };
   fetch('/api/hub/mcp/context', {
     method: 'POST',
@@ -564,6 +579,7 @@ function scheduleMCPContext(focus = false) {
 function removeMCPContext() {
   if (mcpContext.closed) return;
   mcpContext.closed = true;
+  if (typeof mcpCanvas !== 'undefined') { clearTimeout(mcpCanvas.retry); mcpCanvas.socket?.close(); }
   clearTimeout(mcpContext.timer);
   mcpContext.timer = 0;
   mcpContext.focusPending = false;
@@ -608,6 +624,7 @@ function setupPageActivity() {
     mcpContext.closed = false;
     mcpContext.focusEpoch = 0;
     mcpContext.revision = 0;
+    if (typeof mcpCanvas !== 'undefined') mcpCanvas.connect();
     scheduleMCPContext(pageHasFocus());
   });
   window.addEventListener('focus', update);
@@ -1170,9 +1187,11 @@ function canEscapeClearSelection(event) {
 }
 
 function select(key, fromTree) {
+  if ((typeof mcpCanvas !== 'undefined' && mcpCanvas.tool) || picker.on) return;
   const focusVC = !!key?.startsWith(VC_KEY);
   key = viewKeyOf(key);
   if (!state.nodes.has(key)) return;
+  if (typeof mcpCanvas !== 'undefined') mcpCanvas.selectElement();
   const previousWindow = currentWindow();
   state.selected = key;
   state.vcFocus = focusVC && !!state.nodes.get(key).vcClass;
@@ -1226,6 +1245,8 @@ async function setMode(mode) {
   }
   const saved = fromKind !== toKind ? state.views[toKind] : null;
   state.mode = mode;
+  if (typeof mcpCanvas !== 'undefined') mcpCanvas.syncTarget();
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
   hideHoverTip();
   state.hover = null;
   if (saved) {
@@ -1903,6 +1924,10 @@ const live = {
   // 收到的画面帧数, 用于判断拖动后画面是否变化; 连续无效拖动次数
   frames: 0,
   deadDrags: 0,
+  decodedFrames: 0,
+  touchProbe: null,
+  captureStalled: false,
+  touchCheckEpoch: 0,
   healing: false,
 };
 
@@ -1952,12 +1977,45 @@ async function syncLive() {
   }
 }
 
+// Bound the wait even when the socket stays open but the capture produces no frame.
+function startLiveDeadline(ws) {
+  clearTimeout(live.startTimer);
+  live.startTimer = setTimeout(() => {
+    if (live.ws !== ws || live.budgetPaused) return;
+    live.error = live.real
+      ? (LANG === 'en' ? 'Unable to capture the device screen. Check the connection, unlock the device, then retry.' : '无法获取设备画面，请确认设备已连接并解锁后重试。')
+      : (LANG === 'en' ? 'Unable to capture the simulator screen. Check the simulator, then retry.' : '无法获取模拟器画面，请检查模拟器后重试。');
+    if (live.real) liveStop();
+    showLiveGuide(live.error);
+  }, live.real ? 5000 : 12000);
+}
+
+// Invalidate queued drag checks whenever the displayed image cannot be trusted.
+function invalidateLiveTouchChecks() {
+  live.touchCheckEpoch = (live.touchCheckEpoch || 0) + 1;
+  live.deadDrags = 0;
+  live.touchProbe = null;
+  if (!live.healing) $('liveHeal').hidden = true;
+}
+
+function markLiveCaptureStalled() {
+  if (!live.captureStalled) invalidateLiveTouchChecks();
+  live.captureStalled = true;
+}
+
+function markLiveCaptureReady() {
+  if (live.captureStalled) invalidateLiveTouchChecks();
+  live.captureStalled = false;
+  $('liveCaptureWarning').hidden = true;
+}
+
 function liveStart() {
   if (!liveAvailable()) { showLiveGuide(); return; }
   if (live.ws) { liveResume(); return; }
   clearTimeout(live.retryTimer);
   live.error = '';
   live.frames = 0;
+  live.budgetPaused = false;
   layoutLive();
   if (typeof VideoDecoder === 'undefined') {
     showLiveGuide(t('当前浏览器不支持 WebCodecs, 请使用 Chrome 或 Safari'), false);
@@ -1971,12 +2029,7 @@ function liveStart() {
   const ws = new WebSocket(`ws://${location.host}/${live.real ? 'device' : 'sim'}/${encodeURIComponent(live.udid)}/stream`);
   ws.binaryType = 'arraybuffer';
   live.ws = ws;
-  if (live.real) live.startTimer = setTimeout(() => {
-    if (live.ws !== ws) return;
-    live.error = LANG === 'en' ? 'Unable to capture the device screen. Check the connection, unlock the device, then retry.' : '无法获取设备画面，请确认设备已连接并解锁后重试。';
-    liveStop();
-    showLiveGuide(live.error);
-  }, 5000);
+  startLiveDeadline(ws);
   ws.onopen = () => {
     if (live.ws !== ws) return;
     live.connected = true;
@@ -2012,6 +2065,17 @@ function liveStart() {
         toast(t('无法唤醒设备，请重试。'));
       }
       if (message.type === 'rotation-result') liveRotationResult(message);
+      if (message.type === 'capture-stalled' && !live.real && !live.budgetPaused) {
+        markLiveCaptureStalled();
+        if (live.hasFrame) {
+          $('liveCaptureWarningText').textContent = LANG === 'en' ? 'The screen may have stopped updating.' : '画面可能已停止更新';
+          $('liveCaptureReconnect').textContent = LANG === 'en' ? 'Reconnect' : '重新连接';
+          $('liveCaptureDismiss').textContent = LANG === 'en' ? 'Dismiss' : '忽略';
+          $('liveCaptureWarning').hidden = false;
+        }
+      }
+      // An encoded keyframe alone is not proof that this page decoded it.
+      // feedLiveFrame marks capture ready after an actual decoded frame.
       if (message.type === 'video-state') applyLiveVideoState(message);
       if (message.type === 'video-budget') applyLiveVideoBudget(message.active === true);
       if (message.type === 'geometry') {
@@ -2034,9 +2098,14 @@ function liveStart() {
     const wasConnected = live.connected;
     liveStop();
     if (state.mode !== 'live') return;
-    if (live.real && !wasConnected && !live.error) live.error = LANG === 'en' ? 'Unable to connect to the device screen. Please retry.' : '无法连接设备画面，请重试。';
-    showLiveGuide(live.error || (wasConnected ? t('实时画面连接已断开') : ''));
-    if (!(live.real && live.error)) live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
+    if (live.real) {
+      if (!wasConnected && !live.error) live.error = LANG === 'en' ? 'Unable to connect to the device screen. Please retry.' : '无法连接设备画面，请重试。';
+      showLiveGuide(live.error || (wasConnected ? t('实时画面连接已断开') : ''));
+      if (!live.error) live.retryTimer = setTimeout(liveStart, LIVE_RETRY_MS);
+      return;
+    }
+    if (!live.error) live.error = LANG === 'en' ? 'The screen connection was closed. Reconnect when ready.' : '实时画面连接已断开，可手动重新连接。';
+    showLiveGuide(live.error);
   };
 }
 
@@ -2088,16 +2157,22 @@ function applyLiveVideoBudget(active) {
   live.budgetActive = active;
   live.budgetPaused = !active;
   if (!active) {
+    invalidateLiveTouchChecks();
+    clearTimeout(live.startTimer);
     live.pendingFrame?.close?.();
     live.pendingFrame = null;
     showLiveGuide(t('实时画面已在其他窗口暂停, 聚焦后恢复'));
     return;
   }
+  invalidateLiveTouchChecks();
   live.hasFrame = false;
+  if (!live.real && live.ws) startLiveDeadline(live.ws);
   showLiveGuide(t('正在恢复实时画面…'));
 }
 
 function liveStop() {
+  invalidateLiveTouchChecks();
+  live.captureStalled = false;
   clearTimeout(live.rotateTimer);
   live.rotatePending = null;
   liveSuspend();
@@ -2105,6 +2180,7 @@ function liveStop() {
   live.pendingFrame = null;
   live.hasFrame = false;
   live.mediaState = '';
+  $('liveCaptureWarning').hidden = true;
   live.sourcePixels = null;
   clearTimeout(live.retryTimer);
   clearTimeout(live.startTimer);
@@ -2152,10 +2228,12 @@ function showLiveGuide(title) {
   const supported = liveSupported();
   $('liveGuide').hidden = false;
   $('liveLoading').hidden = !!title || !!live.error || !supported || !liveAvailable();
-  $('liveRetry').hidden = !(live.real && live.error);
+  $('liveRetry').hidden = !live.error;
   $('liveRetry').textContent = LANG === 'en' ? 'Retry' : '重试';
-  if (live.real && live.error) {
-    $('liveGuideTitle').textContent = LANG === 'en' ? 'Unable to capture device screen' : '无法获取设备画面';
+  if (live.error) {
+    $('liveGuideTitle').textContent = live.real
+      ? (LANG === 'en' ? 'Unable to capture device screen' : '无法获取设备画面')
+      : (LANG === 'en' ? 'Unable to capture simulator screen' : '无法获取模拟器画面');
     $('liveError').hidden = false;
     $('liveError').textContent = live.error;
     $('liveWaiting').hidden = true;
@@ -2212,6 +2290,8 @@ function feedLiveFrame(buf) {
     if (live.ws !== socket) { frame.close?.(); return; }
     clearTimeout(live.startTimer);
     live.hasFrame = true;
+    live.decodedFrames = (live.decodedFrames || 0) + 1;
+    markLiveCaptureReady();
     live.mediaState = '';
     live.error = '';
     live.pendingFrame?.close?.();
@@ -2346,21 +2426,40 @@ function layoutLive() {
 // 触摸失效检测: 明显的拖动后画面一帧都没变化, 连续多次即提示修复.
 // 服务端只在画面变化时推帧, 拖动在 App 内几乎总会让画面变化
 function checkLiveDrag(touch) {
-  if (live.healing || touch.distance < LIVE_HEAL_DRAG) return;
+  if (live.healing || live.captureStalled || !live.connected || !live.hasFrame || live.budgetPaused ||
+      state.mode !== 'live' || touch.checkEpoch !== live.touchCheckEpoch || touch.distance < LIVE_HEAL_DRAG) return;
   const frames = touch.frames;
+  const epoch = live.touchCheckEpoch;
+  const socket = live.ws;
   setTimeout(() => {
+    if (epoch !== live.touchCheckEpoch || socket !== live.ws || live.captureStalled ||
+        !live.connected || !live.hasFrame || live.budgetPaused || state.mode !== 'live') return;
     if (live.frames !== frames) {
       live.deadDrags = 0;
       return;
     }
     live.deadDrags++;
-    if (live.deadDrags >= LIVE_HEAL_STRIKES) showLiveHeal();
+    if (live.deadDrags < LIVE_HEAL_STRIKES || live.touchProbe) return;
+    // Before suggesting the disruptive touch repair, ask the screen for a
+    // fresh keyframe. An encoded packet alone is insufficient: this page must
+    // actually decode a frame and the stall watchdog must remain clear.
+    const probe = { epoch, socket, decoded: live.decodedFrames || 0 };
+    live.touchProbe = probe;
+    liveSend({ type: 'keyframe' });
+    setTimeout(() => {
+      if (live.touchProbe !== probe) return;
+      live.touchProbe = null;
+      if (epoch !== live.touchCheckEpoch || socket !== live.ws || live.captureStalled ||
+          !live.connected || !live.hasFrame || live.budgetPaused || state.mode !== 'live' ||
+          live.deadDrags < LIVE_HEAL_STRIKES || (live.decodedFrames || 0) <= probe.decoded) return;
+      showLiveHeal();
+    }, LIVE_HEAL_PROBE_MS);
   }, LIVE_HEAL_WAIT_MS);
 }
 
 function showLiveHeal() {
   if (live.real) return;
-  if (live.healing) return;
+  if (live.healing || live.captureStalled || !live.connected || !live.hasFrame || live.budgetPaused) return;
   $('liveHeal').dataset.state = 'warn';
   $('liveHealText').textContent = t('触摸似乎没有生效, 修复会结束前台 App');
   $('liveHealBtn').hidden = false;
@@ -2473,6 +2572,7 @@ async function liveRestart() {
   hidePopovers();
   clearTimeout(live.restoreTimer);
   live.restoring = true;
+  if (!live.real) markLiveCaptureStalled();
   live.restoreTimer = setTimeout(() => {
     if (!live.restoring) return;
     live.restoring = false;
@@ -4359,6 +4459,8 @@ const LIVE_PINCH_MIN_GAP = 20;
 const LIVE_HEAL_DRAG = 40;
 const LIVE_HEAL_WAIT_MS = 600;
 const LIVE_HEAL_STRIKES = 2;
+// Give the four-second capture watchdog time to report a missing keyframe.
+const LIVE_HEAL_PROBE_MS = 4500;
 const LIVE_HEAL_RECOVER_MS = 10000;
 
 function isLiveBackgroundDoubleClick(e) {
@@ -4388,7 +4490,7 @@ function setupLiveEvents() {
     }
     // 起点贴近上下边缘时作为系统手势(下拉通知中心 / 上滑回桌面)
     const edge = point.y >= h() - 20 ? 'bottom' : point.y <= 12 ? 'top' : undefined;
-    live.touch = { inspect: false, start: point, pending: true, timer: 0, distance: 0, frames: live.frames };
+    live.touch = { inspect: false, start: point, pending: true, timer: 0, distance: 0, frames: live.frames, checkEpoch: live.touchCheckEpoch };
     if (edge) {
       flushDown(live.touch, edge);
       return;
@@ -4585,12 +4687,13 @@ function setupLiveEvents() {
   }
   $('liveRetry').addEventListener('click', () => {
     live.error = '';
-    if (live.real) {
-      liveRestart();
-      return;
-    }
-    liveStop(); showLiveGuide(); liveStart();
+    liveRestart();
   });
+  $('liveCaptureReconnect').addEventListener('click', () => {
+    $('liveCaptureWarning').hidden = true;
+    liveRestart();
+  });
+  $('liveCaptureDismiss').addEventListener('click', () => { $('liveCaptureWarning').hidden = true; });
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
   $('sandboxBtn').addEventListener('click', openSandbox);
@@ -4667,27 +4770,34 @@ function setupLiveEvents() {
 
 // MARK: - Color picker
 
-// 取色: 2D 取窗口截图的像素, 与 App 渲染一致; 实时取画面像素, 视频编码可能有轻微色差. 3D 有透视和叠层, 不提供
+// 2D / 实时读取画面像素, 3D 读取 WebGL 画布合成结果。
 const LOUPE_CELLS = 11;
 // 放大镜尺寸固定, 与样式中的宽高一致, 每格 15px
 const LOUPE_SIZE = 165;
 const picker = { on: false, source: null, sourceURL: '', color: null, swallow: false };
 
 function pickerAvailable() {
-  return state.mode === '2d' || state.mode === 'live';
+  return state.mode === '2d' || state.mode === 'live' || state.mode === '3d';
 }
 
 function setColorPicker(on) {
   picker.on = on && pickerAvailable();
   $('colorPick').classList.toggle('on', picker.on);
   $('colorPick').setAttribute('aria-pressed', String(picker.on));
+  $('systemColorPick').classList.toggle('on', picker.on);
+  $('systemColorPick').setAttribute('aria-pressed', String(picker.on));
   document.body.classList.toggle('picking', picker.on);
+  if (typeof mcpCanvas !== 'undefined') mcpCanvas.syncInteractionLock();
   if (!picker.on) {
     hideLoupe();
+    if (picker.threeCanvas) { picker.threeCanvas.width = 0; picker.threeCanvas = null; picker.threeVersion = -1; }
     return;
   }
   if (live.inspect) setLiveInspect(false);
+  document.activeElement?.blur?.();
+  setPanKey(false);
   hideHoverTip();
+  hidePopovers();
   if (state.hover) {
     state.hover = null;
     updateHighlights();
@@ -4705,6 +4815,7 @@ function pickerPixel(e) {
     const scale = canvas.width / sw;
     return { ctx: canvas.getContext('2d'), x: Math.floor(point.x * scale), y: Math.floor(point.y * scale) };
   }
+  if (state.mode === '3d') return picker3DPixel(e);
   const win = currentWindow();
   const img = $('stage').querySelector('img.shot');
   if (!win || !img || !img.complete || !img.naturalWidth) return null;
@@ -4721,6 +4832,36 @@ function pickerPixel(e) {
   }
   const scale = img.naturalWidth / win.rect[2];
   return { ctx: picker.source, x: Math.floor(x * scale), y: Math.floor(y * scale) };
+}
+
+// WebGL 不保留绘制缓冲区, 在视图变化后同步重绘并缓存合成结果。
+// 鼠标移动只读取缓存, 不重复渲染或读取整个 GPU 画布。
+function picker3DPixel(e) {
+  if (!stage3DReady() || !stage3D.items.length || !currentWindow()) return null;
+  const glCanvas = stage3D.canvas, rect = glCanvas.getBoundingClientRect();
+  if (!(rect.width > 0 && rect.height > 0) || e.clientX < rect.left || e.clientY < rect.top ||
+      e.clientX >= rect.right || e.clientY >= rect.bottom) return null;
+  if (!picker.threeCanvas || picker.threeVersion !== stage3D.drawVersion) {
+    stage3DDraw();
+    const canvas = picker.threeCanvas || (picker.threeCanvas = document.createElement('canvas'));
+    canvas.width = glCanvas.width; canvas.height = glCanvas.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // WebGL 是透明的, 与画布的底色和网格合成, 才是屏幕上看到的颜色。
+    const pane = $('canvasPane'), paneRect = pane.getBoundingClientRect(), style = getComputedStyle(pane);
+    ctx.save();
+    ctx.scale(canvas.width / rect.width, canvas.height / rect.height);
+    ctx.fillStyle = style.backgroundColor;
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = style.getPropertyValue('--stage-grid').trim();
+    for (let x = ((paneRect.left - rect.left) % 16 + 16) % 16; x < rect.width; x += 16) ctx.fillRect(x, 0, 1, rect.height);
+    for (let y = ((paneRect.top - rect.top) % 16 + 16) % 16; y < rect.height; y += 16) ctx.fillRect(0, y, rect.width, 1);
+    ctx.restore();
+    ctx.drawImage(glCanvas, 0, 0);
+    picker.threeVersion = stage3D.drawVersion;
+  }
+  return { ctx: picker.threeCanvas.getContext('2d'),
+    x: Math.floor((e.clientX - rect.left) / rect.width * glCanvas.width),
+    y: Math.floor((e.clientY - rect.top) / rect.height * glCanvas.height) };
 }
 
 function colorHex(color) {
@@ -4791,29 +4932,34 @@ function hideLoupe() {
   picker.color = null;
 }
 
-// 在捕获阶段拦截画布上的指针事件, 取色期间不触发选中、悬停和模拟器触摸; 平移(中键 / 空格拖动)和缩放照常
+// 在捕获阶段拦截画布操作, 取色期间固定视角并屏蔽选中和模拟器触摸。
 function setupColorPicker() {
   const pane = $('canvasPane');
   const onCanvas = (e) => e.target instanceof Element && !!e.target.closest('#stageWrap, #liveCanvas');
   pane.addEventListener('pointermove', (e) => {
-    if (!picker.on || e.buttons) return;
+    if (!picker.on) return;
     if (!onCanvas(e)) {
       hideLoupe();
       return;
     }
     e.stopPropagation();
-    updateLoupe(e);
+    if (!e.buttons) updateLoupe(e);
   }, true);
   pane.addEventListener('pointerdown', (e) => {
-    if (!picker.on || e.button !== 0 || panKey.held || !onCanvas(e)) return;
+    if (!picker.on || !onCanvas(e)) return;
     e.preventDefault();
     e.stopPropagation();
+    if (e.button !== 0) return;
     picker.swallow = true;
     updateLoupe(e);
-    if (!picker.color) return;
-    copyText(colorHex(picker.color), '复制颜色');
+    if (picker.color) copyText(colorHex(picker.color), '复制颜色');
     setColorPicker(false);
   }, true);
+  for (const type of ['wheel', 'gesturestart', 'gesturechange', 'gestureend', 'contextmenu', 'dblclick']) {
+    pane.addEventListener(type, (e) => {
+      if (picker.on && onCanvas(e)) { e.preventDefault(); e.stopPropagation(); }
+    }, { capture: true, passive: false });
+  }
   // 吞掉取色点击后续的抬起和 click, click 与 pointerup 在同一轮事件中派发
   pane.addEventListener('pointerup', (e) => {
     if (!picker.swallow) return;
@@ -4825,6 +4971,57 @@ function setupColorPicker() {
   }, true);
   pane.addEventListener('pointerleave', hideLoupe);
   $('colorPick').addEventListener('click', () => setColorPicker(!picker.on));
+  $('systemColorPick').addEventListener('click', pickScreenColor);
+}
+
+let screenColorPending = false;
+let screenColorRequest = null;
+function cancelPendingScreenColor() {
+  const request = screenColorRequest;
+  if (!request || request.cancelled) return;
+  request.cancelled = true;
+  if (request.started) {
+    fetch('/api/hub/screen-color/cancel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: request.id }), cache: 'no-store',
+    }).catch(() => {});
+  }
+}
+function useCanvasColorPicker() {
+  if (pickerAvailable()) setColorPicker(!picker.on);
+}
+async function pickScreenColor() {
+  if (picker.on) { setColorPicker(false); return; }
+  if (screenColorPending) return;
+  screenColorPending = true;
+  const request = { id: crypto.randomUUID(), cancelled: false, started: false };
+  screenColorRequest = request;
+  if (typeof mcpCanvas !== 'undefined') mcpCanvas.syncInteractionLock();
+  try {
+    const status = await fetch('/api/hub/screen-color/status', { cache: 'no-store' });
+    if (!status.ok) throw new Error(`HTTP ${status.status}`);
+    const permission = await status.json();
+    if (request.cancelled) return;
+    if (!permission.screenCaptureAllowed) { useCanvasColorPicker(); return; }
+    if (window.LAYERLENS_APP) {
+      window.webkit?.messageHandlers?.layerlens?.postMessage({ action: 'pickScreenColor' });
+      return;
+    }
+    request.started = true;
+    const response = await fetch('/api/hub/screen-color', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: request.id }), cache: 'no-store',
+    });
+    const result = await response.json();
+    if (request.cancelled) return;
+    if (!response.ok && result.error === 'screen_capture_denied') { useCanvasColorPicker(); return; }
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (result.color) toast(t('已复制颜色: {0}', result.color));
+  } catch (error) {
+    if (!request.cancelled) toast(t('屏幕取色失败: {0}', error.message), true, true);
+  } finally {
+    screenColorPending = false;
+    if (screenColorRequest === request) screenColorRequest = null;
+    if (typeof mcpCanvas !== 'undefined') mcpCanvas.syncInteractionLock();
+  }
 }
 
 // MARK: - Layout
@@ -5514,8 +5711,7 @@ function handleViewKey(key) {
       requestMode('3d');
       return true;
     case 'c':
-      if (!pickerAvailable()) return false;
-      setColorPicker(!picker.on);
+      pickScreenColor();
       return true;
     case 't':
       togglePanel('tree');
@@ -5738,6 +5934,10 @@ const SHORTCUT_GROUPS = [
     [['→'], '展开, 再按进入子节点'],
   ]],
   ['画布', false, [
+    [['B'], '矩形标注（再次按下退出）'],
+    [['P'], '自由划线（再次按下退出）'],
+    [['⌘', 'Z'], '撤销标注（绘制模式）'],
+    [['Esc'], '退出绘制模式'],
     [['↑'], '选中父节点'],
     [['⌥', '↑'], '收起'],
     [['↓'], '展开, 再按进入子节点'],
@@ -7762,6 +7962,9 @@ function netStatusCell(record) {
   if (record.state === 'pending') {
     cell.textContent = '…';
     cell.classList.add('pending');
+  } else if (record.state === 'unavailable') {
+    cell.textContent = '?';
+    cell.title = record.captureNote || t('请求结果未捕获');
   } else if (record.state === 'failed') {
     cell.textContent = record.status || '×';
     cell.classList.add('bad');
@@ -8168,8 +8371,10 @@ function netBodySection(detail, side) {
   const size = side === 'req' ? detail.reqSize : detail.resSize;
   const state = side === 'req' ? detail.reqBody : detail.resBody;
   const section = el('section', 'net-section net-body-section');
-  const notes = { none: '没有内容', tooLarge: '内容超过 5 MB, 未保存', stream: '以流的方式发送, 无法获取内容', file: '文件内容未保存', evicted: '已被缓存清理删除' };
-  if (detail.state === 'pending' && side === 'res') {
+  const notes = { none: '没有内容', tooLarge: '内容超过 5 MB, 未保存', stream: '以流的方式发送, 无法获取内容', unavailable: '响应内容未捕获', file: '文件内容未保存', evicted: '已被缓存清理删除' };
+  if (detail.state === 'unavailable' && side === 'res') {
+    section.appendChild(el('p', 'net-note', t('请求结果未捕获')));
+  } else if (detail.state === 'pending' && side === 'res') {
     section.appendChild(el('p', 'net-note', t('请求进行中, 结束后显示')));
   } else if (state !== 'stored') {
     section.appendChild(el('p', 'net-note', t(notes[state] || '没有内容') + (size && state !== 'none' ? ` (${logSize(size)})` : '')));
@@ -8745,11 +8950,13 @@ function setupFindKey() {
 // MARK: - Setup
 
 function setup() {
+  document.body.classList.toggle('native-app', !!window.LAYERLENS_APP);
   setupPageActivity();
   if (new URLSearchParams(location.search).get('view') === 'logs') {
     setupLogsWindow();
     return;
   }
+  if (typeof mcpCanvas !== 'undefined') mcpCanvas.setup();
   applyI18n();
   loadViewState();
   showPendingToast();
@@ -8833,6 +9040,7 @@ function setup() {
   $('tree').addEventListener('scroll', () => hideLayer($('eventPop'), 120));
   window.addEventListener('blur', hideMenu);
   $('tree').addEventListener('mouseover', (e) => {
+    if (typeof mcpCanvas !== 'undefined' && mcpCanvas.tool) return;
     const row = e.target.closest('.row');
     const key = row ? viewKeyOf(row.dataset.key) : null;
     if (key !== state.hover) {
@@ -8905,6 +9113,23 @@ function setup() {
     }
   });
   document.addEventListener('keydown', (e) => {
+    const marking = typeof mcpCanvas !== 'undefined' && !!mcpCanvas.tool;
+    if (marking || picker.on || screenColorPending) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        if (marking) mcpCanvas.exitAndClear();
+        else if (picker.on) setColorPicker(false);
+        else if (screenColorPending) cancelPendingScreenColor();
+      } else if (marking && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        mcpCanvas.undo();
+      } else if (marking && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && ['b', 'p'].includes(e.key.toLowerCase())) {
+        mcpCanvas.setTool(e.key.toLowerCase() === 'b' ? 'rectangle' : 'freehand');
+      } else if (picker.on && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c') {
+        setColorPicker(false);
+      }
+      return;
+    }
     // 面板快捷键要先于终端处理, 保证焦点在 shell 中时仍可切换页签
     if (handlePaneNumberShortcut(e)) {
       e.preventDefault();
@@ -8912,6 +9137,14 @@ function setup() {
     }
     // 终端中的按键全部交给 shell, 如 vim 的 Esc
     if (e.target instanceof Element && e.target.closest('.xterm')) return;
+    const editing = e.target instanceof Element && !!e.target.closest('input, textarea, select, [contenteditable]');
+    if (!editing && $('modal').hidden && typeof mcpCanvas !== 'undefined') {
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key.toLowerCase() === 'b' || e.key.toLowerCase() === 'p')) {
+        e.preventDefault();
+        mcpCanvas.setTool(e.key.toLowerCase() === 'b' ? 'rectangle' : 'freehand');
+        return;
+      }
+    }
     if (e.key === 'Escape') {
       if (isNarrow() && logVisible() && net.tab === 'net' && net.selected && $('modal').hidden &&
           !(e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) &&
