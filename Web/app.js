@@ -496,6 +496,14 @@ const mcpContext = {
   timer: 0,
 };
 
+function mcpCanvasRect(windowId, deviceId, bundleId, instanceId) {
+  if (mcpContext.closed || mcpContext.windowId !== windowId ||
+      (targets.deviceId || '') !== deviceId || (targets.bundleId || '') !== bundleId ||
+      (appState.instanceId || currentApp()?.instanceId || '') !== instanceId) return null;
+  const { x, y, width, height } = $(state.mode === 'live' ? 'liveWrap' : 'stageWrap').getBoundingClientRect();
+  return { x, y, width, height };
+}
+
 // 只上报 element、owner、vc; element 已包含 ivar、类名、文字和 identifier. 与 MCPContext.swift 的 MCPNodeInfo 一致
 function mcpSelectedInfo() {
   const node = state.nodes.get(viewKeyOf(state.selected));
@@ -1305,7 +1313,17 @@ function drawableNodes(win) {
     if (!node.effHidden) node.children.forEach((child) => walk(child, next));
   };
   walk(base, 0);
+  if (state.mode === '3d') assign3DPaintLevels(result);
   return result;
+}
+
+// 前序遍历已经是 UIKit 的绘制顺序。保持这个顺序，同时将深度映射到原有层级范围，
+// 让后绘制的浮层位于较前面，且避免逐对比较节点或让大页面的总厚度随节点数增长。
+function assign3DPaintLevels(nodes) {
+  let depth = 0;
+  nodes.forEach((node) => { depth = Math.max(depth, node.level); });
+  const step = nodes.length > 1 ? depth / (nodes.length - 1) : 0;
+  nodes.forEach((node, index) => { node.level = index * step; });
 }
 
 function syncModeUI() {
@@ -3307,6 +3325,7 @@ function targetDeviceRows(device, background) {
     head.addEventListener('click', () => {
       hidePopovers();
       cancelSwitch();
+      if (typeof reportCommandSelection === 'function') reportCommandSelection(device.id, '', true);
       switchTarget(device.id, '');
     });
     const row = el('div', 'target-device-row');
@@ -3335,6 +3354,7 @@ function goneDeviceRows(entry) {
   head.addEventListener('click', () => {
     hidePopovers();
     cancelSwitch();
+    if (typeof reportCommandSelection === 'function') reportCommandSelection(entry.id, '', true);
     switchTarget(entry.id, '');
   });
   if (entry.id !== targets.deviceId) head.appendChild(historyRemoveButton(entry.id, ''));
@@ -3382,7 +3402,7 @@ function targetAppRow(deviceId, app, background) {
   row.title = !away ? `${app.bundleId} · ${t('端口 {0}', app.port)}` : live ? `${app.bundleId} · ${t('已挂起或退出, 点击启动或切到前台')}` : `${app.bundleId} · ${t('设备未连接, 连上后自动恢复')}`;
   row.addEventListener('click', async () => {
     hidePopovers();
-    if (typeof reportCommandSelection === 'function') reportCommandSelection(deviceId, app.bundleId);
+    if (typeof reportCommandSelection === 'function') reportCommandSelection(deviceId, app.bundleId, true);
     if (typeof protectCommandTargetChoice === 'function') protectCommandTargetChoice(deviceId, app.bundleId);
     // 已选中且在线时没有新目标; 保留正在加载的详情、截图和层级。
     if (current && !inBackground && !away && !pendingSwitch) {
@@ -3441,7 +3461,10 @@ function offlineSimulatorRow(sim) {
   head.append(el('span', 'status-dot'), el('span', 'target-device-name', sim.name), el('span', 'target-device-os', sim.os));
   head.title = t('启动并选中');
   head.addEventListener('click', () => {
-    if (!simPending.has(sim.id)) simulatorAction(sim.id, 'boot', true);
+    if (!simPending.has(sim.id)) {
+      if (typeof reportCommandSelection === 'function') reportCommandSelection(sim.id, '', true);
+      simulatorAction(sim.id, 'boot', true);
+    }
   });
   const row = el('div', 'target-device-row');
   row.append(head, simPowerButton(sim.id, false));
@@ -3501,6 +3524,8 @@ function selectedTargetInBackground() {
 function currentAppAway() {
   if (!currentDevice() || targets.pinned || stayingOffline()) return false;
   if (!targets.bundleId) return true;
+  // 构建、安装期间 App 的断连和后台状态是预期现象，不应触发自动跟随。
+  if (typeof commandRuns !== 'undefined' && commandRuns.has(commandKey(targets.deviceId, targets.bundleId))) return false;
   // 正在把当前选择拉到前台时不要自动跟随仍在前台的旧 App
   if (pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId) return false;
   if (appState.value === 'background') return true;
@@ -4145,10 +4170,10 @@ function nextCommandRunOrder() {
   return commandRunOrder;
 }
 let lastCommandSelectionOrder = 0;
-function reportCommandSelection(device, app) {
+function reportCommandSelection(device, app, explicit = false) {
   const order = nextCommandRunOrder();
   lastCommandSelectionOrder = order;
-  const body = JSON.stringify({owner: commandRunOwner, device: device || '', app: app || '', order});
+  const body = JSON.stringify({owner: commandRunOwner, device: device || '', app: app || '', order, explicit});
   const send = (attempt) => fetch('/api/hub/command-run-selection', {method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true})
     .then((response) => { if (!response.ok) throw new Error('selection update failed'); })
     .catch(() => { if (attempt < 3 && lastCommandSelectionOrder === order) setTimeout(() => send(attempt + 1), 500); });

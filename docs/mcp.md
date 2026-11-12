@@ -59,6 +59,7 @@ url = "http://127.0.0.1:9523/mcp"
 | 工具 | 用途 |
 | --- | --- |
 | `get_context` | 当前窗口的 App、源码目录、选中节点，以及日志和请求数量 |
+| `get_canvas_screenshot` | 当前 macOS 窗口的完整可见画布，包含已有选中态 |
 | `find_nodes` | 没有选中节点时按文字、类名等搜索 |
 | `search_logs` | 按关键词搜索本次启动的日志 |
 | `list_requests` | 本次启动的请求列表，每个请求一行 |
@@ -96,6 +97,12 @@ url = "http://127.0.0.1:9523/mcp"
 
 - 没有选中节点时不返回 `selected`。
 - 窗口里没有选中 App 时返回错误 `no_app_selected`，不生成快照。
+
+### `get_canvas_screenshot`
+
+传入 `get_context` 返回的 `snapshotId`，返回一张 MCP `image/png` 图片。画面来自 LayerLens macOS 窗口中当前可见的画布，包含画布已有的选中态。用户要求看画面，或需要判断裁切、遮挡、对齐等视觉问题时调用。
+
+如果快照对应的画布不在可截图的 macOS 窗口中，返回 `canvas_unavailable`。
 
 ### `find_nodes`
 

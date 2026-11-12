@@ -29,6 +29,7 @@ const selected = {
 };
 const context = vm.createContext({
   state: { nodes: new Map([['42', selected]]), selected: '42' },
+  $: id => ({ getBoundingClientRect: () => ({ x: id === 'liveWrap' ? 40 : 20, y: 60, width: 500, height: 700 }) }),
   viewKeyOf: key => key,
   currentDevice: () => ({ name: 'iPhone 17 Pro' }),
   targetHistory: {},
@@ -56,6 +57,12 @@ assert.equal(requests.length, 1);
 assert.equal(requests[0].focusRequested, true);
 assert.equal(requests[0].focusEpoch, 1000);
 assert.equal(requests[0].appName, 'DreamNovel');
+const canvasTarget = [requests[0].windowId, 'sim', 'com.reader.readit', 'launch-1'];
+assert.equal(context.mcpCanvasRect(...canvasTarget).x, 20);
+context.state.mode = 'live';
+assert.equal(context.mcpCanvasRect(...canvasTarget).x, 40);
+assert.equal(context.mcpCanvasRect('another-window', ...canvasTarget.slice(1)), null);
+assert.equal(context.mcpCanvasRect(...canvasTarget.slice(0, 3), 'another-launch'), null);
 assert.match(requests[0].selected.element, /DetailController\.readButton/);
 assert.match(requests[0].selected.element, /id=book_detail_read_now/);
 assert.equal(requests[0].selected.owner, 'DetailView');
@@ -77,4 +84,5 @@ const beforeClose = requests.length;
 timers.shift()();
 assert.equal(requests.length, beforeClose, 'A pending publication must not resurrect a closed window');
 assert.equal(beacons.length, 1);
+assert.equal(context.mcpCanvasRect(...canvasTarget), null);
 console.log('PASS MCP web context: focused target, selected node and removal beacon');

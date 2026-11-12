@@ -28,7 +28,7 @@ enum BoundedProcess {
     }
     /// 合并错误输出, 避免两个管道互相等待; 保留退出状态供调用方解释错误。
     static func capture(_ path: String, _ arguments: [String], timeout: TimeInterval, includeError: Bool = true,
-                        environment: [String: String]? = nil, directory: URL? = nil) -> Result? {
+                        environment: [String: String]? = nil, directory: URL? = nil, hardTimeout: Bool = false) -> Result? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
@@ -48,13 +48,37 @@ enum BoundedProcess {
         let timer = DispatchWorkItem {
             lock.lock(); timedOut = process.isRunning; let stop = timedOut; lock.unlock()
             guard stop else { return }
+            if hardTimeout {
+                kill(process.processIdentifier, SIGKILL)
+                return
+            }
             process.terminate()
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             }
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let data: Data
+        if hardTimeout {
+            let fd = pipe.fileHandleForReading.fileDescriptor
+            let flags = fcntl(fd, F_GETFL)
+            if flags >= 0 { _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK) }
+            var output = Data()
+            var buffer = [UInt8](repeating: 0, count: 65536)
+            while true {
+                let count = read(fd, &buffer, buffer.count)
+                if count > 0 { output.append(buffer, count: count) }
+                else if count == 0 { break }
+                else if errno == EINTR { continue }
+                else if errno == EAGAIN || errno == EWOULDBLOCK {
+                    if !process.isRunning { break }
+                    Thread.sleep(forTimeInterval: 0.01)
+                } else { break }
+            }
+            data = output
+        } else {
+            data = pipe.fileHandleForReading.readDataToEndOfFile()
+        }
         process.waitUntilExit()
         timer.cancel()
         lock.lock(); let failed = timedOut; lock.unlock()

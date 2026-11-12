@@ -20,9 +20,12 @@ final class MCPHTTPService {
     private let network: NetworkRecorder
     private let workQueue: DispatchQueue
     private let baseURL: URL
+    private let captureCanvas: (MCPWindowContext, @escaping (Data?) -> Void) -> Void
 
     init(store: MCPContextStore, registry: TargetRegistry, git: GitController,
-         appLogs: AppLogRecorder, network: NetworkRecorder, workQueue: DispatchQueue) {
+         appLogs: AppLogRecorder, network: NetworkRecorder, workQueue: DispatchQueue,
+         captureCanvas: @escaping (MCPWindowContext, @escaping (Data?) -> Void) -> Void) {
+        self.captureCanvas = captureCanvas
         self.store = store
         self.registry = registry
         self.git = git
@@ -147,7 +150,9 @@ final class MCPHTTPService {
                 let sourceRoot: String?
                 if XcodeSourcePath.isLocalLayerLensPackage(sourceFile) {
                     let derivedData = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData")
-                    let host = XcodeSourcePath.localPackageHost(bundleId: context.bundleId, derivedData: derivedData)
+                    let project = XcodeSourcePath.savedLocalHostProject(deviceId: context.deviceId, bundleId: context.bundleId, sourceFile: sourceFile) ??
+                        XcodeSourcePath.localPackageHostProject(bundleId: context.bundleId, derivedData: derivedData)
+                    let host = project.map { ($0 as NSString).deletingLastPathComponent }
                     sourceRoot = host.flatMap { git.repository(sourceFile: $0 + "/LayerLensHost") ?? $0 }
                 } else {
                     sourceRoot = git.repository(sourceFile: sourceFile) ?? XcodeSourcePath.sourceDirectory(for: sourceFile)
@@ -161,6 +166,26 @@ final class MCPHTTPService {
                     if !activity.isEmpty { value["activity"] = activity }
                     completion(Self.toolValue(value))
                 }
+            }
+        case "get_canvas_screenshot":
+            do {
+                let snapshot = try pinned(MCPRecords.Arguments(arguments, known: ["snapshotId"]))
+                DispatchQueue.main.async { [self] in
+                    captureCanvas(snapshot.context) { data in
+                        guard self.store.isCurrent(snapshot) else {
+                            completion(Self.toolError(Self.staleSnapshot))
+                            return
+                        }
+                        guard let data else {
+                            completion(Self.toolError("canvas_unavailable: open the selected App's canvas in the LayerLens macOS window."))
+                            return
+                        }
+                        completion(["content": [["type": "image", "mimeType": "image/png",
+                                                 "data": data.base64EncodedString()]], "isError": false])
+                    }
+                }
+            } catch {
+                completion(Self.toolError(Self.message(error)))
             }
         case "find_nodes":
             let find: (query: String, visibleOnly: Bool, limit: Int)
@@ -455,12 +480,12 @@ final class MCPHTTPService {
     Call find_nodes with the returned snapshotId only when nothing useful is selected. \
     For runtime behavior, get_context.activity counts this launch's logs and requests: use search_logs with a query, \
     list_requests (failedOnly first), then get_request for one request; pass back cursor to read only new entries. \
-    Do not request the full hierarchy or screenshots. On snapshot_stale or no_app_selected, ask the user to select the App or call get_context again.
+    Use get_canvas_screenshot with snapshotId only when the user asks to see the canvas or the answer depends on its visible appearance. Do not request the full hierarchy. On snapshot_stale or no_app_selected, ask the user to select the App or call get_context again.
     """
 
     private static let readOnly: [String: Any] = ["readOnlyHint": true, "destructiveHint": false, "openWorldHint": false]
 
-    private static let toolNames: Set<String> = ["get_context", "find_nodes", "search_logs", "list_requests", "get_request"]
+    private static let toolNames: Set<String> = ["get_context", "get_canvas_screenshot", "find_nodes", "search_logs", "list_requests", "get_request"]
 
     static let toolDefinitions: [[String: Any]] = [
         [
@@ -471,6 +496,19 @@ final class MCPHTTPService {
             "inputSchema": [
                 "type": "object",
                 "properties": [:],
+                "additionalProperties": false,
+            ],
+            "annotations": readOnly,
+        ],
+        [
+            "name": "get_canvas_screenshot",
+            "title": "Get LayerLens canvas screenshot",
+            "description": "Return one PNG of the visible canvas in the LayerLens macOS window pinned by get_context, "
+                + "including the selection as rendered. Use only for screenshot requests or questions about appearance.",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["snapshotId": snapshotIdProperty],
+                "required": ["snapshotId"],
                 "additionalProperties": false,
             ],
             "annotations": readOnly,

@@ -86,6 +86,47 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
         fatalError("init(coder:) has not been implemented")
     }
 
+    func captureCanvas(_ context: MCPWindowContext, completion: @escaping (Data?) -> Void) {
+        guard window?.isVisible == true, window?.isMiniaturized == false else {
+            completion(nil)
+            return
+        }
+        let arguments = [
+            "windowId": context.windowId,
+            "deviceId": context.deviceId,
+            "bundleId": context.bundleId,
+            "instanceId": context.instanceId,
+        ]
+        let script = "return mcpCanvasRect(windowId, deviceId, bundleId, instanceId);"
+        webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: .page) { [weak self] result in
+            guard let self, let bounds = (try? result.get()) as? [String: Double],
+                  let x = bounds["x"], let y = bounds["y"],
+                  let width = bounds["width"], let height = bounds["height"],
+                  width > 0, height > 0 else {
+                completion(nil)
+                return
+            }
+            let zoom = webView.pageZoom
+            let rect = CGRect(x: x * zoom, y: y * zoom, width: width * zoom, height: height * zoom)
+                .intersection(webView.bounds)
+            guard !rect.isEmpty else { completion(nil); return }
+            let configuration = WKSnapshotConfiguration()
+            configuration.rect = rect
+            webView.takeSnapshot(with: configuration) { [weak self] image, _ in
+                guard let self, let image else { completion(nil); return }
+                webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: .page) { result in
+                    guard (try? result.get()) as? [String: Double] == bounds,
+                          let tiff = image.tiffRepresentation,
+                          let bitmap = NSBitmapImageRep(data: tiff) else {
+                        completion(nil)
+                        return
+                    }
+                    completion(bitmap.representation(using: .png, properties: [:]))
+                }
+            }
+        }
+    }
+
     func showAndLoad() {
         if !loaded {
             loaded = true

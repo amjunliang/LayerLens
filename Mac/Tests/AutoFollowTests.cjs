@@ -76,6 +76,18 @@ function create(bundleId = '') {
   await running.ctx.checkForeground();
   assert.deepEqual(running.follows, ['a'], 'Explicitly choosing the running app releases the guard');
 
+  const installing = create('a');
+  installing.ctx.commandRuns = new Map([['phone|a', {device: 'phone', app: 'a'}]]);
+  installing.ctx.commandKey = (device, app) => device + '|' + app;
+  installing.a.foreground = false; installing.b.foreground = true; installing.appState.value = 'offline';
+  await installing.ctx.checkForeground();
+  assert.equal(installing.targets.bundleId, 'a', 'An installing app must remain selected during transient disconnect');
+  assert.equal(installing.follows.length, 0, 'An active run must not auto-follow another foreground app');
+  assert.equal(installing.fallback.length, 0, 'An active run must not fall back to device-only');
+  installing.ctx.commandRuns.clear();
+  await installing.ctx.checkForeground();
+  assert.deepEqual(installing.follows, ['b'], 'Normal auto-follow resumes after the run');
+
   const desktop = create('a'); desktop.a.foreground = false; desktop.appState.value = 'background';
   await desktop.ctx.checkForeground(); await desktop.settle();
   assert.equal(desktop.fallback.length, 0, 'Background alone must not change the selected target');

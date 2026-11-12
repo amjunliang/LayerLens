@@ -23,8 +23,8 @@ final class HubServer {
 
     let queue = DispatchQueue(label: "com.layerlens.hub")
     let registry: TargetRegistry
-    private let xcode = XcodeController()
-    private let commandRun = CommandRunController()
+    private let xcode = XcodeController(log: LiveLog.write)
+    private let commandRun = CommandRunController(log: LiveLog.write)
     private let buildHomeLock = NSLock()
     private var buildHomeInFlight: [String: DispatchGroup] = [:]
     private var buildHomeAvailableAfter: [String: TimeInterval] = [:]
@@ -38,8 +38,9 @@ final class HubServer {
     private let mcpClients = MCPClientInstaller(url: HubServer.mcpURL)
     /// 安装和移除串行执行, 避免两个请求同时改同一份客户端配置
     private let mcpSetupQueue = DispatchQueue(label: "com.layerlens.hub.mcp-setup")
+    private let captureCanvas: (MCPWindowContext, @escaping (Data?) -> Void) -> Void
     private lazy var mcp = MCPHTTPService(store: mcpContexts, registry: registry, git: git,
-                                              appLogs: appLogs, network: network, workQueue: workQueue)
+                                              appLogs: appLogs, network: network, workQueue: workQueue, captureCanvas: captureCanvas)
     private var pendingTargetState: [String: Any]?
     private var targetStateFlush: DispatchWorkItem?
     let terminal = TerminalController()
@@ -72,7 +73,8 @@ final class HubServer {
     private var listener: NWListener?
     private let allowedHosts: Set<String> = ["127.0.0.1:\(HubServer.port)", "localhost:\(HubServer.port)"]
 
-    init(registry: TargetRegistry) {
+    init(registry: TargetRegistry, captureCanvas: @escaping (MCPWindowContext, @escaping (Data?) -> Void) -> Void) {
+        self.captureCanvas = captureCanvas
         self.registry = registry
         network = NetworkRecorder { [weak registry] deviceId, bundleId in
             registry?.captureEnabled(deviceId: deviceId, bundleId: bundleId) ?? false
@@ -510,7 +512,7 @@ final class HubServer {
             guard let owner = json["owner"] as? String, !owner.isEmpty,
                   let device = json["device"] as? String, let app = json["app"] as? String,
                   let order = json["order"] as? Int, order > 0 else { connection.respond(.error(400, "Invalid selection")); return }
-            commandRun.selectTarget(owner: owner, device: device, bundle: app, order: order)
+            commandRun.selectTarget(owner: owner, device: device, bundle: app, order: order, explicit: json["explicit"] as? Bool ?? true)
             connection.respond(.json(["ok": true]))
         case "/api/hub/command-run-cancel":
             commandRun.cancel(id: json["run"] as? String ?? "")

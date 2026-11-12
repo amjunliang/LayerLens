@@ -45,6 +45,11 @@ final class XcodeController {
 
     private static let xcodeBundleId = "com.apple.dt.Xcode"
     private let operationLock = NSLock()
+    private let log: (String) -> Void
+
+    init(log: @escaping (String) -> Void = { _ in }) {
+        self.log = log
+    }
 
     struct RunSession {
         let id: String
@@ -52,42 +57,75 @@ final class XcodeController {
         let path: String
         let action: String
         let created: Date
+        let trace: String
+        var lastStatus: String = ""
     }
     private var sessions: [String: RunSession] = [:]
 
     /// 精确匹配 Run Action 的 App Bundle ID, 不沿用无关 Scheme / 设备。
     func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool, xcodePath: String = "", beforeBuild: () -> Void = {}) -> Result<String, Failure> {
+        let trace = UUID().uuidString
+        let started = ProcessInfo.processInfo.systemUptime
+        log("xcode-run id=\(trace) app=\(bundleId) device=\(deviceId) start")
+        defer { log("xcode-run id=\(trace) phase=request-total elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - started) * 1000))") }
+        func timed<T>(_ phase: String, _ operation: () -> T) -> T {
+            let phaseStarted = ProcessInfo.processInfo.systemUptime
+            defer { log("xcode-run id=\(trace) phase=\(phase) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - phaseStarted) * 1000))") }
+            return operation()
+        }
         guard operationLock.try() else { return .failure(Failure(code: .busy)) }
         defer { operationLock.unlock() }
         guard !bundleId.isEmpty, !deviceId.isEmpty else { return .failure(Failure(code: .schemeUnavailable)) }
         let selected = xcodePath.isEmpty ? Self.defaultXcodePath() : URL(fileURLWithPath: xcodePath).resolvingSymlinksInPath().path
         guard let selected, Self.installedXcodes().contains(where: { $0.path == selected }) else { return .failure(Failure(code: .xcodeUnavailable)) }
         guard runningXcodePaths().contains(where: { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == selected }) else { return .failure(.xcodeNotRunning) }
-        return checkPermission(ask: true).flatMap { workspace(for: sourceFile, xcodePath: selected) }.flatMap { xcode, path in
+        return timed("permission") { checkPermission(ask: true) }.flatMap {
+            timed("workspace") { workspace(for: sourceFile, xcodePath: selected) }
+        }.flatMap { xcode, path in
+            log("xcode-run id=\(trace) project=\(path) xcode=\(xcode)")
             let metadata = """
             set doc to first workspace document whose path is \(quoted(path))
             return (name of active scheme of doc) & linefeed & ((name of schemes of doc) as text)
             """
-            return execute(metadata, xcode: xcode).flatMap { output in
+            return timed("schemes") { execute(metadata, xcode: xcode) }.flatMap { output in
                 let names = output.components(separatedBy: "\n")
                 let schemes = Array(names.dropFirst()).filter { !$0.isEmpty }
                 let sdk = simulator ? "iphonesimulator" : "iphoneos"
-                let deadline = Date().addingTimeInterval(18)
+                let deadline = Date().addingTimeInterval(6)
                 let builder = xcode + "/Contents/Developer/usr/bin/xcodebuild"
                 func settings(_ arguments: [String]) -> [[String: Any]]? {
                     let remaining = deadline.timeIntervalSinceNow
-                    guard remaining > 0, let result = BoundedProcess.capture(builder,
-                        arguments + ["-showBuildSettings", "-json", "-sdk", sdk, "-disableAutomaticPackageResolution", "-skipPackageUpdates"], timeout: remaining),
+                    guard remaining > 0, let result = timed("build-settings", { BoundedProcess.capture(builder,
+                        arguments + ["-showBuildSettings", "-json", "-sdk", sdk, "-disableAutomaticPackageResolution", "-skipPackageUpdates"], timeout: remaining, hardTimeout: true) }),
                         !result.timedOut, result.status == 0 else { return nil }
                     return XcodeRunPlan.decodeSettings(result.data)
                 }
                 let candidates = XcodeRunPlan.candidates(workspace: path, schemes: schemes)
-                guard let plan = XcodeRunPlan.choose(candidates, active: names.first ?? "", bundleId: bundleId, settings: { project, config in
-                    settings(["-project", project, "-alltargets", "-configuration", config])
-                }) else { return .failure(Failure(code: .schemeUnavailable)) }
-                let containerFlag = path.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
-                guard let actual = settings([containerFlag, path, "-scheme", plan.scheme, "-configuration", plan.configuration]),
-                      XcodeRunPlan.matchesBundle(actual, candidate: plan, bundleId: bundleId) else { return .failure(Failure(code: .schemeUnavailable)) }
+                let savedKey = [xcode, path, bundleId, sdk].joined(separator: "\n")
+                let defaultsKey = "LayerLensXcodeRunVerifiedPlans"
+                let savedPlans = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [String: String]] ?? [:]
+                let saved = savedPlans[savedKey]
+                let verified = candidates.first { candidate in
+                    candidate.scheme == saved?["scheme"] && candidate.project == saved?["project"] &&
+                    candidate.target == saved?["target"] && candidate.configuration == saved?["configuration"]
+                }
+                let plan: XcodeRunPlan.Candidate
+                if let verified {
+                    plan = verified
+                    log("xcode-run id=\(trace) phase=plan source=saved")
+                } else {
+                    guard let found = XcodeRunPlan.choose(candidates, active: names.first ?? "", bundleId: bundleId, settings: { project, config in
+                        settings(["-project", project, "-alltargets", "-configuration", config])
+                    }) else { return .failure(Failure(code: .schemeUnavailable)) }
+                    let containerFlag = path.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
+                    guard let actual = settings([containerFlag, path, "-scheme", found.scheme, "-configuration", found.configuration]),
+                          XcodeRunPlan.matchesBundle(actual, candidate: found, bundleId: bundleId) else { return .failure(Failure(code: .schemeUnavailable)) }
+                    plan = found
+                    var updated = savedPlans
+                    updated[savedKey] = ["scheme": found.scheme, "project": found.project, "target": found.target, "configuration": found.configuration]
+                    UserDefaults.standard.set(updated, forKey: defaultsKey)
+                }
+                log("xcode-run id=\(trace) scheme=\(plan.scheme)")
                 // Home 前先验证设备；真正运行时重新选择，避免用户在等待期间改了目标。
                 let selectDestination = """
                 set doc to first workspace document whose path is \(quoted(path))
@@ -104,16 +142,16 @@ final class XcodeController {
                 if picked is missing value then error "layerlens_destination_unavailable"
                 set active run destination of doc to picked
                 """
-                if case .failure(let failure) = execute(selectDestination + "\nreturn \"ready\"", xcode: xcode) {
+                if case .failure(let failure) = timed("destination", { execute(selectDestination + "\nreturn \"ready\"", xcode: xcode) }) {
                     return .failure(failure)
                 }
-                beforeBuild()
+                timed("home", beforeBuild)
                 let runScript = selectDestination + "\nset actionResult to run doc\nreturn id of actionResult"
-                return execute(runScript, xcode: xcode, timeout: 5).map { action in
+                return timed("start-action") { execute(runScript, xcode: xcode, timeout: 5) }.map { action in
                     let id = UUID().uuidString
                     sessions = sessions.filter { Date().timeIntervalSince($0.value.created) < 900 }
                     if sessions.count >= 16, let oldest = sessions.values.min(by: { $0.created < $1.created }) { sessions.removeValue(forKey: oldest.id) }
-                    sessions[id] = RunSession(id: id, xcode: xcode, path: path, action: action, created: Date())
+                    sessions[id] = RunSession(id: id, xcode: xcode, path: path, action: action, created: Date(), trace: trace)
                     return id
                 }
             }
@@ -144,7 +182,14 @@ final class XcodeController {
             """
             return execute(script, xcode: session.xcode).map { output in
                 let lines = output.components(separatedBy: "\n")
-                return RunStatus(status: lines.first ?? "", detail: lines.dropFirst().joined(separator: " "))
+                let current = lines.first ?? ""
+                if current != session.lastStatus {
+                    var updated = session
+                    updated.lastStatus = current
+                    sessions[runId] = updated
+                    log("xcode-run id=\(session.trace) phase=action status=\(current) elapsed_ms=\(Int(Date().timeIntervalSince(session.created) * 1000))")
+                }
+                return RunStatus(status: current, detail: lines.dropFirst().joined(separator: " "))
             }
         }
     }
@@ -422,9 +467,35 @@ enum XcodeRunPlan {
 
 /// Xcode 记录 SwiftPM checkout 对应的宿主工作区，自定义 DerivedData 路径也使用相同布局。
 enum XcodeSourcePath {
+    private static let localHostsKey = "LayerLensLocalPackageHosts"
+    private static let localHostsLock = NSLock()
+
+    private static func localHostKey(deviceId: String, bundleId: String, sourceFile: String) -> String {
+        [deviceId, bundleId, URL(fileURLWithPath: sourceFile).standardizedFileURL.path].joined(separator: "\n")
+    }
+
+    static func savedLocalHostProject(deviceId: String, bundleId: String, sourceFile: String) -> String? {
+        localHostsLock.lock()
+        defer { localHostsLock.unlock() }
+        let key = localHostKey(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+        guard let project = (UserDefaults.standard.dictionary(forKey: localHostsKey) as? [String: String])?[key],
+              ["xcodeproj", "xcworkspace"].contains((project as NSString).pathExtension),
+              FileManager.default.fileExists(atPath: project) else { return nil }
+        return project
+    }
+
+    static func saveLocalHostProject(_ project: String, deviceId: String, bundleId: String, sourceFile: String) {
+        localHostsLock.lock()
+        defer { localHostsLock.unlock() }
+        let key = localHostKey(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+        var projects = UserDefaults.standard.dictionary(forKey: localHostsKey) as? [String: String] ?? [:]
+        projects[key] = project
+        UserDefaults.standard.set(projects, forKey: localHostsKey)
+    }
+
     /// A local Swift package's __FILE__ points into the package, not its app.
     /// Resolve only when built products identify one unambiguous host project.
-    static func localPackageHost(bundleId: String, derivedData: URL) -> String? {
+    static func localPackageHostProject(bundleId: String, derivedData: URL) -> String? {
         guard !bundleId.isEmpty else { return nil }
         let manager = FileManager.default
         guard let builds = try? manager.contentsOfDirectory(at: derivedData, includingPropertiesForKeys: nil) else { return nil }
@@ -444,8 +515,12 @@ enum XcodeSourcePath {
                 }
             }
         }
-        guard projects.count == 1, let project = projects.first else { return nil }
-        return (project as NSString).deletingLastPathComponent
+        return projects.count == 1 ? projects.first : nil
+    }
+
+    static func localPackageHost(bundleId: String, derivedData: URL) -> String? {
+        localPackageHostProject(bundleId: bundleId, derivedData: derivedData)
+            .map { ($0 as NSString).deletingLastPathComponent }
     }
 
     static func isLocalLayerLensPackage(_ sourceFile: String) -> Bool {

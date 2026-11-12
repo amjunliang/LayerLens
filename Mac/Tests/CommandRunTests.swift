@@ -36,6 +36,10 @@ import Foundation
           *" -list "*) echo list >> '\(root.path)/events'; if [ -f '\(root.path)/hang' ]; then sleep 5; fi; cat '\(root.path)/schemes.json';;
           *" -showBuildSettings "*)
             echo "$*" >> '\(root.path)/settings-events'
+            if [ -f '\(root.path)/slow-settings-once' ]; then
+              rm -f '\(root.path)/slow-settings-once'
+              sleep 3
+            fi
             settings='\(root.path)/settings.json'
             case " $* " in
               *" -scheme App "*) if [ -f '\(root.path)/retargeted-settings.json' ]; then settings='\(root.path)/retargeted-settings.json'; fi;;
@@ -65,6 +69,10 @@ import Foundation
         precondition(XcodeSourcePath.packageBuildDirectory(containing: checkout).flatMap(XcodeSourcePath.hostProject(in:)) == project.path,
                      "A SwiftPM checkout must resolve to its host Xcode project")
         precondition(XcodeSourcePath.packageBuildDirectory(containing: source.deletingLastPathComponent()) == nil)
+        precondition(CommandRunController.xcodeDerivedData(for: project.path, in: derived.deletingLastPathComponent())?.path == derived.path,
+                     "A unique exact workspace match should reuse Xcode DerivedData")
+        precondition(CommandRunController.xcodeDerivedData(for: root.appendingPathComponent("Missing.xcodeproj").path, in: derived.deletingLastPathComponent()) == nil,
+                     "Unrelated projects must not reuse DerivedData")
         let products = derived.appendingPathComponent("Build/Products/Debug-iphonesimulator/App.app")
         try fm.createDirectory(at: products, withIntermediateDirectories: true)
         try info.write(to: products.appendingPathComponent("Info.plist"))
@@ -82,6 +90,9 @@ import Foundation
         try otherWorkspaceInfo.write(to: otherBuild.appendingPathComponent("info.plist"))
         precondition(XcodeSourcePath.localPackageHost(bundleId: bundle, derivedData: derived.deletingLastPathComponent()) == nil,
                      "Multiple host projects must not be guessed")
+        try metadata.write(to: otherBuild.appendingPathComponent("info.plist"))
+        precondition(CommandRunController.xcodeDerivedData(for: project.path, in: derived.deletingLastPathComponent()) == nil,
+                     "Ambiguous matching build directories must not be reused")
         try fm.removeItem(at: otherBuild)
         try fm.removeItem(at: otherProject)
         let relative = CommandRunController.relativePath(from: source.deletingLastPathComponent(), to: project)
@@ -118,8 +129,8 @@ import Foundation
         let afterCache = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         precondition(afterCache.components(separatedBy: "list").count == 2, "Restored projects must validate without enumerating schemes")
         let settingsAfterCache = try String(contentsOf: root.appendingPathComponent("settings-events"), encoding: .utf8)
-        precondition(settingsAfterCache.dropFirst(settingsBeforeCache.count).contains("-derivedDataPath"),
-                     "A saved Scheme must still validate its current product")
+        precondition(settingsAfterCache == settingsBeforeCache,
+                     "A saved Scheme must build directly without querying settings")
         try "".write(to: root.appendingPathComponent("fail-build"), atomically: true, encoding: .utf8)
         let failingBuild = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true)
         let failBuildDeadline = Date().addingTimeInterval(5)
@@ -172,14 +183,17 @@ import Foundation
         // 真实的改绑会修改项目文件, 让缓存的构建配置失效。
         func editProject() { try! UUID().uuidString.write(to: project.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8) }
         editProject()
+        try otherInfo.write(to: root.appendingPathComponent("app-info.plist"))
         let wrongTarget = restoredController.start(device: "device-cache", bundle: bundle, source: source.path, simulator: true)
         let wrongTargetDeadline = Date().addingTimeInterval(5)
         while restoredController.status(id: wrongTarget)?.0 != "failed" && Date() < wrongTargetDeadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
-        precondition(restoredController.status(id: wrongTarget)?.0 == "failed" && restoredController.status(id: wrongTarget)?.2 == false)
+        precondition(restoredController.status(id: wrongTarget)?.0 == "failed" && restoredController.status(id: wrongTarget)?.2 == true,
+                     "A changed target must be built but its mismatched product must not launch")
         let afterWrongTarget = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
-        precondition(afterWrongTarget == afterMissing, "A stale product must not trigger build, install or launch")
+        precondition(afterWrongTarget.dropFirst(afterMissing.count).contains("build") && !afterWrongTarget.dropFirst(afterMissing.count).contains("install"), "A mismatched product must not install")
+        try info.write(to: root.appendingPathComponent("app-info.plist"))
         try JSONSerialization.data(withJSONObject: settings).write(to: root.appendingPathComponent("settings.json"))
         let schemeFile = project.appendingPathComponent("xcshareddata/xcschemes/App.xcscheme")
         let invalidHome = root.appendingPathComponent("invalid-launch-home")
@@ -246,6 +260,26 @@ import Foundation
         let after = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         let appended = String(after.dropFirst(before.count))
         precondition(appended.components(separatedBy: "install").count == 3 && appended.components(separatedBy: "launch").count == 2, "Superseded installation must not launch")
+        // 安装期间 App 暂时离线，自动跟随不能覆盖用户启动时选择的目标。
+        let autoOwner = "automatic-selection-test"
+        let autoEventsBefore = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
+        let autoJob = controller.start(device: "device-slow", bundle: bundle, source: source.path, simulator: true, owner: autoOwner, order: 20)
+        let autoDeadline = Date().addingTimeInterval(15)
+        while controller.status(id: autoJob)?.0 != "installing" && Date() < autoDeadline { Thread.sleep(forTimeInterval: 0.02) }
+        precondition(controller.status(id: autoJob)?.0 == "installing")
+        controller.selectTarget(owner: autoOwner, device: "device-slow", bundle: "", order: 22, explicit: false)
+        controller.selectTarget(owner: autoOwner, device: "device-slow", bundle: "other.app", order: 23, explicit: false)
+        while !["succeeded", "failed", "skipped"].contains(controller.status(id: autoJob)?.0 ?? "") && Date() < autoDeadline { Thread.sleep(forTimeInterval: 0.02) }
+        precondition(controller.status(id: autoJob)?.0 == "succeeded", "Automatic device and foreground changes must not suppress launch")
+        precondition(eventsSince(autoEventsBefore).contains("launch"), "The selected app must actually be launched")
+        // 较新的自动报告不能挡住稍晚到达的、序号较小的用户选择。
+        let reorderedOwner = "reordered-selection-test"
+        let reordered = controller.start(device: "device-switch", bundle: bundle, source: source.path, simulator: true, owner: reorderedOwner, order: 30)
+        while controller.status(id: reordered)?.0 != "building" && Date() < autoDeadline { Thread.sleep(forTimeInterval: 0.02) }
+        controller.selectTarget(owner: reorderedOwner, device: "device-switch", bundle: bundle, order: 32, explicit: false)
+        controller.selectTarget(owner: reorderedOwner, device: "device-switch", bundle: "other.app", order: 31, explicit: true)
+        while !["succeeded", "failed", "skipped"].contains(controller.status(id: reordered)?.0 ?? "") && Date() < autoDeadline { Thread.sleep(forTimeInterval: 0.02) }
+        precondition(controller.status(id: reordered)?.0 == "skipped", "A user selection must win over reordered automatic updates")
         // 切换目标只拦截启动：构建与安装照常完成，迟到的旧选择不能覆盖新选择。
         let beforeBuildSwitch = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         let owner = "selection-test"
@@ -326,6 +360,64 @@ import Foundation
             precondition(controller.status(id: id)?.0 == "succeeded", controller.status(id: id)?.1 ?? "Missing package run")
         }
         runPackage(checkout)
+        let localPackage = root.appendingPathComponent("LocalLayerLens")
+        let localSource = localPackage.appendingPathComponent("Pod/Classes/Lookin/LayerLensLookinBridge.m")
+        try fm.createDirectory(at: localSource.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "".write(to: localPackage.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "".write(to: localSource, atomically: true, encoding: .utf8)
+        let timingLock = NSLock()
+        var timingLogs: [String] = []
+        let localController = CommandRunController(executable: executable.path, cacheRoot: root.appendingPathComponent("local-cache"),
+                                                   derivedDataRoot: derived.deletingLastPathComponent(), log: { line in
+            timingLock.lock(); timingLogs.append(line); timingLock.unlock()
+        })
+        var staleProjects = UserDefaults.standard.dictionary(forKey: "LayerLensCommandRunRelativeProjects") as? [String: [String: String]] ?? [:]
+        staleProjects[bundle] = ["path": "../../old-location/App.xcodeproj", "scheme": "App"]
+        UserDefaults.standard.set(staleProjects, forKey: "LayerLensCommandRunRelativeProjects")
+        let localJob = localController.start(device: "device-local-package", bundle: bundle, source: localSource.path, simulator: true)
+        let localDeadline = Date().addingTimeInterval(10)
+        while !["succeeded", "failed"].contains(localController.status(id: localJob)?.0 ?? "") && Date() < localDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(localController.status(id: localJob)?.0 == "succeeded",
+                     localController.status(id: localJob)?.1 ?? "Local package run failed")
+        precondition(XcodeSourcePath.savedLocalHostProject(deviceId: "device-local-package", bundleId: bundle, sourceFile: localSource.path) == project.path)
+        precondition(XcodeSourcePath.savedLocalHostProject(deviceId: "different-device", bundleId: bundle, sourceFile: localSource.path) == nil,
+                     "A saved host must not be shared across devices")
+        precondition(XcodeSourcePath.savedLocalHostProject(deviceId: "device-local-package", bundleId: bundle, sourceFile: localSource.path + ".other") == nil,
+                     "A saved host must not be shared across package paths")
+        let movedDerived = root.appendingPathComponent("DerivedDataMoved")
+        try fm.moveItem(at: derived.deletingLastPathComponent(), to: movedDerived)
+        let cachedLocalJob = localController.start(device: "device-local-package", bundle: bundle, source: localSource.path, simulator: true)
+        let cachedLocalDeadline = Date().addingTimeInterval(10)
+        while !["succeeded", "failed"].contains(localController.status(id: cachedLocalJob)?.0 ?? "") && Date() < cachedLocalDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(localController.status(id: cachedLocalJob)?.0 == "succeeded",
+                     localController.status(id: cachedLocalJob)?.1 ?? "Saved local host was not reused")
+        try "".write(to: root.appendingPathComponent("slow-settings-once"), atomically: true, encoding: .utf8)
+        let retryController = CommandRunController(executable: executable.path, queryTimeout: 0.2,
+                                                   cacheRoot: root.appendingPathComponent("retry-cache"),
+                                                   derivedDataRoot: derived.deletingLastPathComponent(), log: { line in
+            timingLock.lock(); timingLogs.append(line); timingLock.unlock()
+        })
+        let retryJob = retryController.start(device: "device-local-package", bundle: bundle, source: localSource.path, simulator: true)
+        let settingsRetryDeadline = Date().addingTimeInterval(10)
+        while !["succeeded", "failed"].contains(retryController.status(id: retryJob)?.0 ?? "") && Date() < settingsRetryDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(retryController.status(id: retryJob)?.0 == "succeeded" &&
+                     fm.fileExists(atPath: root.appendingPathComponent("slow-settings-once").path),
+                     "A known target must build without querying slow settings")
+        try fm.removeItem(at: root.appendingPathComponent("slow-settings-once"))
+        timingLock.lock()
+        let logged = timingLogs.joined(separator: "\n")
+        timingLock.unlock()
+        precondition(logged.contains("phase=host-resolution source=saved") && logged.contains("phase=direct-build product=matched") &&
+                     logged.contains("phase=home elapsed_ms=") && logged.contains("phase=build elapsed_ms=") &&
+                     logged.contains("phase=install elapsed_ms=") && logged.contains("phase=launch elapsed_ms="),
+                     "The actual run must report resolution, cache and stage timings")
+        try fm.moveItem(at: movedDerived, to: derived.deletingLastPathComponent())
         let beforeRelocation = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         try fm.removeItem(at: customBuild.appendingPathComponent("SourcePackages"))
         runPackage(customCheckout)
@@ -336,7 +428,7 @@ import Foundation
         try "{\"project\":{\"schemes\":[\"App\",\"AppCopy\"]}}".write(to: root.appendingPathComponent("schemes.json"), atomically: true, encoding: .utf8)
         runPackage(customCheckout)
         let afterRecovery = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
-        precondition(afterRecovery.dropFirst(afterRelocation.count).contains("list"), "A retargeted cached Scheme must trigger fresh discovery")
+        precondition(afterRecovery.dropFirst(afterRelocation.count).contains("build"), "A saved Scheme must build directly")
         runPackage(customCheckout)
         let afterRecoveredRun = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         precondition(!afterRecoveredRun.dropFirst(afterRecovery.count).contains("list"), "The replacement Scheme must become the cached choice")

@@ -310,7 +310,8 @@ final class MCPClientInstaller {
     1. Call the `layerlens` MCP tool `get_context`.
     2. `selected.element` reads `ivar (Class) "text" · id=identifier`. Search `sourceRoot` for the ivar first, then the class, the identifier, `selected.owner` and `selected.vc`.
     3. Only when nothing useful is selected, call `find_nodes` with the returned `snapshotId` and a visible text, class or identifier.
-    4. Do not ask for the full view hierarchy or screenshots.
+    4. Call `get_canvas_screenshot` with the returned `snapshotId` when the user asks to see the canvas or when appearance matters (e.g. clipping, overlap, alignment). The image includes the canvas's existing selection. Keep source lookup, logs, and network diagnosis text-only when they do not need visual evidence.
+    5. Do not ask for the full view hierarchy.
 
     Runtime issues (`get_context.activity` counts this launch's logs and requests):
     - Logs: `search_logs` with a specific `query` (keywords joined by `|`, e.g. `error|fail`). Avoid reading all logs.

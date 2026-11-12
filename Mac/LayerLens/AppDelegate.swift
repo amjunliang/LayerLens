@@ -11,8 +11,11 @@ import AppKit
 /// 界面全部由网页提供, 原生部分只有承载网页的窗口、系统菜单和菜单栏图标
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let registry = TargetRegistry()
-    private lazy var server = HubServer(registry: registry)
-    private lazy var windowController = MainWindowController(url: server.baseURL)
+    private lazy var server: HubServer = HubServer(registry: registry) { [weak self] context, completion in
+        guard let self else { completion(nil); return }
+        self.windowController.captureCanvas(context, completion: completion)
+    }
+    private lazy var windowController: MainWindowController = MainWindowController(url: server.baseURL)
     private var statusItem: NSStatusItem?
     private var mcpStatusItem: NSMenuItem?
     private var terminationSource: DispatchSourceSignal?
