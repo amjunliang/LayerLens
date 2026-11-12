@@ -8,6 +8,9 @@ import Foundation
 /// 一个网页窗口上报的只读上下文。MCP 默认使用最后获得焦点的窗口。
 struct MCPWindowContext {
     let windowId: String
+    let pageGeneration: Int
+    let isNativeWindow: Bool
+    let userAgent: String
     let deviceId: String
     let bundleId: String
     let deviceName: String
@@ -27,6 +30,7 @@ struct MCPWindowContext {
     /// 只输出 Agent 定位源码需要的字段；设备 ID、坐标等不帮助搜索源码，不返回。
     func json(sourceRoot: String?) -> [String: Any] {
         var value: [String: Any] = [
+            "windowId": windowId,
             "app": appName,
             "bundleId": bundleId,
         ]
@@ -68,7 +72,7 @@ final class MCPContextStore {
     private let lock = NSLock()
     private let now: () -> TimeInterval
     private var contexts: [String: MCPWindowContext] = [:]
-    private var closedWindows: [String: TimeInterval] = [:]
+    private var closedWindows: [String: (generation: Int, closedAt: TimeInterval)] = [:]
     private var snapshots: [String: MCPContextSnapshot] = [:]
     private var currentWindowId: String?
     private var currentFocusEpoch: TimeInterval = 0
@@ -82,21 +86,30 @@ final class MCPContextStore {
     func update(_ value: [String: Any]) -> Bool {
         guard let windowId = value["windowId"] as? String, !windowId.isEmpty else { return false }
         let timestamp = now()
+        let pageGeneration = value["pageGeneration"] as? Int ?? 0
         let focusRequested = value["focusRequested"] as? Bool == true
         let focusEpoch = (value["focusEpoch"] as? NSNumber)?.doubleValue ?? 0
         lock.lock()
         defer { lock.unlock() }
-        if let closedAt = closedWindows[windowId], timestamp - closedAt < 3600 { return false }
+        if let closed = closedWindows[windowId],
+           pageGeneration <= closed.generation, timestamp - closed.closedAt < 3600 { return false }
         let previous = contexts[windowId]
         let revision = (value["revision"] as? NSNumber)?.intValue ?? 0
-        guard previous == nil || revision >= previous!.revision else { return false }
+        if let previous {
+            guard pageGeneration >= previous.pageGeneration else { return false }
+            if pageGeneration == previous.pageGeneration, revision < previous.revision { return false }
+        }
         let deviceId = value["deviceId"] as? String ?? ""
         let bundleId = value["bundleId"] as? String ?? ""
         let instanceId = value["instanceId"] as? String ?? ""
-        let sameTarget = previous?.deviceId == deviceId && previous?.bundleId == bundleId && previous?.instanceId == instanceId
+        let sameTarget = previous?.pageGeneration == pageGeneration &&
+            previous?.deviceId == deviceId && previous?.bundleId == bundleId && previous?.instanceId == instanceId
         let targetGeneration = (previous?.targetGeneration ?? 0) + (sameTarget ? 0 : 1)
         let context = MCPWindowContext(
             windowId: windowId,
+            pageGeneration: pageGeneration,
+            isNativeWindow: value["isNativeWindow"] as? Bool == true,
+            userAgent: String((value["userAgent"] as? String ?? "").prefix(1024)),
             deviceId: deviceId,
             bundleId: bundleId,
             deviceName: value["deviceName"] as? String ?? "",
@@ -111,6 +124,7 @@ final class MCPContextStore {
             updatedAt: timestamp
         )
         contexts[windowId] = context
+        closedWindows.removeValue(forKey: windowId)
         if focusRequested && focusEpoch >= currentFocusEpoch {
             currentWindowId = windowId
             currentFocusEpoch = focusEpoch
@@ -122,23 +136,46 @@ final class MCPContextStore {
         return true
     }
 
-    func remove(windowId: String) {
+    func remove(windowId: String, pageGeneration: Int = 0) {
         guard !windowId.isEmpty else { return }
         lock.lock()
+        defer { lock.unlock() }
+        if let context = contexts[windowId], pageGeneration < context.pageGeneration { return }
         let timestamp = now()
-        closedWindows = closedWindows.filter { timestamp - $0.value < 3600 }
-        closedWindows[windowId] = timestamp
+        closedWindows = closedWindows.filter { timestamp - $0.value.closedAt < 3600 }
+        if let closed = closedWindows[windowId], pageGeneration < closed.generation { return }
+        closedWindows[windowId] = (pageGeneration, timestamp)
         contexts.removeValue(forKey: windowId)
         focusOrder.removeAll { $0 == windowId }
         if currentWindowId == windowId {
             currentWindowId = focusOrder.first
         }
-        lock.unlock()
     }
 
-    func latest() -> MCPWindowContext? {
+    func latest(windowId: String? = nil) -> MCPWindowContext? {
         lock.lock()
         defer { lock.unlock() }
+        if let windowId { return contexts[windowId] }
+        return focusedContext()
+    }
+
+    func windows() -> (defaultId: String?, contexts: [MCPWindowContext]) {
+        lock.lock()
+        defer { lock.unlock() }
+        let defaultId = focusedContext()?.windowId
+        let focusRanks = Dictionary(uniqueKeysWithValues: focusOrder.enumerated().map { ($0.element, $0.offset) })
+        let ordered = contexts.values.sorted {
+            if $0.windowId == defaultId { return $1.windowId != defaultId }
+            if $1.windowId == defaultId { return false }
+            let lhsRank = focusRanks[$0.windowId] ?? Int.max
+            let rhsRank = focusRanks[$1.windowId] ?? Int.max
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return $0.updatedAt == $1.updatedAt ? $0.windowId < $1.windowId : $0.updatedAt > $1.updatedAt
+        }
+        return (defaultId, ordered)
+    }
+
+    private func focusedContext() -> MCPWindowContext? {
         if let currentWindowId, let context = contexts[currentWindowId] { return context }
         if let next = focusOrder.first(where: { contexts[$0] != nil }) { return contexts[next] }
         return contexts.values.max { $0.updatedAt < $1.updatedAt }
@@ -191,6 +228,7 @@ final class MCPContextStore {
 
     private func matchingContext(for context: MCPWindowContext) -> MCPWindowContext? {
         guard let current = contexts[context.windowId],
+              current.pageGeneration == context.pageGeneration,
               current.targetGeneration == context.targetGeneration else { return nil }
         return current
     }

@@ -10,7 +10,7 @@ assert(start >= 0 && end > start);
 let refreshes = 0;
 const context = vm.createContext({
   Date,
-  document: { visibilityState: 'visible', hasFocus: () => true },
+  document: { visibilityState: 'visible', hasFocus: () => true, documentElement: { dataset: {} } },
   window: { LAYERLENS_WINDOW_FOCUSED: true },
   state: { mode: '2d' },
   targets: { bundleId: 'app' },

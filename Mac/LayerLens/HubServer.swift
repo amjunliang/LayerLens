@@ -188,7 +188,8 @@ final class HubServer {
                   let window = head.query["window"], !window.isEmpty, window.count <= 128 else {
                 connection.respond(.error(400, "Invalid page connection")); return
             }
-            pageCapture.accept(window: window, head: head, leftover: leftover, connection: connection.detach())
+            let pageGeneration = head.query["generation"].flatMap(Int.init) ?? 0
+            pageCapture.accept(window: window, generation: pageGeneration, head: head, leftover: leftover, connection: connection.detach())
             return
         }
         if head.path == "/api/hub/target-states" {
@@ -310,6 +311,13 @@ final class HubServer {
             }
         case "/api/hub/mcp/status":
             connection.respond(.json(mcpStatus()))
+        case "/api/hub/mcp/windows":
+            let windows = mcpContexts.windows()
+            let rows: [[String: Any]] = windows.contexts.map { context in
+                ["windowId": context.windowId, "app": context.appName.isEmpty ? context.bundleId : context.appName,
+                 "device": context.deviceName, "native": context.isNativeWindow, "userAgent": context.userAgent]
+            }
+            connection.respond(.json(["defaultId": windows.defaultId ?? "", "windows": rows]))
         case "/api/hub/mcp/clients":
             mcpSetupQueue.async { [self] in
                 connection.respond(.json(mcpSetupState()))
@@ -533,7 +541,7 @@ final class HubServer {
                 connection.respond(.json(state))
             }
         case "/api/hub/mcp/context/remove":
-            mcpContexts.remove(windowId: json["windowId"] as? String ?? "")
+            mcpContexts.remove(windowId: json["windowId"] as? String ?? "", pageGeneration: json["pageGeneration"] as? Int ?? 0)
             connection.respond(.json(["ok": true]))
         case "/api/hub/command-run":
             let bundle = json["app"] as? String ?? ""
@@ -1239,40 +1247,46 @@ enum LoginItem {
 /// One short-lived screenshot request is routed to its exact page, never to the
 /// currently focused page after the request has been pinned.
 private final class MCPPageCaptureBroker {
-    private struct Pending {
+    private struct Page: Hashable {
         let window: String
+        let generation: Int
+    }
+
+    private struct Pending {
         let socket: WebSocketConnection
         let completion: (Data?) -> Void
         var data = Data()
     }
     private let queue: DispatchQueue
-    private var pages: [String: WebSocketConnection] = [:]
+    private var pages: [Page: WebSocketConnection] = [:]
     private var pending: [String: Pending] = [:]
     private let maxImageBytes = 8 * 1024 * 1024
     init(queue: DispatchQueue) { self.queue = queue }
 
-    func accept(window: String, head: HTTPRequestHead, leftover: Data, connection: NWConnection) {
+    func accept(window: String, generation: Int, head: HTTPRequestHead, leftover: Data, connection: NWConnection) {
+        let page = Page(window: window, generation: generation)
         let socket = WebSocketConnection(connection: connection, leftover: leftover)
         socket.onText = { [weak self, weak socket] text in
             guard let self, let socket else { return }
-            self.queue.async { self.receive(text, window: window, socket: socket) }
+            self.queue.async { self.receive(text, socket: socket) }
         }
         socket.onClose = { [weak self, weak socket] in
             guard let self, let socket else { return }
             self.queue.async {
-                if self.pages[window] === socket { self.pages[window] = nil }
+                if self.pages[page] === socket { self.pages[page] = nil }
                 for id in self.pending.keys.filter({ self.pending[$0]?.socket === socket }) { self.finish(id, data: nil) }
             }
         }
         guard socket.accept(head) else { connection.cancel(); return }
-        if let old = pages.updateValue(socket, forKey: window), old !== socket { old.close() }
+        if let old = pages.updateValue(socket, forKey: page), old !== socket { old.close() }
     }
 
     func capture(_ context: MCPWindowContext, completion: @escaping (Data?) -> Void) {
         queue.async { [self] in
-            guard let socket = pages[context.windowId], pending.count < 8 else { completion(nil); return }
+            let page = Page(window: context.windowId, generation: context.pageGeneration)
+            guard let socket = pages[page], pending.count < 8 else { completion(nil); return }
             let id = UUID().uuidString
-            pending[id] = Pending(window: context.windowId, socket: socket, completion: completion)
+            pending[id] = Pending(socket: socket, completion: completion)
             let request: [String: Any] = ["type": "capture", "id": id, "window": context.windowId,
                 "device": context.deviceId, "app": context.bundleId, "instance": context.instanceId,
                 "mode": context.mode, "annotationRevision": context.annotationRevision,
@@ -1287,9 +1301,9 @@ private final class MCPPageCaptureBroker {
         }
     }
 
-    private func receive(_ text: String, window: String, socket: WebSocketConnection) {
+    private func receive(_ text: String, socket: WebSocketConnection) {
         guard let payload = text.data(using: .utf8), let message = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
-              let id = message["id"] as? String, var request = pending[id], request.window == window, request.socket === socket else { return }
+              let id = message["id"] as? String, var request = pending[id], request.socket === socket else { return }
         if message["error"] != nil { finish(id, data: nil); return }
         if let chunk = message["chunk"] as? String {
             guard let bytes = Data(base64Encoded: chunk), request.data.count + bytes.count <= maxImageBytes else { finish(id, data: nil); return }

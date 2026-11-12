@@ -15,6 +15,7 @@ enum MainMenu {
 
         let app = NSMenu()
         app.addItem(withTitle: L("关于 LayerLens", "About LayerLens"), action: #selector(AppDelegate.showAbout), keyEquivalent: "").target = target
+        app.addItem(withTitle: L("设置…", "Settings…"), action: #selector(AppDelegate.showSettings), keyEquivalent: ",").target = target
         app.addItem(withTitle: L("App 集成…", "App Integration…"), action: #selector(AppDelegate.showIntegration), keyEquivalent: "").target = target
         app.addItem(withTitle: L("缓存管理…", "Manage Cache…"), action: #selector(AppDelegate.showCache), keyEquivalent: "").target = target
         app.addItem(withTitle: L("MCP 设置…", "MCP Setup…"), action: #selector(AppDelegate.showMCPSetup), keyEquivalent: "").target = target

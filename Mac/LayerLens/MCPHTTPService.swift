@@ -132,11 +132,19 @@ final class MCPHTTPService {
     private func callTool(_ name: String, arguments: [String: Any], completion: @escaping ([String: Any]) -> Void) {
         switch name {
         case "get_context":
-            if let unknown = arguments.keys.sorted().first {
-                completion(Self.toolError("invalid_arguments: get_context takes no arguments (got \(unknown))."))
+            let windowId: String?
+            do {
+                let input = try MCPRecords.Arguments(arguments, known: ["windowId"])
+                windowId = try arguments["windowId"].map { _ in try input.string("windowId", required: true) }
+            } catch {
+                completion(Self.toolError(Self.message(error)))
                 return
             }
-            guard let context = store.latest(), context.hasTarget else {
+            guard let context = store.latest(windowId: windowId) else {
+                completion(Self.toolError(windowId == nil ? Self.noTarget : Self.windowNotFound))
+                return
+            }
+            guard context.hasTarget else {
                 completion(Self.toolError(Self.noTarget))
                 return
             }
@@ -321,6 +329,7 @@ final class MCPHTTPService {
     }
 
     private static let staleSnapshot = "snapshot_stale: window or App changed, call get_context again."
+    private static let windowNotFound = "window_not_found: the specified LayerLens page is unavailable; use its current windowId or retry after it loads."
     private static let noTarget = "no_app_selected: select an integrated App in a LayerLens window, then call get_context again."
     private static let captureOff = "network_capture_off: no requests recorded; ask the user to turn on capture in the LayerLens Network panel and reproduce."
     /// inBody 只读取最新这么多条请求的响应内容。
@@ -370,7 +379,7 @@ final class MCPHTTPService {
     // MARK: - Definitions
 
     static let instructions = """
-    For questions about the UI currently shown in LayerLens, call get_context first. \
+    For questions about the UI currently shown in LayerLens, call get_context first. If the conversation has a LayerLens browser page, read document.documentElement.dataset.layerlensWindowId and pass it as windowId. Reuse that windowId for the same page on subsequent get_context calls. With no known windowId, get_context uses the last-focused LayerLens window. \
     selected.element reads "ivar (Class) \"text\" · id=identifier"; search sourceRoot for those parts, selected.owner and selected.vc to locate code. \
     Use visible selected or annotated hints to search sourceRoot; if hints are insufficient, capture the pinned canvas. \
     For runtime behavior, get_context.activity counts this launch's logs and requests: use search_logs with a query, \
@@ -386,11 +395,12 @@ final class MCPHTTPService {
         [
             "name": "get_context",
             "title": "Get LayerLens context",
-            "description": "Return the App, source root, selected node and log/request counts of the last-focused LayerLens window. "
+            "description": "Return the App, source root, selected node and log/request counts for windowId, or for the last-focused LayerLens window when omitted. "
                 + "Pins a snapshotId for the other tools.",
             "inputSchema": [
                 "type": "object",
-                "properties": [:],
+                "properties": ["windowId": ["type": "string", "minLength": 1,
+                                            "description": "LayerLens page ID from data-layerlens-window-id on the page's html element or a previous get_context result."]],
                 "additionalProperties": false,
             ],
             "annotations": readOnly,

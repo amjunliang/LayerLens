@@ -58,7 +58,7 @@ url = "http://127.0.0.1:9523/mcp"
 
 | 工具 | 用途 |
 | --- | --- |
-| `get_context` | 当前窗口的 App、源码目录、选中节点，以及日志和请求数量 |
+| `get_context` | 指定或最近获得焦点的窗口的 App、源码目录、选中节点，以及日志和请求数量 |
 | `get_canvas_screenshot` | 固定的 LayerLens 页面画布，包含选中态和标注 |
 | `search_logs` | 按关键词搜索本次启动的日志 |
 | `list_requests` | 本次启动的请求列表，每个请求一行 |
@@ -68,13 +68,14 @@ url = "http://127.0.0.1:9523/mcp"
 
 ### `get_context`
 
-无参数。返回最后获得焦点的 LayerLens 窗口：
+可选参数 `windowId`。内置浏览器中的 Agent 可以从 LayerLens 页面的 `document.documentElement.dataset.layerlensWindowId` 读取它，然后调用 `get_context({"windowId":"WINDOW_ID"})`。同一标签页刷新后可以继续使用这个 ID，并获取新快照。不传 `windowId` 时返回最后获得焦点的 LayerLens 窗口。
 
 ```json
 {
   "app": "LayerLens Example",
   "bundleId": "com.layerlens.example",
   "sourceRoot": "/Users/me/Workspace/LayerLens",
+  "windowId": "WINDOW_ID",
   "snapshotId": "SNAPSHOT_ID",
   "selected": {
     "element": "UIListContentView._textLabel (UILabel) \"Row 3\"",
@@ -88,6 +89,7 @@ url = "http://127.0.0.1:9523/mcp"
 | --- | --- |
 | `app` / `bundleId` | 当前窗口选中的 App |
 | `sourceRoot` | App 源码所在的 Git 仓库根目录；不在仓库中时为源文件所在目录 |
+| `windowId` | 本次使用的 LayerLens 页面 ID，可用于后续的 `get_context` |
 | `snapshotId` | 传给截图、日志与抓包工具，固定本次窗口和 App |
 | `mode` / `focus` | 画布模式和当前关注对象；标注优先于旧选中项 |
 | `selected.element` | `ivar (类名) "文字" · id=accessibilityIdentifier`，各部分没有时省略。优先使用声明在业务类中的 ivar，没有时退回系统类的；文字超过 40 个字符时截断，前缀仍可用于搜索 |
@@ -96,6 +98,7 @@ url = "http://127.0.0.1:9523/mcp"
 | `activity` | 本次启动的日志条数 `logs`、请求数 `requests`、失败请求数 `failedRequests`；为 0 时省略。没开抓包时带 `networkCapture: "off"` |
 
 - 没有选中节点时不返回 `selected`。
+- 指定页面关闭或尚未加载时返回 `window_not_found`。
 - 窗口里没有选中 App 时返回错误 `no_app_selected`，不生成快照。
 
 ### `get_canvas_screenshot`
@@ -185,7 +188,7 @@ url = "http://127.0.0.1:9523/mcp"
 ## 并发与失效
 
 - 每个 Agent 的 `get_context` 会固定一个窗口快照，后续查询不跟随其他窗口的焦点变化。
-- 窗口关闭、切换 App 或 App 重启后返回 `snapshot_stale`，重新调用 `get_context` 即可。
+- 页面刷新、窗口关闭、切换 App 或 App 重启后，旧快照失效。页面仍在时，用同一个 `windowId` 重新调用 `get_context`。
 - 快照 1 小时后过期，返回 `snapshot_not_found`。
 - 日志和抓包工具只读取本次启动的数据；App 重启后快照失效，重新调用 `get_context`。
 - 所有工具只读，不注入触摸，也不控制设备。

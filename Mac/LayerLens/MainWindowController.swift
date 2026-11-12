@@ -95,13 +95,14 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
             completion(nil)
             return
         }
-        let arguments = [
+        let arguments: [String: Any] = [
             "windowId": context.windowId,
+            "pageGeneration": context.pageGeneration,
             "deviceId": context.deviceId,
             "bundleId": context.bundleId,
             "instanceId": context.instanceId,
         ]
-        let script = "return mcpCanvasRect(windowId, deviceId, bundleId, instanceId);"
+        let script = "return mcpCanvasRect(windowId, deviceId, bundleId, instanceId, pageGeneration);"
         webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: .page) { [weak self] result in
             guard let self, let bounds = (try? result.get()) as? [String: Double],
                   let x = bounds["x"], let y = bounds["y"],
@@ -191,6 +192,18 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
     }
 
     private var pendingPanel: String?
+
+    func openPanelInKeyWindow(_ name: String) -> Bool {
+        guard let activeWindow = NSApp.keyWindow else { return false }
+        if activeWindow === window {
+            openPanel(name)
+            return true
+        }
+        guard let child = childWindows.first(where: { $0.window === activeWindow }) else { return false }
+        child.webView.callAsyncJavaScript("window.layerlensOpenPanel?.(name)", arguments: ["name": name],
+                                         in: nil, in: .page, completionHandler: nil)
+        return true
+    }
     /// 网页用 window.open 打开的窗口, 关闭时移除
     private var childWindows: [ChildWebWindow] = []
 

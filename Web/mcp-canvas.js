@@ -171,7 +171,8 @@ const mcpCanvas = {
   connect() {
     clearTimeout(this.retry);
     if (mcpContext.closed) return;
-    const socket = new WebSocket(`ws://${location.host}/api/hub/mcp/page?window=${encodeURIComponent(mcpContext.windowId)}`);
+    const params = new URLSearchParams({ window: mcpContext.windowId, generation: mcpContext.pageGeneration });
+    const socket = new WebSocket(`ws://${location.host}/api/hub/mcp/page?${params}`);
     this.socket = socket;
     socket.onmessage = e => {
       let request;

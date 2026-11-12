@@ -482,13 +482,31 @@ function pageHasFocus() {
     (typeof window.LAYERLENS_WINDOW_FOCUSED === 'boolean' ? window.LAYERLENS_WINDOW_FOCUSED : document.hasFocus());
 }
 
-// MCP 使用最后获得焦点的窗口。窗口 ID 每次整页加载重新生成，刷新后旧快照自然失效。
+// windowId 在同一标签页刷新时保留。pageGeneration 区分刷新前后的页面实例。
 function newMCPWindowId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function mcpPageIdentity(restoring) {
+  let windowId = restoring?.windowId || newMCPWindowId();
+  let pageGeneration = (restoring?.pageGeneration || 0) + 1;
+  try {
+    const key = 'layerlens.mcp.page';
+    const previous = JSON.parse(sessionStorage.getItem(key));
+    const reloading = performance.getEntriesByType('navigation')[0]?.type === 'reload';
+    // 新打开的窗口可能继承 opener 的 sessionStorage。
+    if (previous?.windowId && Number.isSafeInteger(previous.pageGeneration) &&
+        (restoring ? previous.windowId === windowId : reloading)) {
+      windowId = previous.windowId;
+      pageGeneration = Math.max(pageGeneration, previous.pageGeneration + 1);
+    }
+    sessionStorage.setItem(key, JSON.stringify({ windowId, pageGeneration }));
+  } catch (_) { /* the page can still be addressed until it reloads */ }
+  return { windowId, pageGeneration };
+}
+
 const mcpContext = {
-  windowId: newMCPWindowId(),
+  ...mcpPageIdentity(),
   closed: false,
   focusEpoch: 0,
   focusPending: false,
@@ -496,8 +514,10 @@ const mcpContext = {
   timer: 0,
 };
 
-function mcpCanvasRect(windowId, deviceId, bundleId, instanceId) {
-  if (mcpContext.closed || mcpContext.windowId !== windowId ||
+document.documentElement.dataset.layerlensWindowId = mcpContext.windowId;
+
+function mcpCanvasRect(windowId, deviceId, bundleId, instanceId, pageGeneration) {
+  if (mcpContext.closed || mcpContext.windowId !== windowId || mcpContext.pageGeneration !== pageGeneration ||
       (targets.deviceId || '') !== deviceId || (targets.bundleId || '') !== bundleId ||
       (appState.instanceId || currentApp()?.instanceId || '') !== instanceId) return null;
   const { x, y, width, height } = $(state.mode === 'live' ? 'liveWrap' : 'stageWrap').getBoundingClientRect();
@@ -543,6 +563,9 @@ function publishMCPContext() {
   const device = currentDevice();
   const payload = {
     windowId: mcpContext.windowId,
+    pageGeneration: mcpContext.pageGeneration,
+    isNativeWindow: typeof window !== 'undefined' && window.LAYERLENS_APP === true,
+    userAgent: navigator.userAgent || '',
     revision: ++mcpContext.revision,
     focusRequested: mcpContext.focusPending,
     focusEpoch: mcpContext.focusEpoch,
@@ -583,7 +606,7 @@ function removeMCPContext() {
   clearTimeout(mcpContext.timer);
   mcpContext.timer = 0;
   mcpContext.focusPending = false;
-  const body = JSON.stringify({ windowId: mcpContext.windowId });
+  const body = JSON.stringify({ windowId: mcpContext.windowId, pageGeneration: mcpContext.pageGeneration });
   try {
     if (navigator.sendBeacon('/api/hub/mcp/context/remove', new Blob([body], { type: 'application/json' }))) return;
   } catch (e) { /* use keepalive below */ }
@@ -620,7 +643,7 @@ function setupPageActivity() {
   window.addEventListener('pagehide', () => { removeMCPContext(); cancelSwitch(); liveStop(); });
   window.addEventListener('pageshow', (event) => {
     if (!event.persisted || !mcpContext.closed) return;
-    mcpContext.windowId = newMCPWindowId();
+    Object.assign(mcpContext, mcpPageIdentity(mcpContext));
     mcpContext.closed = false;
     mcpContext.focusEpoch = 0;
     mcpContext.revision = 0;
@@ -3403,8 +3426,13 @@ function renderTargetMenu() {
   const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
   footer.dataset.panel = 'integration';
   children.push(el('div', 'menu-sep'), footer);
+  const windows = el('button', 'menu-row menu-action target-footer', t('窗口信息…'));
+  windows.dataset.panel = 'windows';
+  windows.append(el('span', 'target-footer-shortcut', '⌥⇧,'));
+  children.push(windows);
   // 设置使用频率低, 工具栏不放按钮, 从这里打开
   const options = el('button', 'menu-row menu-action target-footer', t('设置…'));
+  options.append(el('span', 'target-footer-shortcut', '⌥,'));
   options.addEventListener('click', () => openPanel('options'));
   children.push(options);
   menu.replaceChildren(...children);
@@ -5914,6 +5942,8 @@ function healPanel() {
 // 快捷键: [分组标题, 只在有实时画面时显示, [[按键...], 说明]...]
 const SHORTCUT_GROUPS = [
   ['通用', false, [
+    [['⌥', ','], '设置'],
+    [['⌥', '⇧', ','], '窗口信息'],
     [['R'], '刷新'],
     [['⌘', 'C'], '复制选中节点路径'],
     [['右键'], '复制菜单'],
@@ -5993,8 +6023,67 @@ function shortcutsPanel() {
   return [grid];
 }
 
+function windowBrowserLabel(row) {
+  if (row.native) return t('原生窗口');
+  const ua = row.userAgent;
+  const clients = [
+    [/\bCodex\//i, 'Codex'], [/\bChatGPT\//i, 'ChatGPT'], [/\bClaude\//i, 'Claude'],
+    [/\bElectron\//i, 'Electron'], [/\bEdg(?:A|iOS)?\//i, 'Edge'], [/\bOPR\//i, 'Opera'],
+    [/\b(?:Firefox|FxiOS)\//i, 'Firefox'], [/\b(?:Chrome|CriOS)\//i, 'Chrome'],
+    [/\bVersion\/.*\bSafari\//i, 'Safari'], [/\bAppleWebKit\//i, 'WebKit'],
+  ];
+  return clients.find(([pattern]) => pattern.test(ua))?.[1] || t('浏览器');
+}
+
+function windowsPanel() {
+  const toolbar = el('div', 'window-info-toolbar');
+  const refresh = el('button', null, t('刷新'));
+  toolbar.append(el('span', null, t('按最近获得焦点排序')), refresh);
+  const list = el('div', 'window-info-list');
+  const status = el('div', 'window-info-status');
+  status.setAttribute('role', 'status');
+
+  async function load() {
+    refresh.disabled = true;
+    status.textContent = t('加载中…');
+    try {
+      const response = await fetch('/api/hub/mcp/windows', { cache: 'no-store' });
+      if (!response.ok) throw new Error(response.status);
+      const data = await response.json();
+      const rows = data.windows.map(row => {
+        const current = row.windowId === mcpContext.windowId;
+        const card = el('article', current ? 'window-info-row current' : 'window-info-row');
+        const heading = el('div', 'window-info-heading');
+        heading.append(el('strong', null, row.app || t('未选择 App')));
+        if (current) heading.append(el('span', 'window-info-badge', t('当前窗口')));
+        if (row.windowId === data.defaultId) heading.append(el('span', 'window-info-badge', t('MCP 默认')));
+        const meta = el('div', 'window-info-meta', [row.device, windowBrowserLabel(row)].filter(Boolean).join(' · '));
+        const identity = el('div', 'window-info-identity');
+        const id = el('code', null, row.windowId);
+        const copy = el('button', null, t('复制 ID'));
+        copy.dataset.copy = row.windowId;
+        identity.append(id, copy);
+        const ua = el('details', 'window-info-ua');
+        ua.append(el('summary', null, t('浏览器 UA')), el('div', null, row.userAgent || t('未上报')));
+        card.append(heading, meta, identity, ua);
+        return card;
+      });
+      list.replaceChildren(...rows);
+      status.textContent = rows.length ? '' : t('暂无窗口');
+    } catch (_) {
+      status.textContent = t('无法加载窗口列表');
+    } finally {
+      refresh.disabled = false;
+    }
+  }
+
+  refresh.addEventListener('click', load);
+  load();
+  return [toolbar, status, list];
+}
+
 function openPanel(name) {
-  const panels = { options: [t('设置'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel], cache: [t('缓存管理'), cachePanel], mcp: [t('MCP 设置'), mcpSetupPanel] };
+  const panels = { options: [t('设置'), () => [$('optionsMenu')]], about: [t('关于 LayerLens'), aboutPanel], integration: [t('App 集成'), integrationPanel], shortcuts: [t('快捷键'), shortcutsPanel], heal: [t('修复模拟器触摸'), healPanel], deviceLogs: [t('设备日志文件'), deviceLogsPanel], sandbox: [t('沙盒文件'), sandboxPanel], cache: [t('缓存管理'), cachePanel], mcp: [t('MCP 设置'), mcpSetupPanel], windows: [t('窗口信息'), windowsPanel] };
   const panel = panels[name];
   if (!panel) return;
   state.panel = name;
@@ -6022,6 +6111,14 @@ function closePanel() {
 
 function setupPanels() {
   window.layerlensOpenPanel = openPanel;
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.isComposing || !e.altKey || e.metaKey || e.ctrlKey || e.code !== 'Comma') return;
+    // Option + punctuation can enter text on some keyboard layouts.
+    if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.repeat) openPanel(e.shiftKey ? 'windows' : 'options');
+  }, true);
   document.addEventListener('click', (e) => {
     const trigger = e.target.closest('[data-panel]');
     if (trigger) openPanel(trigger.dataset.panel);

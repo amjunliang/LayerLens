@@ -130,6 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowController.openPanel("mcp")
     }
 
+    @objc func showSettings() {
+        if windowController.openPanelInKeyWindow("options") { return }
+        openWindow()
+        windowController.openPanel("options")
+    }
+
     @objc func copyMCPURL() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()

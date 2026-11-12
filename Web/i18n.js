@@ -19,6 +19,18 @@ const LANG = (() => {
 })();
 
 const EN = {
+  '窗口信息…': 'Window Info…',
+  '窗口信息': 'Window Info',
+  '按最近获得焦点排序': 'Most recently focused first',
+  '当前窗口': 'Current window',
+  'MCP 默认': 'MCP default',
+  '复制 ID': 'Copy ID',
+  '浏览器 UA': 'Browser user agent',
+  '未上报': 'Unavailable',
+  '暂无窗口': 'No windows',
+  '无法加载窗口列表': 'Could not load windows',
+  '原生窗口': 'Native window',
+  '浏览器': 'Browser',
   '运行方式': 'Run Mode',
   'Xcode 版本': 'Xcode Version',
   '系统默认': 'System Default',

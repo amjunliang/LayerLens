@@ -32,6 +32,11 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
             "selected": ["element": "BView"],
         ]), "Second window rejected")
         require(store.latest()?.windowId == "b", "Latest focused window was not used")
+        let windows = store.windows()
+        require(windows.defaultId == "b" && windows.contexts.map(\.windowId) == ["b", "a"],
+                "Window list must include background pages and show the MCP default first")
+        require(store.latest(windowId: "a")?.bundleId == "app.a", "Explicit window lookup followed focus")
+        require(store.latest(windowId: "missing") == nil, "Unknown window fell back to focus")
         now += 1
         require(store.update([
             "windowId": "a",
@@ -80,8 +85,9 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
         require(latest.hasTarget, "A window with device and App must count as a target")
         let snapshot = store.snapshot(context: latest, sourceRoot: "/repo/b")!
         require(snapshot.json()["sourceRoot"] as? String == "/repo/b", "Source root missing")
-        require(Set(snapshot.json().keys) == ["app", "bundleId", "selected", "focus", "snapshotId", "sourceRoot"],
-                "get_context must only return fields that help locate source")
+        require(snapshot.json()["windowId"] as? String == "b", "Snapshot did not expose its window")
+        require(Set(snapshot.json().keys) == ["app", "bundleId", "selected", "focus", "snapshotId", "sourceRoot", "windowId"],
+                "get_context returned extra fields")
         require(store.update(["windowId": "b", "deviceId": "sim", "bundleId": "app.b", "instanceId": "launch-b",
                               "revision": 3, "selected": ["element": "BView3", "vc": "BController",
                                                           "rect": [0, 0, 1, 1], "classChain": ["BView"]]]),
@@ -125,6 +131,22 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
         require(!store.update(["windowId": "b", "revision": 6, "focusRequested": true, "focusEpoch": 99]),
                 "A delayed update resurrected a closed window")
         require(store.latest()?.windowId == "a", "Closing a window did not restore the previous focus")
+        require(store.windows().contexts.map(\.windowId) == ["a"], "Closed window remained in the menu list")
+
+        for removeFirst in [true, false] {
+            let reloading = MCPContextStore(now: { now })
+            let before: [String: Any] = ["windowId": "tab", "pageGeneration": 1, "revision": 10,
+                "deviceId": "sim", "bundleId": "app", "instanceId": "launch"]
+            require(reloading.update(before), "Initial page rejected")
+            let old = reloading.snapshot(context: reloading.latest()!, sourceRoot: nil)!
+            if removeFirst { reloading.remove(windowId: "tab", pageGeneration: 1) }
+            let after = before.merging(["pageGeneration": 2, "revision": 1]) { _, value in value }
+            require(reloading.update(after), "Reload could not reuse the window ID")
+            if !removeFirst { reloading.remove(windowId: "tab", pageGeneration: 1) }
+            require(!reloading.update(before), "An old page update was accepted after reload")
+            require(reloading.latest(windowId: "tab")?.pageGeneration == 2, "Old page removal displaced the reloaded page")
+            require(!reloading.isCurrent(old), "Old snapshot survived a reload")
+        }
 
         let annotated = MCPContextStore(now: { now })
         require(annotated.update(["windowId": "browser", "deviceId": "sim", "bundleId": "app", "instanceId": "launch",

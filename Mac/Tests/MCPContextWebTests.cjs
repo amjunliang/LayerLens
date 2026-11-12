@@ -10,6 +10,8 @@ assert(start >= 0 && end > start);
 const requests = [];
 const beacons = [];
 const timers = [];
+const storage = new Map();
+let navigationType = 'navigate';
 let now = 1000;
 const owner = { cls: 'DetailView', parent: { cls: 'DetailController', vcClass: 'DetailController', parent: null } };
 const selected = {
@@ -48,6 +50,9 @@ const context = vm.createContext({
   Date: { now: () => now },
   Math,
   globalThis: {},
+  document: { documentElement: { dataset: {} } },
+  performance: { getEntriesByType: () => [{ type: navigationType }] },
+  sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
   setTimeout: fn => { timers.push(fn); return timers.length; },
   clearTimeout() {},
 });
@@ -58,12 +63,21 @@ assert.equal(requests.length, 1);
 assert.equal(requests[0].focusRequested, true);
 assert.equal(requests[0].focusEpoch, 1000);
 assert.equal(requests[0].appName, 'DreamNovel');
-const canvasTarget = [requests[0].windowId, 'sim', 'com.reader.readit', 'launch-1'];
+const { windowId, pageGeneration } = requests[0];
+assert.equal(context.document.documentElement.dataset.layerlensWindowId, windowId);
+navigationType = 'reload';
+const refreshed = context.mcpPageIdentity();
+assert.equal(refreshed.windowId, windowId);
+assert.equal(refreshed.pageGeneration, pageGeneration + 1);
+navigationType = 'navigate';
+assert.notEqual(context.mcpPageIdentity().windowId, windowId, 'A new page must ignore inherited storage');
+const canvasTarget = [windowId, 'sim', 'com.reader.readit', 'launch-1', pageGeneration];
 assert.equal(context.mcpCanvasRect(...canvasTarget).x, 20);
 context.state.mode = 'live';
 assert.equal(context.mcpCanvasRect(...canvasTarget).x, 40);
 assert.equal(context.mcpCanvasRect('another-window', ...canvasTarget.slice(1)), null);
-assert.equal(context.mcpCanvasRect(...canvasTarget.slice(0, 3), 'another-launch'), null);
+assert.equal(context.mcpCanvasRect(...canvasTarget.slice(0, 3), 'another-launch', pageGeneration), null);
+assert.equal(context.mcpCanvasRect(...canvasTarget.slice(0, 4), refreshed.pageGeneration), null);
 assert.match(requests[0].selected.element, /DetailController\.readButton/);
 assert.match(requests[0].selected.element, /id=book_detail_read_now/);
 assert.equal(requests[0].selected.owner, 'DetailView');

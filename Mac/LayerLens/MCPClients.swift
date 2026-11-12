@@ -307,7 +307,7 @@ final class MCPClientInstaller {
 
     # LayerLens
 
-    1. Call the `layerlens` MCP tool `get_context`.
+    1. Call the `layerlens` MCP tool `get_context`. If you can read this conversation's LayerLens browser page, use its `document.documentElement.dataset.layerlensWindowId` as `windowId`. Reuse that ID for the same page on later calls. If no page ID is known, omit it to use the last-focused LayerLens window.
     2. When `focus.type` is `element`, use `selected.element`, `selected.owner`, `selected.vc`, and `selected.hints` to search `sourceRoot`. System SwiftUI containers are weak clues; prefer visible text or business classes.
     3. When `focus.type` is `annotation`, use `focus.hints` only as candidates. If they are absent or ambiguous, call `get_canvas_screenshot` with the returned `snapshotId`; the user's marks identify the intended region.
     4. If no target is selected or marked and the user refers to visible UI without clear text, capture the canvas and search for distinctive visible text. Screenshots are also appropriate for visual questions. Do not infer that the canvas and hierarchy are the same frame.
@@ -322,10 +322,11 @@ final class MCPClientInstaller {
 
     Errors:
     - `no_app_selected`: ask the user to select the App in LayerLens.
-    - `snapshot_stale` or `snapshot_not_found`: call `get_context` again.
+    - `snapshot_stale` or `snapshot_not_found`: call `get_context` again with the same `windowId` if known.
+    - `window_not_found`: retry after the page loads, or read the ID from the intended page again.
     - Connection refused: ask the user to open LayerLens.
 
-    If the `layerlens` MCP tools are missing from this session (LayerLens was started later), call the same endpoint directly; it needs no initialize step:
+    If the `layerlens` MCP tools are missing from this session (LayerLens was started later), call the same endpoint directly. Include `windowId` in `arguments` when known. No initialize step is needed:
 
     ```sh
     curl -s -X POST http://127.0.0.1:9523/mcp -H 'Content-Type: application/json' \\
