@@ -786,11 +786,14 @@ const EN = {
   '未检测到命令行工具': 'Command-line tool not found',
   '安装 Claude Code 后重新打开此面板; 桌面版的 Code 标签页与终端共用配置': 'Install Claude Code, then reopen this panel. The desktop Code tab shares the terminal configuration.',
   '安装 Codex CLI 或 ChatGPT 桌面版后重新打开此面板': 'Install the Codex CLI or the ChatGPT desktop app, then reopen this panel.',
+  '安装 Gemini CLI 后重新打开此面板': 'Install the Gemini CLI, then reopen this panel.',
+  '安装 Antigravity 后重新打开此面板; 桌面版、IDE 与 agy 命令行共用 ~/.gemini/config': 'Install Antigravity, then reopen this panel. The desktop app, IDE and agy CLI share ~/.gemini/config.',
+  '未检测到 Antigravity': 'Antigravity not found',
   '当前配置: {0}': 'Configured: {0}',
   '一键安装': 'Install All',
   '登录时启动 LayerLens': 'Open LayerLens at Login',
   '需要在「系统设置 > 通用 > 登录项」中允许': 'Allow it in System Settings > General > Login Items.',
-  '安装后新开一个 Agent 会话生效。LayerLens 需要在会话开始前运行; 会话中 LayerLens 重启后, Codex 会自动恢复, Claude Code 可用 /mcp 重连。': 'Takes effect in new agent sessions. LayerLens must be running when a session starts; after LayerLens restarts mid-session, Codex recovers automatically and Claude Code can reconnect with /mcp.',
+  '安装后新开一个 Agent 会话生效。LayerLens 需要在会话开始前运行; 会话中 LayerLens 重启后, Codex 会自动恢复, Claude Code 可用 /mcp 重连, Gemini CLI 可用 /mcp refresh 重连。': 'Takes effect in new agent sessions. LayerLens must be running when a session starts; after LayerLens restarts mid-session, Codex recovers automatically, Claude Code can reconnect with /mcp, and the Gemini CLI with /mcp refresh.',
   '可一键接入 {0}, 让 Agent 读取当前选中的元素': 'Connect {0} in one click so agents can read the selected element',
 };
 

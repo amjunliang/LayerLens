@@ -816,24 +816,27 @@ final class HubServer {
             terminal.accept(id: id, head: head, leftover: body, connection: connection)
         case ("GET", "info", 1):
             // 空状态展示将要打开的位置: 项目名、路径, 是 git 仓库时附带当前分支
-            let sourceFile = registry.sourceFile(deviceId: head.query["device"] ?? "", bundleId: head.query["app"] ?? "")
+            let deviceId = head.query["device"] ?? ""
+            let bundleId = head.query["app"] ?? ""
+            let sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
             workQueue.async { [self] in
-                guard let root = terminalRoot(sourceFile: sourceFile) else {
+                guard let root = terminalRoot(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) else {
                     connection.respond(.json(["error": "noSource", "reason": "noSource"], status: 404))
                     return
                 }
                 var info: [String: Any] = ["root": root, "name": (root as NSString).lastPathComponent, "home": NSHomeDirectory()]
-                if git.repository(sourceFile: sourceFile) != nil {
+                if git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) != nil {
                     let branch = GitController.run(root, ["rev-parse", "--abbrev-ref", "HEAD"], timeout: 5, readOnly: true)
                     if branch.ok { info["branch"] = branch.text.trimmingCharacters(in: .whitespacesAndNewlines) }
                 }
                 connection.respond(.json(info))
             }
         case ("POST", "create", 1):
+            let deviceId = json["device"] as? String ?? ""
             let bundleId = json["app"] as? String ?? ""
-            let sourceFile = registry.sourceFile(deviceId: json["device"] as? String ?? "", bundleId: bundleId)
+            let sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
             workQueue.async { [self] in
-                guard let root = terminalRoot(sourceFile: sourceFile) else {
+                guard let root = terminalRoot(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) else {
                     connection.respond(.json(["error": "noSource", "reason": "noSource"], status: 404))
                     return
                 }
@@ -856,9 +859,9 @@ final class HubServer {
     }
 
     /// 终端的工作目录: App 源码所在仓库的根目录, 不在仓库中时为源文件所在目录
-    private func terminalRoot(sourceFile: String) -> String? {
-        if let root = git.repository(sourceFile: sourceFile) { return root }
-        guard let directory = XcodeSourcePath.sourceDirectory(for: sourceFile),
+    private func terminalRoot(deviceId: String, bundleId: String, sourceFile: String) -> String? {
+        if let root = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) { return root }
+        guard let directory = XcodeSourcePath.sourceDirectory(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile),
               FileManager.default.fileExists(atPath: directory) else { return nil }
         return directory
     }
@@ -867,12 +870,13 @@ final class HubServer {
     private func handleGit(_ head: HTTPRequestHead, body: Data, connection: HubConnection) {
         let action = String(head.path.dropFirst("/api/hub/git/".count))
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        let deviceId = head.query["device"] ?? json["device"] as? String ?? ""
         let bundleId = head.query["app"] ?? json["app"] as? String ?? ""
-        let sourceFile = registry.sourceFile(deviceId: head.query["device"] ?? json["device"] as? String ?? "", bundleId: bundleId)
+        let sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
         // 事件流先在本队列分离连接, 解析仓库较慢, 放到工作队列
         let stream = head.method == "GET" && action == "events" ? connection.detach() : nil
         workQueue.async { [self] in
-            guard let root = git.repository(sourceFile: sourceFile) else {
+            guard let root = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) else {
                 let reason = sourceFile.isEmpty ? "noSource" : "notRepo"
                 if let stream {
                     // 返回错误码让浏览器停止重连, 由网页按 repo 接口的结果提示

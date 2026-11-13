@@ -1,9 +1,16 @@
 'use strict';
 
-// MCP 设置: 检测 Claude Code 和 Codex, 一键安装或移除 LayerLens 的 MCP 与 Skill, 以及登录时启动.
+// MCP 设置: 检测 Claude Code、Codex、Gemini CLI 和 Antigravity, 一键安装或移除 LayerLens 的 MCP 与 Skill, 以及登录时启动.
 // 命令由 Mac App 执行(/api/hub/mcp/clients*), 面板只展示状态
 let mcpSetupView = null;
 const MCP_HINT_KEY = 'layerlens_mcp_hint_shown';
+
+const MCP_MISSING_TEXT = {
+  claude: '安装 Claude Code 后重新打开此面板; 桌面版的 Code 标签页与终端共用配置',
+  codex: '安装 Codex CLI 或 ChatGPT 桌面版后重新打开此面板',
+  gemini: '安装 Gemini CLI 后重新打开此面板',
+  antigravity: '安装 Antigravity 后重新打开此面板; 桌面版、IDE 与 agy 命令行共用 ~/.gemini/config',
+};
 
 const MCP_STATE_TEXT = {
   installed: '已安装',
@@ -79,15 +86,13 @@ function mcpClientCard(client) {
   const card = el('div', 'cache-card mcp-client');
   const head = el('div', 'mcp-client-head');
   head.appendChild(el('span', 'cache-app', client.name));
-  head.appendChild(el('span', 'cache-bundle', client.found ? client.path : t('未检测到命令行工具')));
+  head.appendChild(el('span', 'cache-bundle', client.found ? client.path : t(client.id === 'antigravity' ? '未检测到 Antigravity' : '未检测到命令行工具')));
   card.appendChild(head);
   if (client.found) {
     card.appendChild(mcpPartRow(client, 'mcp', client.mcp));
     if (client.mcp === 'different' && client.mcpURL) card.appendChild(el('div', 'mcp-detail', t('当前配置: {0}', client.mcpURL)));
   } else {
-    card.appendChild(el('div', 'mcp-detail', client.id === 'claude'
-      ? t('安装 Claude Code 后重新打开此面板; 桌面版的 Code 标签页与终端共用配置')
-      : t('安装 Codex CLI 或 ChatGPT 桌面版后重新打开此面板')));
+    card.appendChild(el('div', 'mcp-detail', t(MCP_MISSING_TEXT[client.id] || '未检测到命令行工具')));
   }
   card.appendChild(mcpPartRow(client, 'skill', client.skill));
   if (client.error) card.appendChild(el('div', 'mcp-detail mcp-error', client.error));
@@ -124,7 +129,7 @@ function mcpSetupRender() {
   nodes.push(login);
   if (data.loginItem === 'requiresApproval') nodes.push(el('div', 'mcp-detail', t('需要在「系统设置 > 通用 > 登录项」中允许')));
 
-  nodes.push(el('p', 'mcp-note', t('安装后新开一个 Agent 会话生效。LayerLens 需要在会话开始前运行; 会话中 LayerLens 重启后, Codex 会自动恢复, Claude Code 可用 /mcp 重连。')));
+  nodes.push(el('p', 'mcp-note', t('安装后新开一个 Agent 会话生效。LayerLens 需要在会话开始前运行; 会话中 LayerLens 重启后, Codex 会自动恢复, Claude Code 可用 /mcp 重连, Gemini CLI 可用 /mcp refresh 重连。')));
   view.root.replaceChildren(...nodes);
 }
 

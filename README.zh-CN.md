@@ -104,7 +104,7 @@ open build/Build/Products/Release/LayerLens.app
 
 - 拖动即在 App 内滑动; 按住 ⌥ 点击选中视图并切到 2D. 选择元素需要已集成的 App 已连接且在前台, 否则 ⌥ + 点击按普通点击处理, 实时画面可当普通模拟器使用.
 - 工具栏可回到主屏幕、打开多任务、旋转、复制屏幕截图.
-- 「MCP 设置…」可一键为 Claude Code 和 Codex 安装内置只读 MCP 与 Skill, 让 Agent 直接读取当前选中元素、源码目录, 并按需搜索日志和抓包, 详见 [docs/mcp.md](docs/mcp.md).
+- 「MCP 设置…」可一键为 Claude Code、Codex、Gemini CLI 和 Antigravity 安装内置只读 MCP 与 Skill, 让 Agent 直接读取当前选中元素、源码目录, 并按需搜索日志和抓包, 详见 [docs/mcp.md](docs/mcp.md).
 - App 进入后台时状态点变为橙色, 连接保持, 回到前台后自动恢复.
 - 多个窗口同时观看同一台模拟器时共用一路采集编码.
 

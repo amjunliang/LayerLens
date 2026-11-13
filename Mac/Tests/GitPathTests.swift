@@ -26,8 +26,13 @@ import Foundation
         let info = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": hostProject.path], format: .xml, options: 0)
         try info.write(to: build.appendingPathComponent("info.plist"))
         assert(controller.repository(sourceFile: sourceFile) == root, "A SwiftPM checkout must resolve to the host Git repository")
-        assert(controller.repository(sourceFile: root + "/pagei.txt") == root)
+        assert(controller.repository(deviceId: "device-git", bundleId: "com.layerlens.git.test", sourceFile: sourceFile) == root,
+               "Device/bundle-aware Git lookup must resolve and persist host repository")
         try FileManager.default.removeItem(at: build)
+        assert(controller.repository(deviceId: "device-git", bundleId: "com.layerlens.git.test", sourceFile: sourceFile) == root,
+               "Git repository must still resolve from saved host after build directory is removed")
+        XcodeSourcePath.removeSavedHostProject(deviceId: "device-git", bundleId: "com.layerlens.git.test", sourceFile: sourceFile)
+        assert(controller.repository(sourceFile: root + "/pagei.txt") == root)
         try FileManager.default.removeItem(at: hostProject)
         func perform(_ action: String, _ paths: [String]) {
             let done = DispatchSemaphore(value: 0)

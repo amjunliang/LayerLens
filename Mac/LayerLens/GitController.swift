@@ -68,11 +68,20 @@ final class GitController {
 
     /// 源文件所在的仓库根目录, 不在仓库中时为 nil
     func repository(sourceFile: String) -> String? {
-        guard let directory = XcodeSourcePath.sourceDirectory(for: sourceFile) else { return nil }
+        repository(forDirectory: XcodeSourcePath.sourceDirectory(for: sourceFile))
+    }
+
+    /// 结合设备与 Bundle ID 定位宿主工程目录后解析仓库根目录，支持构建目录已被清理的 SwiftPM 项目
+    func repository(deviceId: String, bundleId: String, sourceFile: String) -> String? {
+        repository(forDirectory: XcodeSourcePath.sourceDirectory(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile))
+    }
+
+    private func repository(forDirectory directory: String?) -> String? {
+        guard let directory else { return nil }
         rootsLock.lock()
         let cached = roots[directory]
         rootsLock.unlock()
-        if let cached { return cached }
+        if let cached, FileManager.default.fileExists(atPath: cached) { return cached }
         guard FileManager.default.fileExists(atPath: directory) else { return nil }
         let output = Self.run(directory, ["rev-parse", "--show-toplevel"], timeout: 10)
         guard output.ok else { return nil }

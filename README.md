@@ -104,7 +104,7 @@ Pick an app on a simulator and switch to Live. The Mac app captures the simulato
 
 - Drag to scroll and swipe in the app; ⌥-click to select a view and switch to 2D. Selecting needs the integrated app connected and in the foreground; otherwise ⌥-click is a normal tap, so Live also works as a plain simulator.
 - The toolbar has Home, App Switcher, Rotate and Copy Screenshot.
-- MCP Setup… installs the built-in read-only MCP server and a Skill into Claude Code and Codex in one click, so agents can read the selected element, source root, filtered logs and captured requests; see [docs/mcp.md](docs/mcp.md).
+- MCP Setup… installs the built-in read-only MCP server and a Skill into Claude Code, Codex, Gemini CLI and Antigravity in one click, so agents can read the selected element, source root, filtered logs and captured requests; see [docs/mcp.md](docs/mcp.md).
 - When the app goes to the background the status dot turns orange; the page keeps the connection and picks up again when it returns.
 - Windows watching the same simulator share one capture and encoder.
 

@@ -4,15 +4,41 @@ func require(_ value: @autoclosure () -> Bool, _ message: String) {
     if !value() { fatalError(message) }
 }
 
-/// 假的 claude / codex: 只在内存中记录 layerlens 的配置, 不触碰真实客户端。
+/// 假的 claude / codex / gemini: 只在内存或临时目录中记录 layerlens 的配置, 不触碰真实客户端。
+/// gemini 没有 mcp get, 由 LayerLens 读取 settings.json, 所以假 gemini 写临时 home 下的文件。
 final class FakeCLI {
     var configured: [String: String] = [:]
     var calls: [[String]] = []
+    let home: URL
+
+    init(home: URL) { self.home = home }
+
+    func geminiSettings(_ change: (inout [String: Any]) -> Void) {
+        let file = home.appendingPathComponent(".gemini/settings.json")
+        var settings = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any] ?? [:]
+        var servers = settings["mcpServers"] as? [String: Any] ?? [:]
+        change(&servers)
+        settings["mcpServers"] = servers
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONSerialization.data(withJSONObject: settings).write(to: file)
+    }
 
     func run(_ path: String, _ arguments: [String]) -> MCPClientInstaller.CommandResult {
         let name = (path as NSString).lastPathComponent
         calls.append([name] + arguments)
         if name == "zsh" || name == "bash" { return .init(status: 0, output: "/fake/bin:/usr/bin", timedOut: false) }
+        if name == "gemini" {
+            switch Array(arguments.prefix(2)) {
+            case ["mcp", "add"]:
+                geminiSettings { $0["layerlens"] = ["httpUrl": arguments.last!] }
+                return .init(status: 0, output: "", timedOut: false)
+            case ["mcp", "remove"]:
+                geminiSettings { $0["layerlens"] = nil }
+                return .init(status: 0, output: "", timedOut: false)
+            default:
+                return .init(status: 2, output: "unexpected", timedOut: false)
+            }
+        }
         switch Array(arguments.prefix(2)) {
         case ["mcp", "get"]:
             guard let url = configured[name] else { return .init(status: 1, output: "No MCP server", timedOut: false) }
@@ -44,13 +70,13 @@ final class FakeCLI {
         let bin = home.appendingPathComponent("fakebin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        for name in ["claude", "codex"] {
+        for name in ["claude", "codex", "gemini"] {
             let file = bin.appendingPathComponent(name)
             try Data("#!/bin/sh\n".utf8).write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
         }
 
-        let fake = FakeCLI()
+        let fake = FakeCLI(home: home)
         let installer = MCPClientInstaller(url: url, home: home, shell: "/bin/zsh") { path, arguments, _, _ in
             fake.run(path, arguments)
         }
@@ -106,9 +132,45 @@ final class FakeCLI {
                 "Empty skill directory left behind")
         require(installer.remove(.claude, parts: [.mcp, .skill]).isEmpty, "Removing twice must succeed")
 
+        // Gemini CLI: 通过命令以 user scope 增删, 状态读 settings.json(允许注释)
+        require(installer.status(.gemini).mcp == .missing, "Gemini must start missing")
+        require(installer.install(.gemini, parts: [.mcp, .skill]).isEmpty, "Gemini install failed")
+        require(fake.calls.contains(["gemini", "mcp", "add", "--scope", "user", "--transport", "http", "layerlens", url]), "Gemini add arguments")
+        require(installer.status(.gemini).mcp == .installed, "Gemini install not detected")
+        require(FileManager.default.fileExists(atPath: home.appendingPathComponent(".gemini/skills/layerlens/SKILL.md").path), "Gemini skill missing")
+        let geminiSettings = home.appendingPathComponent(".gemini/settings.json")
+        try Data("{\n  // comment\n  \"mcpServers\": {\"layerlens\": {\"url\": \"http://127.0.0.1:1/mcp\"}}\n}".utf8).write(to: geminiSettings)
+        require(installer.status(.gemini).mcp == .different, "Gemini settings with comments must be readable")
+        require(installer.install(.gemini, parts: [.mcp]).isEmpty, "Gemini update failed")
+        require(fake.calls.contains(["gemini", "mcp", "remove", "--scope", "user", "layerlens"]), "Gemini remove arguments")
+        require(installer.status(.gemini).mcp == .installed, "Gemini URL not updated")
+
+        // Antigravity: 检测到 App 即可, 只改 mcp_config.json 中的 layerlens, 保留其他服务
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Applications/Antigravity.app"), withIntermediateDirectories: true)
+        require(installer.locate(.antigravity) != nil, "Antigravity not located")
+        let agyConfig = home.appendingPathComponent(".gemini/config/mcp_config.json")
+        try FileManager.default.createDirectory(at: agyConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{\"mcpServers\":{\"other\":{\"command\":\"x\"}},\"keep\":1}".utf8).write(to: agyConfig)
+        require(installer.status(.antigravity).mcp == .missing, "Antigravity must start missing")
+        require(installer.install(.antigravity, parts: [.mcp, .skill]).isEmpty, "Antigravity install failed")
+        var agy = try JSONSerialization.jsonObject(with: Data(contentsOf: agyConfig)) as! [String: Any]
+        var agyServers = agy["mcpServers"] as! [String: Any]
+        require((agyServers["layerlens"] as? [String: Any])?["url"] as? String == url, "Antigravity URL not written")
+        require(agyServers["other"] != nil && agy["keep"] as? Int == 1, "Antigravity config not preserved")
+        require(installer.status(.antigravity).mcp == .installed && installer.skillState(.antigravity) == .installed, "Antigravity install not detected")
+        require(FileManager.default.fileExists(atPath: home.appendingPathComponent(".gemini/config/skills/layerlens/SKILL.md").path), "Antigravity skill missing")
+        require(installer.remove(.antigravity, parts: [.mcp, .skill]).isEmpty, "Antigravity remove failed")
+        agy = try JSONSerialization.jsonObject(with: Data(contentsOf: agyConfig)) as! [String: Any]
+        agyServers = agy["mcpServers"] as! [String: Any]
+        require(agyServers["layerlens"] == nil && agyServers["other"] != nil, "Antigravity remove must keep other servers")
+        try Data("{ // not plain JSON\n}".utf8).write(to: agyConfig)
+        require(installer.status(.antigravity).mcp == .unknown, "Invalid Antigravity config must be unknown")
+        require(!installer.install(.antigravity, parts: [.mcp]).isEmpty, "Invalid Antigravity config was overwritten")
+        require((try? String(contentsOf: agyConfig, encoding: .utf8)) == "{ // not plain JSON\n}", "Invalid Antigravity config changed")
+
         let statuses = installer.statuses()
-        require(statuses.map(\.client) == [.claude, .codex], "Statuses must keep client order")
+        require(statuses.map(\.client) == [.claude, .codex, .gemini, .antigravity], "Statuses must keep client order")
         require(statuses[1].json["mcp"] as? String == "installed" && statuses[1].json["found"] as? Bool == true, "Status JSON")
-        print("PASS MCP clients: locate, status, user-scope install, URL update, skill ownership and removal")
+        print("PASS MCP clients: locate, status, user-scope install, URL update, skill ownership and removal, Gemini CLI, Antigravity config")
     }
 }

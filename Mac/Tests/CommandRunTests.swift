@@ -432,6 +432,46 @@ import Foundation
         runPackage(customCheckout)
         let afterRecoveredRun = try String(contentsOf: root.appendingPathComponent("events"), encoding: .utf8)
         precondition(!afterRecoveredRun.dropFirst(afterRecovery.count).contains("list"), "The replacement Scheme must become the cached choice")
+
+        // 兜底逻辑: checkout 的 info.plist 被清理后, 仍可通过已存记录或 DerivedData 找回宿主项目；
+        // 已存路径失效(被移动/删除)时清理旧记录并重新查找。
+        let fallbackBundle = "com.layerlens.fallback.\(UUID().uuidString)"
+        let fallbackCheckout = root.appendingPathComponent("TempDerived/SourcePackages/checkouts/LayerLens/Pod/Classes/Lookin/LayerLensLookinBridge.m")
+        XcodeSourcePath.removeSavedHostProject(deviceId: "device-fallback", bundleId: fallbackBundle, sourceFile: fallbackCheckout.path)
+        let resolvedFromDerived = XcodeSourcePath.resolveHostProject(
+            deviceId: "device-fallback",
+            bundleId: fallbackBundle,
+            sourceFile: fallbackCheckout.path,
+            simulator: false,
+            derivedData: derived.deletingLastPathComponent())
+        precondition(resolvedFromDerived == nil, "Unknown bundle must not resolve")
+
+        let stalePath = root.appendingPathComponent("MissingProject.xcodeproj").path
+        var staleByBundle = UserDefaults.standard.dictionary(forKey: "LayerLensBundleHostProjects") as? [String: String] ?? [:]
+        staleByBundle[bundle] = stalePath
+        UserDefaults.standard.set(staleByBundle, forKey: "LayerLensBundleHostProjects")
+        precondition(XcodeSourcePath.savedBundleHostProject(bundleId: bundle) == nil,
+                     "Stale saved bundle project must be evicted when path is missing")
+        let resolvedAfterStale = XcodeSourcePath.resolveHostProject(
+            deviceId: "device-stale",
+            bundleId: bundle,
+            sourceFile: fallbackCheckout.path,
+            simulator: false,
+            derivedData: derived.deletingLastPathComponent())
+        precondition(resolvedAfterStale?.project == project.path && resolvedAfterStale?.source == "derived-data",
+                     "Must re-find host project from DerivedData when saved path is missing")
+        precondition(XcodeSourcePath.savedBundleHostProject(bundleId: bundle) == project.path,
+                     "Re-found host project must be persisted")
+        XcodeSourcePath.removeSavedHostProject(deviceId: "device-stale", bundleId: bundle, sourceFile: fallbackCheckout.path)
+
+        let appSourceDir = root.appendingPathComponent("Sources/Feature")
+        try fm.createDirectory(at: appSourceDir, withIntermediateDirectories: true)
+        precondition(XcodeSourcePath.hostProject(fromSourceDirectories: [
+            "/private/tmp/Build/Foo/",
+            derived.appendingPathComponent("SourcePackages/checkouts/Bar/").path,
+            appSourceDir.path + "/"
+        ]) == project.standardizedFileURL.path, "Must resolve unique host project from source directories")
+
         print("PASS command run: latest per device, install/launch isolation and scheme options")
     }
 }

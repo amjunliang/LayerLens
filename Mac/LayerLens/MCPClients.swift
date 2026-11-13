@@ -5,8 +5,9 @@
 
 import Foundation
 
-/// 一键接入 Agent：检测本机的 Claude Code 和 Codex，安装或移除 LayerLens 的 MCP 与 Skill。
-/// MCP 通过客户端自带的 `mcp get/add/remove` 命令修改，不直接编辑它们的配置文件；
+/// 一键接入 Agent：检测本机的 Claude Code、Codex、Gemini CLI 和 Antigravity，安装或移除 LayerLens 的 MCP 与 Skill。
+/// 有 `mcp add/remove` 命令的客户端通过命令修改；Gemini CLI 没有 `mcp get`，状态从 ~/.gemini/settings.json 读取；
+/// Antigravity 没有对应命令，只增删 ~/.gemini/config/mcp_config.json 中 layerlens 这一项，其他内容原样保留。
 /// Skill 是 LayerLens 自己写入的单个文件，只覆盖或删除带有标记的版本。
 final class MCPClientInstaller {
     struct CommandResult {
@@ -17,10 +18,28 @@ final class MCPClientInstaller {
     typealias Runner = (_ path: String, _ arguments: [String], _ environment: [String: String], _ timeout: TimeInterval) -> CommandResult?
 
     enum Client: String, CaseIterable {
-        case claude, codex
+        case claude, codex, gemini, antigravity
 
-        var name: String { self == .claude ? "Claude Code" : "Codex" }
-        var skillFile: String { self == .claude ? ".claude/skills/layerlens/SKILL.md" : ".codex/skills/layerlens/SKILL.md" }
+        var name: String {
+            switch self {
+            case .claude: return "Claude Code"
+            case .codex: return "Codex"
+            case .gemini: return "Gemini CLI"
+            case .antigravity: return "Antigravity"
+            }
+        }
+
+        /// 在 PATH 中查找的命令名。
+        var command: String { self == .antigravity ? "agy" : rawValue }
+
+        var skillFile: String {
+            switch self {
+            case .claude: return ".claude/skills/layerlens/SKILL.md"
+            case .codex: return ".codex/skills/layerlens/SKILL.md"
+            case .gemini: return ".gemini/skills/layerlens/SKILL.md"
+            case .antigravity: return ".gemini/config/skills/layerlens/SKILL.md"
+            }
+        }
     }
 
     enum Part: String, CaseIterable { case mcp, skill }
@@ -108,9 +127,19 @@ final class MCPClientInstaller {
     /// Codex 桌面版自带 CLI，未单独安装时也能用它修改同一份 ~/.codex 配置。
     private static let bundledCodex = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 
+    /// Antigravity 桌面版和 IDE 与 `agy` 命令行共用 ~/.gemini/config。
+    private var antigravityApps: [String] {
+        let homeApps = home.appendingPathComponent("Applications").path
+        return ["\(homeApps)/Antigravity.app", "/Applications/Antigravity.app",
+                "\(homeApps)/Antigravity IDE.app", "/Applications/Antigravity IDE.app"]
+    }
+
     func locate(_ client: Client, isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }) -> String? {
+        if client == .antigravity, let app = antigravityApps.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            return app
+        }
         for directory in searchPath() {
-            let candidate = (directory as NSString).appendingPathComponent(client.rawValue)
+            let candidate = (directory as NSString).appendingPathComponent(client.command)
             if isExecutable(candidate) { return candidate }
         }
         if client == .codex, isExecutable(Self.bundledCodex) { return Self.bundledCodex }
@@ -151,7 +180,19 @@ final class MCPClientInstaller {
         return result.compactMap { $0 }
     }
 
+    private var geminiSettingsURL: URL { home.appendingPathComponent(".gemini/settings.json") }
+    private var antigravityConfigURL: URL { home.appendingPathComponent(".gemini/config/mcp_config.json") }
+
     private func mcpState(_ client: Client, path: String) -> (MCPState, String, String) {
+        switch client {
+        case .claude, .codex: return commandMCPState(client, path: path)
+        // Gemini CLI 的设置允许注释；Antigravity 的文件需要原样写回，只接受标准 JSON
+        case .gemini: return configMCPState(geminiSettingsURL, keys: ["httpUrl", "url"], json5: true)
+        case .antigravity: return configMCPState(antigravityConfigURL, keys: ["url", "serverUrl"], json5: false)
+        }
+    }
+
+    private func commandMCPState(_ client: Client, path: String) -> (MCPState, String, String) {
         let arguments = client == .claude ? ["mcp", "get", Self.serverName] : ["mcp", "get", Self.serverName, "--json"]
         guard let result = runner(path, arguments, environment, Self.commandTimeout) else {
             return (.unknown, "", "Could not run \(client.rawValue)")
@@ -161,6 +202,56 @@ final class MCPClientInstaller {
         let configured = client == .claude ? Self.claudeURL(result.output) : Self.codexURL(result.output)
         guard let configured else { return (.different, "", "") }
         return (configured == url ? .installed : .different, configured, "")
+    }
+
+    /// 读取 JSON 配置文件；不存在时返回 nil，内容为空时返回空字典。
+    static func readConfig(_ file: URL, json5: Bool) throws -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let data = try Data(contentsOf: file)
+        if String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return [:] }
+        let object = try JSONSerialization.jsonObject(with: data, options: json5 ? [.json5Allowed] : [])
+        guard let config = object as? [String: Any] else { throw Failure(message: "\(file.path) is not a JSON object") }
+        return config
+    }
+
+    /// 配置中 mcpServers.layerlens 的地址：外层 nil 表示未配置，内层 nil 表示配置了但不是 HTTP 地址。
+    static func configuredURL(_ config: [String: Any]?, keys: [String]) -> String?? {
+        guard let entry = (config?["mcpServers"] as? [String: Any])?[serverName] else { return nil }
+        let server = entry as? [String: Any]
+        return .some(keys.lazy.compactMap { server?[$0] as? String }.first)
+    }
+
+    private func configMCPState(_ file: URL, keys: [String], json5: Bool) -> (MCPState, String, String) {
+        let config: [String: Any]?
+        do {
+            config = try Self.readConfig(file, json5: json5)
+        } catch {
+            return (.unknown, "", "Could not read \(file.path): \((error as? Failure)?.message ?? error.localizedDescription)")
+        }
+        guard let configured = Self.configuredURL(config, keys: keys) else { return (.missing, "", "") }
+        guard let configured else { return (.different, "", "") }
+        return (configured == url ? .installed : .different, configured, "")
+    }
+
+    /// 只改动 mcpServers.layerlens，其余配置原样写回；value 为 nil 时删除。
+    private func writeAntigravityMCP(_ value: [String: Any]?) -> String? {
+        let file = antigravityConfigURL
+        do {
+            var config = try Self.readConfig(file, json5: false) ?? [:]
+            if config["mcpServers"] != nil, !(config["mcpServers"] is [String: Any]) {
+                return "\(file.path): mcpServers is not an object"
+            }
+            var servers = config["mcpServers"] as? [String: Any] ?? [:]
+            servers[Self.serverName] = value
+            config["mcpServers"] = servers
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            data.append(0x0A)
+            try data.write(to: file, options: .atomic)
+            return nil
+        } catch {
+            return (error as? Failure)?.message ?? error.localizedDescription
+        }
     }
 
     /// `claude mcp get` 输出中的 "URL: http://…" 行。
@@ -214,14 +305,11 @@ final class MCPClientInstaller {
         switch state {
         case .installed: return nil
         case .unknown: return error
-        case .different:
-            if let error = run(path, removeArguments(client)) { return error }
-        case .missing: break
+        case .missing, .different: break
         }
-        let arguments = client == .claude
-            ? ["mcp", "add", "--transport", "http", "--scope", "user", Self.serverName, url]
-            : ["mcp", "add", Self.serverName, "--url", url]
-        return run(path, arguments)
+        if client == .antigravity { return writeAntigravityMCP(["url": url]) }
+        if state == .different, let error = run(path, removeArguments(client)) { return error }
+        return run(path, addArguments(client))
     }
 
     private func removeMCP(_ client: Client) -> String? {
@@ -230,12 +318,25 @@ final class MCPClientInstaller {
         switch state {
         case .missing: return nil
         case .unknown: return error
-        case .installed, .different: return run(path, removeArguments(client))
+        case .installed, .different:
+            return client == .antigravity ? writeAntigravityMCP(nil) : run(path, removeArguments(client))
+        }
+    }
+
+    private func addArguments(_ client: Client) -> [String] {
+        switch client {
+        case .claude: return ["mcp", "add", "--transport", "http", "--scope", "user", Self.serverName, url]
+        case .codex: return ["mcp", "add", Self.serverName, "--url", url]
+        case .gemini: return ["mcp", "add", "--scope", "user", "--transport", "http", Self.serverName, url]
+        case .antigravity: return []
         }
     }
 
     private func removeArguments(_ client: Client) -> [String] {
-        client == .claude ? ["mcp", "remove", "--scope", "user", Self.serverName] : ["mcp", "remove", Self.serverName]
+        switch client {
+        case .claude, .gemini: return ["mcp", "remove", "--scope", "user", Self.serverName]
+        case .codex, .antigravity: return ["mcp", "remove", Self.serverName]
+        }
     }
 
     private func run(_ path: String, _ arguments: [String]) -> String? {

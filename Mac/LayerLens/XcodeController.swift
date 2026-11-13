@@ -467,30 +467,162 @@ enum XcodeRunPlan {
 
 /// Xcode 记录 SwiftPM checkout 对应的宿主工作区，自定义 DerivedData 路径也使用相同布局。
 enum XcodeSourcePath {
+    struct HostResolution {
+        let project: String
+        let source: String
+        var isFromSaved: Bool { source == "saved" || source == "saved-bundle" }
+    }
+
     private static let localHostsKey = "LayerLensLocalPackageHosts"
+    private static let bundleHostsKey = "LayerLensBundleHostProjects"
     private static let localHostsLock = NSLock()
 
     private static func localHostKey(deviceId: String, bundleId: String, sourceFile: String) -> String {
         [deviceId, bundleId, URL(fileURLWithPath: sourceFile).standardizedFileURL.path].joined(separator: "\n")
     }
 
-    static func savedLocalHostProject(deviceId: String, bundleId: String, sourceFile: String) -> String? {
+    private static func isValidProjectPath(_ path: String) -> Bool {
+        ["xcodeproj", "xcworkspace"].contains((path as NSString).pathExtension) &&
+            FileManager.default.fileExists(atPath: path)
+    }
+
+    private static func savedProject(forDefaultsKey defaultsKey: String, entryKey: String) -> String? {
         localHostsLock.lock()
         defer { localHostsLock.unlock() }
-        let key = localHostKey(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
-        guard let project = (UserDefaults.standard.dictionary(forKey: localHostsKey) as? [String: String])?[key],
-              ["xcodeproj", "xcworkspace"].contains((project as NSString).pathExtension),
-              FileManager.default.fileExists(atPath: project) else { return nil }
+        var projects = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+        guard let project = projects[entryKey] else { return nil }
+        guard isValidProjectPath(project) else {
+            projects.removeValue(forKey: entryKey)
+            UserDefaults.standard.set(projects, forKey: defaultsKey)
+            return nil
+        }
         return project
     }
 
-    static func saveLocalHostProject(_ project: String, deviceId: String, bundleId: String, sourceFile: String) {
+    private static func setSavedHostProject(_ project: String?, deviceId: String, bundleId: String, sourceFile: String) {
         localHostsLock.lock()
         defer { localHostsLock.unlock() }
-        let key = localHostKey(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
-        var projects = UserDefaults.standard.dictionary(forKey: localHostsKey) as? [String: String] ?? [:]
-        projects[key] = project
-        UserDefaults.standard.set(projects, forKey: localHostsKey)
+        func update(_ defaultsKey: String, _ entryKey: String) {
+            var projects = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+            if let project {
+                projects[entryKey] = project
+            } else if projects.removeValue(forKey: entryKey) == nil {
+                return
+            }
+            UserDefaults.standard.set(projects, forKey: defaultsKey)
+        }
+        if !deviceId.isEmpty && !bundleId.isEmpty && !sourceFile.isEmpty {
+            update(localHostsKey, localHostKey(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile))
+        }
+        if !bundleId.isEmpty {
+            update(bundleHostsKey, bundleId)
+        }
+    }
+
+    static func savedLocalHostProject(deviceId: String, bundleId: String, sourceFile: String) -> String? {
+        savedProject(forDefaultsKey: localHostsKey, entryKey: localHostKey(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile))
+    }
+
+    static func savedBundleHostProject(bundleId: String) -> String? {
+        guard !bundleId.isEmpty else { return nil }
+        return savedProject(forDefaultsKey: bundleHostsKey, entryKey: bundleId)
+    }
+
+    static func saveHostProject(_ project: String, deviceId: String, bundleId: String, sourceFile: String) {
+        guard isValidProjectPath(project) else { return }
+        setSavedHostProject(project, deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+    }
+
+    static func removeSavedHostProject(deviceId: String, bundleId: String, sourceFile: String) {
+        setSavedHostProject(nil, deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+    }
+
+    /// 按「构建目录 info.plist -> 本地已存记录(含同 Bundle ID) -> DerivedData 唯一产物 -> 模拟器二进制调试符号」顺序定位宿主项目。
+    static func resolveHostProject(deviceId: String, bundleId: String, sourceFile: String,
+                                   simulator: Bool?, derivedData: URL,
+                                   allowSaved: Bool = true,
+                                   xcrunPath: String = "/usr/bin/xcrun") -> HostResolution? {
+        if !sourceFile.isEmpty {
+            let sourceDir = URL(fileURLWithPath: sourceFile).deletingLastPathComponent().standardizedFileURL
+            if let buildDir = packageBuildDirectory(containing: sourceDir), let project = hostProject(in: buildDir) {
+                saveHostProject(project, deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+                return HostResolution(project: project, source: "checkout")
+            }
+        }
+        if allowSaved {
+            if !deviceId.isEmpty && !bundleId.isEmpty && !sourceFile.isEmpty,
+               let project = savedLocalHostProject(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) {
+                return HostResolution(project: project, source: "saved")
+            }
+            if let project = savedBundleHostProject(bundleId: bundleId) {
+                return HostResolution(project: project, source: "saved-bundle")
+            }
+        }
+        if let project = localPackageHostProject(bundleId: bundleId, derivedData: derivedData) {
+            saveHostProject(project, deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+            return HostResolution(project: project, source: "derived-data")
+        }
+        if simulator != false,
+           let project = simulatorBinaryHostProject(deviceId: deviceId, bundleId: bundleId, xcrunPath: xcrunPath) {
+            saveHostProject(project, deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+            return HostResolution(project: project, source: "binary")
+        }
+        return nil
+    }
+
+    static func simulatorBinaryHostProject(deviceId: String, bundleId: String, xcrunPath: String = "/usr/bin/xcrun") -> String? {
+        guard !deviceId.isEmpty && !bundleId.isEmpty else { return nil }
+        guard let container = BoundedProcess.capture(xcrunPath, ["simctl", "get_app_container", deviceId, bundleId], timeout: 3),
+              container.status == 0, !container.timedOut else { return nil }
+        let appPath = String(decoding: container.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !appPath.isEmpty else { return nil }
+        let appURL = URL(fileURLWithPath: appPath)
+        guard let infoData = try? Data(contentsOf: appURL.appendingPathComponent("Info.plist")),
+              let plist = try? PropertyListSerialization.propertyList(from: infoData, options: [], format: nil) as? [String: Any],
+              let executable = plist["CFBundleExecutable"] as? String, !executable.isEmpty else { return nil }
+        let fm = FileManager.default
+        let candidates = [
+            appURL.appendingPathComponent(executable + ".debug.dylib").path,
+            appURL.appendingPathComponent(executable).path,
+        ]
+        guard let binary = candidates.first(where: { fm.fileExists(atPath: $0) }),
+              let nm = BoundedProcess.capture("/usr/bin/nm", ["-ap", binary], timeout: 5),
+              nm.status == 0, !nm.timedOut else { return nil }
+        let directories = String(decoding: nm.data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> String? in
+                guard let range = line.range(of: " SO ") else { return nil }
+                let path = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                return path.hasPrefix("/") && path.hasSuffix("/") ? path : nil
+            }
+        return hostProject(fromSourceDirectories: directories)
+    }
+
+    static func hostProject(fromSourceDirectories directories: [String]) -> String? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.standardizedFileURL.path
+        var projects = Set<String>()
+        for rawDir in Set(directories) {
+            let dir = URL(fileURLWithPath: rawDir).standardizedFileURL.path
+            guard !dir.hasPrefix("/Applications/Xcode"),
+                  !dir.contains("/DerivedData/"), !dir.contains("/SourcePackages/"), !dir.contains("/Pods/"),
+                  !dir.contains("/Build/Intermediates"),
+                  fm.fileExists(atPath: dir) else { continue }
+            var current = URL(fileURLWithPath: dir)
+            for _ in 0..<8 {
+                let path = current.path
+                if path == "/" || path == "/Users" || path == home { break }
+                let items = (try? fm.contentsOfDirectory(atPath: path)) ?? []
+                let workspaces = items.filter { $0.hasSuffix(".xcworkspace") && $0 != "project.xcworkspace" }.sorted()
+                let xcodeprojs = items.filter { $0.hasSuffix(".xcodeproj") }.sorted()
+                if let match = workspaces.first ?? xcodeprojs.first {
+                    projects.insert(projectEntry(current.appendingPathComponent(match).path))
+                    break
+                }
+                current = current.deletingLastPathComponent()
+            }
+        }
+        return projects.count == 1 ? projects.first : nil
     }
 
     /// A local Swift package's __FILE__ points into the package, not its app.
@@ -564,5 +696,22 @@ enum XcodeSourcePath {
         let directory = URL(fileURLWithPath: sourceFile).deletingLastPathComponent().standardizedFileURL
         guard let buildDirectory = packageBuildDirectory(containing: directory) else { return directory.path }
         return hostProject(in: buildDirectory).map { ($0 as NSString).deletingLastPathComponent }
+    }
+
+    static func sourceDirectory(deviceId: String, bundleId: String, sourceFile: String,
+                                derivedData: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/DerivedData")) -> String? {
+        guard !sourceFile.isEmpty else { return nil }
+        let isPackageCheckout = (sourceFile as NSString).isAbsolutePath &&
+            packageBuildDirectory(containing: URL(fileURLWithPath: sourceFile).deletingLastPathComponent()) != nil
+        if isLocalLayerLensPackage(sourceFile) || isPackageCheckout {
+            return resolveHostProject(
+                deviceId: deviceId,
+                bundleId: bundleId,
+                sourceFile: sourceFile,
+                simulator: nil,
+                derivedData: derivedData
+            ).map { ($0.project as NSString).deletingLastPathComponent }
+        }
+        return sourceDirectory(for: sourceFile)
     }
 }

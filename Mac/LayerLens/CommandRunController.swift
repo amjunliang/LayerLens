@@ -290,7 +290,7 @@ final class CommandRunController {
     }
     private func fail(_ job: Job, _ message: String) { _ = update(job, "failed", String(message.suffix(4000))) }
 
-    private func run(_ job: Job, useSavedScheme: Bool = true, refreshed: Bool = false, verificationDeadline: TimeInterval? = nil) {
+    private func run(_ job: Job, useSavedScheme: Bool = true, useSavedHost: Bool = true, refreshed: Bool = false, verificationDeadline: TimeInterval? = nil) {
         var deadline = verificationDeadline ?? (ProcessInfo.processInfo.systemUptime + queryTimeout)
         func remaining() -> TimeInterval { max(0, deadline - ProcessInfo.processInfo.systemUptime) }
         guard update(job, "resolving") else { return }
@@ -301,16 +301,31 @@ final class CommandRunController {
         let sourceDir = URL(fileURLWithPath: job.source).deletingLastPathComponent().standardizedFileURL
         let packageBuild = XcodeSourcePath.packageBuildDirectory(containing: sourceDir)
         let localPackage = XcodeSourcePath.isLocalLayerLensPackage(job.source)
+        let needsHostResolution = packageBuild != nil || localPackage
         let resolveStarted = ProcessInfo.processInfo.systemUptime
-        let savedLocalHost = localPackage ? XcodeSourcePath.savedLocalHostProject(deviceId: job.device, bundleId: job.bundle, sourceFile: job.source) : nil
-        let hostProject = packageBuild.flatMap(XcodeSourcePath.hostProject(in:)) ??
-            savedLocalHost ?? (localPackage ? XcodeSourcePath.localPackageHostProject(bundleId: job.bundle, derivedData: derivedDataRoot) : nil)
-        log("command-run id=\(job.id) phase=host-resolution source=\(savedLocalHost != nil ? "saved" : (packageBuild != nil ? "checkout" : (localPackage ? "derived-data" : "source"))) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - resolveStarted) * 1000))")
-        if packageBuild != nil && hostProject == nil {
-            fail(job, "无法从 Xcode 构建目录确定宿主项目"); return
+        let resolvedHost = needsHostResolution
+            ? XcodeSourcePath.resolveHostProject(
+                deviceId: job.device,
+                bundleId: job.bundle,
+                sourceFile: job.source,
+                simulator: job.simulator,
+                derivedData: derivedDataRoot,
+                allowSaved: useSavedHost,
+                xcrunPath: executable)
+            : nil
+        let hostProject = resolvedHost?.project
+        func retryWithoutSavedHost(refreshed: Bool = refreshed, deadline: TimeInterval? = deadline) -> Bool {
+            guard resolvedHost?.isFromSaved == true else { return false }
+            XcodeSourcePath.removeSavedHostProject(deviceId: job.device, bundleId: job.bundle, sourceFile: job.source)
+            run(job, useSavedScheme: false, useSavedHost: false, refreshed: refreshed, verificationDeadline: deadline)
+            return true
         }
-        if localPackage && hostProject == nil {
-            fail(job, "无法从构建产物唯一确定宿主项目，请先在 Xcode 中运行此 App"); return
+        log("command-run id=\(job.id) phase=host-resolution source=\(resolvedHost?.source ?? "source") elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - resolveStarted) * 1000))")
+        if needsHostResolution && hostProject == nil {
+            fail(job, packageBuild != nil
+                ? "无法从 Xcode 构建目录或本地记录确定宿主项目，请先在 Xcode 中运行此 App"
+                : "无法从构建产物唯一确定宿主项目，请先在 Xcode 中运行此 App")
+            return
         }
         if hostProject == nil && !FileManager.default.fileExists(atPath: sourceDir.path) {
             fail(job, "App 上报的源码目录不存在，无法查找项目"); return
@@ -393,6 +408,7 @@ final class CommandRunController {
             let workspaceIDs = Set(matches.filter { $0.0.hasSuffix(".xcworkspace") }.map { identity($0.1) })
             let unique = matches.filter { $0.0.hasSuffix(".xcworkspace") || !workspaceIDs.contains(identity($0.1)) }
             guard unique.count == 1, let match = unique.first else {
+                if unique.isEmpty, retryWithoutSavedHost() { return }
                 fail(job, unique.isEmpty ? "未找到与此 App Bundle ID 匹配的项目和 Scheme" : "多个项目或 Scheme 匹配此 App，请保留唯一的运行配置")
                 return
             }
@@ -461,8 +477,8 @@ final class CommandRunController {
             guard let match = values.first(where: { XcodeRunPlan.matchesBundle([$0], candidate: plan, bundleId: job.bundle) }) else {
                 if hostProject != nil && hasSavedProject {
                     // Scheme 仍存在但已改绑目标。只重新发现一次，不重复发送 Home。
-                    run(job, useSavedScheme: false, refreshed: refreshed, verificationDeadline: deadline)
-                } else {
+                    run(job, useSavedScheme: false, useSavedHost: useSavedHost, refreshed: refreshed, verificationDeadline: deadline)
+                } else if !retryWithoutSavedHost() {
                     fail(job, "当前 Scheme 不再构建所选 App")
                 }
                 return
@@ -541,8 +557,9 @@ final class CommandRunController {
             if cached != nil {
                 // 缓存的配置可能已过期(如 xcconfig 改了 Bundle ID 或产物位置): 重新查询一次。
                 lock.lock(); settingsCache[settingsKey] = nil; lock.unlock()
-                run(job, useSavedScheme: useSavedScheme, refreshed: true); return
+                run(job, useSavedScheme: useSavedScheme, useSavedHost: useSavedHost, refreshed: true); return
             }
+            if retryWithoutSavedHost(refreshed: true, deadline: nil) { return }
             fail(job, "构建成功，但指定产物的 Bundle ID 与当前 App 不匹配"); return
         }
         guard update(job, "installing") else { return }
@@ -552,8 +569,8 @@ final class CommandRunController {
         guard mayLaunch(job), update(job, "launching") else { return }
         guard let launched = runProcess(job, command, cancellable: false, environment: environment, requireSelection: true) else { return }
         guard launched.0 == 0 else { fail(job, launched.1); return }
-        if localPackage {
-            XcodeSourcePath.saveLocalHostProject(project, deviceId: job.device, bundleId: job.bundle, sourceFile: job.source)
+        if let hostProject {
+            XcodeSourcePath.saveHostProject(hostProject, deviceId: job.device, bundleId: job.bundle, sourceFile: job.source)
         }
         _ = update(job, "succeeded")
     }

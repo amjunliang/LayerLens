@@ -15,14 +15,16 @@ http://127.0.0.1:9523/mcp
 
 ## 一键接入
 
-菜单「LayerLens > MCP 设置…」会检测本机的 Claude Code 和 Codex，点「一键安装」即可。每个客户端分两项，可以单独安装、更新或移除：
+菜单「LayerLens > MCP 设置…」会检测本机的 Claude Code、Codex、Gemini CLI 和 Antigravity，点「一键安装」即可。每个客户端分两项，可以单独安装、更新或移除：
 
-| 项 | Claude Code | Codex |
-| --- | --- | --- |
-| MCP | `claude mcp add --transport http --scope user layerlens <URL>` | `codex mcp add layerlens --url <URL>` |
-| Skill | `~/.claude/skills/layerlens/SKILL.md` | `~/.codex/skills/layerlens/SKILL.md` |
+| 项 | Claude Code | Codex | Gemini CLI | Antigravity |
+| --- | --- | --- | --- | --- |
+| MCP | `claude mcp add --transport http --scope user layerlens <URL>` | `codex mcp add layerlens --url <URL>` | `gemini mcp add --scope user --transport http layerlens <URL>` | `~/.gemini/config/mcp_config.json` 中的 `mcpServers.layerlens` |
+| Skill | `~/.claude/skills/layerlens/SKILL.md` | `~/.codex/skills/layerlens/SKILL.md` | `~/.gemini/skills/layerlens/SKILL.md` | `~/.gemini/config/skills/layerlens/SKILL.md` |
 
-- MCP 通过客户端自带的命令修改，LayerLens 不直接编辑它们的配置文件。已配置成其他地址时显示「地址不同」，更新时先移除再添加。
+- Claude Code、Codex、Gemini CLI 的 MCP 通过客户端自带的命令修改。已配置成其他地址时显示「地址不同」，更新时先移除再添加。
+- Gemini CLI 没有 `mcp get`，状态从 `~/.gemini/settings.json` 读取（只读，允许注释）。
+- Antigravity 没有对应命令，LayerLens 只增删 `mcp_config.json` 中的 `layerlens` 一项，其他内容原样保留；文件不是标准 JSON 时显示「无法检测」，不会改写。检测到 `Antigravity.app`、`Antigravity IDE.app` 或 `agy` 命令之一即可，三者共用 `~/.gemini/config`。
 - Claude Code 使用 user scope，所有项目共用；桌面版的 Code 标签页与终端读取同一份配置。桌面版的 Chat 标签页不支持本机 HTTP 地址，不在接入范围内。
 - Codex 未单独安装 CLI 时，会使用 ChatGPT 桌面版自带的 `codex`，两者共用 `~/.codex`。
 - Skill 文件带有 LayerLens 的标记，只覆盖或删除带标记的版本；同名的其他文件显示「已有同名文件」，不会改动。
@@ -41,6 +43,22 @@ Codex（`~/.codex/config.toml`）：
 ```toml
 [mcp_servers.layerlens]
 url = "http://127.0.0.1:9523/mcp"
+```
+
+Gemini CLI：
+
+```sh
+gemini mcp add --scope user --transport http layerlens http://127.0.0.1:9523/mcp
+```
+
+Antigravity（`~/.gemini/config/mcp_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "layerlens": { "url": "http://127.0.0.1:9523/mcp" }
+  }
+}
 ```
 
 其他支持 Streamable HTTP 的客户端，按各自格式填入上面的地址即可。
