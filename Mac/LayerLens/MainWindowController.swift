@@ -234,8 +234,20 @@ final class MainWindowController: NSWindowController, WKNavigationDelegate, WKUI
 
     /// 用系统浏览器打开当前页面, 网页地址中带着当前设备与 App
     @objc func openInBrowser() {
-        let target = webView.url.flatMap { $0.host == url.host && $0.port == url.port ? $0 : nil } ?? url
-        NSWorkspace.shared.open(target)
+        let fallback = webView.url.flatMap { $0.host == url.host && $0.port == url.port ? $0 : nil } ?? url
+        guard loaded else {
+            NSWorkspace.shared.open(fallback)
+            return
+        }
+        webView.evaluateJavaScript("window.layerlensBrowserURL ? window.layerlensBrowserURL() : location.href") { [weak self] result, _ in
+            guard let self else { return }
+            if let href = result as? String, let target = URL(string: href),
+               target.host == self.url.host, target.port == self.url.port {
+                NSWorkspace.shared.open(target)
+            } else {
+                NSWorkspace.shared.open(fallback)
+            }
+        }
     }
 
     // MARK: - WKNavigationDelegate

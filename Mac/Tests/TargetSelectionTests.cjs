@@ -259,3 +259,24 @@ console.log('PASS device selection and shared offline states/actions across 2D, 
   await next; assert.equal(applied, 'fresh');
   console.log('PASS coalesced list requests and stale HTTP inventory rejection');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+{
+  let replaced = '';
+  const ctx = vm.createContext({
+    TARGET_KEY: 'layerlens_target',
+    targets: {deviceId: 'sim-1', bundleId: 'com.example.app', pinned: false},
+    localStorage: {setItem() {}},
+    history: {replaceState: (_, __, next) => { replaced = next; }},
+    location: {origin: 'http://127.0.0.1:9523', pathname: '/', href: 'http://127.0.0.1:9523/'},
+    URLSearchParams,
+  });
+  vm.runInContext(section('function targetQuery(', 'function setTargetPinned('), ctx);
+  ctx.rememberTarget('sim-1', 'com.example.app');
+  assert.equal(replaced, '?device=sim-1&app=com.example.app');
+  assert.equal(ctx.layerlensBrowserURL(), 'http://127.0.0.1:9523/?device=sim-1&app=com.example.app');
+  ctx.targets.pinned = true;
+  assert.equal(ctx.layerlensBrowserURL(), 'http://127.0.0.1:9523/?device=sim-1&app=com.example.app&pin=1');
+  ctx.targets.bundleId = '';
+  assert.equal(ctx.layerlensBrowserURL(), 'http://127.0.0.1:9523/?device=sim-1&app=');
+  console.log('PASS browser URL carries current device, app and pin state');
+}

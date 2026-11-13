@@ -3701,6 +3701,12 @@ function followForeground(next) {
   toast(t('已切换到前台 App {0}', app?.appName || next[1]));
 }
 
+function targetQuery(deviceId, bundleId, pinned = !!targets.pinned && !!bundleId) {
+  const params = new URLSearchParams({ device: deviceId, app: bundleId || '' });
+  if (pinned && bundleId) params.set('pin', '1');
+  return '?' + params.toString();
+}
+
 // 同一设备上换 App: 只替换目标、事件流、App 信息和层级, 不重新加载页面, 实时画面不中断
 function rememberTarget(deviceId, bundleId) {
   const pinned = !!targets.pinned && !!bundleId;
@@ -3709,9 +3715,12 @@ function rememberTarget(deviceId, bundleId) {
   } catch (e) {
     // 不可用时只依赖地址参数
   }
-  const params = new URLSearchParams({ device: deviceId, app: bundleId });
-  if (pinned) params.set('pin', '1');
-  history.replaceState(null, '', '?' + params.toString());
+  history.replaceState(null, '', targetQuery(deviceId, bundleId, pinned));
+}
+
+function layerlensBrowserURL() {
+  if (!targets.deviceId) return location.href;
+  return `${location.origin}${location.pathname}${targetQuery(targets.deviceId, targets.bundleId)}`;
 }
 
 function setTargetPinned(on) {
@@ -9336,6 +9345,7 @@ async function start() {
   pageActivity.ready = true;
   migrateTargetHistory();
   pickTarget();
+  if (targets.deviceId) rememberTarget(targets.deviceId, targets.bundleId);
   reportCommandSelection(targets.deviceId, targets.bundleId);
   restoreCommandRuns();
   const device = currentDevice();

@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openInBrowser() {
-        NSWorkspace.shared.open(server.baseURL)
+        windowController.openInBrowser()
     }
 
     @objc func reloadPage() {
