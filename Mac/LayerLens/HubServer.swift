@@ -309,6 +309,19 @@ final class HubServer {
                 let versions = XcodeController.installedXcodes().map { ["path": $0.path, "version": $0.version, "name": $0.name] }
                 connection.respond(.json(["xcodes": versions, "defaultPath": XcodeController.defaultXcodePath() ?? ""]))
             }
+        case "/api/hub/worktrees":
+            let deviceId = head.query["device"] ?? ""
+            let bundleId = head.query["app"] ?? ""
+            let verifySimulator = head.query["verify"] == "1"
+            guard !deviceId.isEmpty, !bundleId.isEmpty else {
+                connection.respond(.json(["deviceId": deviceId, "bundleId": bundleId, "activeWorktree": "", "liveWorktree": "", "overridden": false, "worktrees": []]))
+                return
+            }
+            registry.deviceKind(deviceId: deviceId) { [self] kind in
+                workQueue.async { [self] in
+                    connection.respond(.json(resolveWorktreeState(deviceId: deviceId, bundleId: bundleId, kind: kind, verifySimulator: verifySimulator)))
+                }
+            }
         case "/api/hub/mcp/status":
             connection.respond(.json(mcpStatus()))
         case "/api/hub/mcp/windows":
@@ -325,8 +338,9 @@ final class HubServer {
         case "/api/hub/command-runs":
             connection.respond(.json(["runs": commandRun.currentRuns()]))
         case "/api/hub/command-run-status":
-            if let state = commandRun.status(id: head.query["run"] ?? "") {
-                connection.respond(.json(["status": state.0, "detail": state.1, "buildStarted": state.2]))
+            let since = Int(head.query["since"] ?? "") ?? 0
+            if let state = commandRun.statusDetail(id: head.query["run"] ?? "", since: since) {
+                connection.respond(.json(state))
             } else { connection.respond(.error(404, "Run not found")) }
         case "/api/hub/run-status":
             let runId = head.query["run"] ?? ""
@@ -546,14 +560,32 @@ final class HubServer {
         case "/api/hub/command-run":
             let bundle = json["app"] as? String ?? ""
             let device = json["device"] as? String ?? ""
+            let requestedWorktree = json["worktree"] as? String ?? ""
             guard !bundle.isEmpty, !device.isEmpty else { connection.respond(.error(400, "Invalid target")); return }
-            let source = registry.sourceFile(deviceId: device, bundleId: bundle)
             registry.deviceKind(deviceId: device) { [self] kind in
                 guard let kind else { connection.respond(.error(404, "Device not found")); return }
-                let id = commandRun.start(device: device, bundle: bundle, source: source, simulator: kind == .simulator, owner: json["owner"] as? String ?? "", order: json["order"] as? Int ?? 0, xcodePath: json["xcodePath"] as? String ?? "") { [weak self] in
-                    self?.goHomeBeforeBuild(device: device, bundle: bundle, kind: kind)
+                workQueue.async { [self] in
+                    let resolved = resolveRunSource(deviceId: device, bundleId: bundle, kind: kind, requestedWorktree: requestedWorktree)
+                    let id = commandRun.start(device: device, bundle: bundle, source: resolved.sourceFile, worktree: resolved.worktree, simulator: kind == .simulator, owner: json["owner"] as? String ?? "", order: json["order"] as? Int ?? 0, xcodePath: json["xcodePath"] as? String ?? "") { [weak self] in
+                        self?.goHomeBeforeBuild(device: device, bundle: bundle, kind: kind)
+                    }
+                    connection.respond(.json(["runId": id]))
                 }
-                connection.respond(.json(["runId": id]))
+            }
+        case "/api/hub/worktree":
+            let deviceId = json["device"] as? String ?? ""
+            let bundleId = json["app"] as? String ?? ""
+            let requested = json["path"] as? String ?? ""
+            guard !deviceId.isEmpty, !bundleId.isEmpty else { connection.respond(.error(400, "Invalid target")); return }
+            if !requested.isEmpty && !FileManager.default.fileExists(atPath: requested) {
+                connection.respond(.error(404, "Worktree not found")); return
+            }
+            registry.deviceKind(deviceId: deviceId) { [self] kind in
+                workQueue.async { [self] in
+                    let normalized = requested.isEmpty ? nil : URL(fileURLWithPath: requested).standardizedFileURL.path
+                    registry.setWorktreeOverride(normalized, deviceId: deviceId, bundleId: bundleId)
+                    connection.respond(.json(resolveWorktreeState(deviceId: deviceId, bundleId: bundleId, kind: kind, verifySimulator: false)))
+                }
             }
         case "/api/hub/command-run-selection":
             guard let owner = json["owner"] as? String, !owner.isEmpty,
@@ -567,14 +599,15 @@ final class HubServer {
         case "/api/hub/run":
             let bundleId = json["app"] as? String ?? ""
             let deviceId = json["device"] as? String ?? ""
-            let sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
+            let requestedWorktree = json["worktree"] as? String ?? ""
             registry.deviceKind(deviceId: deviceId) { [self] kind in
                 guard let kind else {
                     connection.respond(.json(["error": "xcode_destination_unavailable"], status: 400))
                     return
                 }
                 workQueue.async { [self] in
-                    switch xcode.run(sourceFile: sourceFile, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator, xcodePath: json["xcodePath"] as? String ?? "", beforeBuild: {
+                    let resolved = resolveRunSource(deviceId: deviceId, bundleId: bundleId, kind: kind, requestedWorktree: requestedWorktree)
+                    switch xcode.run(sourceFile: resolved.sourceFile, worktreeRoot: resolved.worktree, deviceId: deviceId, bundleId: bundleId, simulator: kind == .simulator, xcodePath: json["xcodePath"] as? String ?? "", beforeBuild: {
                         goHomeBeforeBuild(device: deviceId, bundle: bundleId, kind: kind)
                     }) {
                     case .success(let runId):
@@ -825,7 +858,7 @@ final class HubServer {
                     return
                 }
                 var info: [String: Any] = ["root": root, "name": (root as NSString).lastPathComponent, "home": NSHomeDirectory()]
-                if git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) != nil {
+                if effectiveRepository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) != nil {
                     let branch = GitController.run(root, ["rev-parse", "--abbrev-ref", "HEAD"], timeout: 5, readOnly: true)
                     if branch.ok { info["branch"] = branch.text.trimmingCharacters(in: .whitespacesAndNewlines) }
                 }
@@ -860,10 +893,98 @@ final class HubServer {
 
     /// 终端的工作目录: App 源码所在仓库的根目录, 不在仓库中时为源文件所在目录
     private func terminalRoot(deviceId: String, bundleId: String, sourceFile: String) -> String? {
-        if let root = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) { return root }
+        if let root = effectiveRepository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) { return root }
         guard let directory = XcodeSourcePath.sourceDirectory(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile),
               FileManager.default.fileExists(atPath: directory) else { return nil }
         return directory
+    }
+
+    private func effectiveRepository(deviceId: String, bundleId: String, sourceFile: String) -> String? {
+        if let overrideRoot = registry.worktreeOverride(deviceId: deviceId, bundleId: bundleId),
+           FileManager.default.fileExists(atPath: overrideRoot),
+           let root = git.repository(forDirectory: overrideRoot) {
+            return root
+        }
+        return git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+    }
+
+    private func refreshSimulatorSourceIfDisconnected(deviceId: String, bundleId: String, kind: DeviceKind?, currentSource: String) -> String {
+        guard kind == .simulator, !registry.isAppConnected(deviceId: deviceId, bundleId: bundleId),
+              let hostProject = XcodeSourcePath.simulatorBinaryHostProject(deviceId: deviceId, bundleId: bundleId) else {
+            return currentSource
+        }
+        let hostDir = (hostProject as NSString).deletingLastPathComponent
+        let installedRepo = git.repository(forDirectory: hostDir)
+        let recordedDir = XcodeSourcePath.sourceDirectory(for: currentSource)
+        let recordedMissing = currentSource.isEmpty || (recordedDir.map { !FileManager.default.fileExists(atPath: $0) } ?? true)
+        let recordedRepo = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: currentSource)
+        if recordedMissing || (installedRepo != nil && installedRepo != recordedRepo) {
+            registry.rememberSourceFile(hostProject, deviceId: deviceId, bundleId: bundleId)
+            return hostProject
+        }
+        return currentSource
+    }
+
+    private func resolveRunSource(deviceId: String, bundleId: String, kind: DeviceKind?, requestedWorktree: String) -> (sourceFile: String, worktree: String) {
+        var sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
+        var worktree = !requestedWorktree.isEmpty ? requestedWorktree : (registry.worktreeOverride(deviceId: deviceId, bundleId: bundleId) ?? "")
+        if !worktree.isEmpty && !FileManager.default.fileExists(atPath: worktree) {
+            registry.setWorktreeOverride(nil, deviceId: deviceId, bundleId: bundleId)
+            if requestedWorktree.isEmpty { worktree = "" }
+        }
+        if worktree.isEmpty {
+            sourceFile = refreshSimulatorSourceIfDisconnected(deviceId: deviceId, bundleId: bundleId, kind: kind, currentSource: sourceFile)
+            let liveRepo = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+            if liveRepo == nil {
+                let savedCommon = registry.commonGitDir(deviceId: deviceId, bundleId: bundleId) ?? ""
+                let available = git.worktrees(for: savedCommon)
+                if available.count == 1 { worktree = available[0].path }
+            }
+        }
+        return (sourceFile, worktree)
+    }
+
+    private func resolveWorktreeState(deviceId: String, bundleId: String, kind: DeviceKind?, verifySimulator: Bool) -> [String: Any] {
+        var sourceFile = registry.sourceFile(deviceId: deviceId, bundleId: bundleId)
+        if verifySimulator {
+            sourceFile = refreshSimulatorSourceIfDisconnected(deviceId: deviceId, bundleId: bundleId, kind: kind, currentSource: sourceFile)
+        }
+        let liveRepo = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile)
+        if let liveRepo, let commonDir = git.commonGitDirectory(for: liveRepo) {
+            registry.rememberCommonGitDir(commonDir, deviceId: deviceId, bundleId: bundleId)
+        }
+        var overrideRoot = registry.worktreeOverride(deviceId: deviceId, bundleId: bundleId)
+        if let current = overrideRoot, !FileManager.default.fileExists(atPath: current) {
+            registry.setWorktreeOverride(nil, deviceId: deviceId, bundleId: bundleId)
+            overrideRoot = nil
+        }
+        let anchor = liveRepo ?? overrideRoot ?? registry.commonGitDir(deviceId: deviceId, bundleId: bundleId) ?? ""
+        let worktrees = git.worktrees(for: anchor)
+        if let current = overrideRoot, current == liveRepo {
+            registry.setWorktreeOverride(nil, deviceId: deviceId, bundleId: bundleId)
+            overrideRoot = nil
+        }
+        let activeWorktree: String
+        if let overrideRoot {
+            activeWorktree = overrideRoot
+        } else if let liveRepo {
+            activeWorktree = liveRepo
+        } else if worktrees.count == 1 {
+            activeWorktree = worktrees[0].path
+        } else {
+            activeWorktree = ""
+        }
+        let rows: [[String: Any]] = worktrees.map { item in
+            ["path": item.path, "name": item.name, "branch": item.branch, "head": item.head, "isMain": item.isMain, "detached": item.detached]
+        }
+        return [
+            "deviceId": deviceId,
+            "bundleId": bundleId,
+            "activeWorktree": activeWorktree,
+            "liveWorktree": liveRepo ?? "",
+            "overridden": overrideRoot != nil,
+            "worktrees": rows,
+        ]
     }
 
     /// 改动面板: /api/hub/git/<操作>?app=<Bundle ID>. 仓库由该 App 上报的源文件路径推断, 找不到时返回 reason 供网页提示
@@ -876,7 +997,7 @@ final class HubServer {
         // 事件流先在本队列分离连接, 解析仓库较慢, 放到工作队列
         let stream = head.method == "GET" && action == "events" ? connection.detach() : nil
         workQueue.async { [self] in
-            guard let root = git.repository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) else {
+            guard let root = effectiveRepository(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile) else {
                 let reason = sourceFile.isEmpty ? "noSource" : "notRepo"
                 if let stream {
                     // 返回错误码让浏览器停止重连, 由网页按 repo 接口的结果提示

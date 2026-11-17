@@ -8,6 +8,7 @@ final class CommandRunController {
         let device: String
         let bundle: String
         let source: String
+        let worktree: String
         let simulator: Bool
         let owner: String
         let xcodePath: String
@@ -20,8 +21,10 @@ final class CommandRunController {
         var process: Process?
         var canTerminate = false
         var superseded = false
-        init(device: String, bundle: String, source: String, simulator: Bool, owner: String, xcodePath: String, beforeBuild: @escaping () -> Void) {
-            self.device = device; self.bundle = bundle; self.source = source; self.simulator = simulator; self.owner = owner
+        var outputLines: [String] = []
+        var outputBaseIndex = 0
+        init(device: String, bundle: String, source: String, worktree: String = "", simulator: Bool, owner: String, xcodePath: String, beforeBuild: @escaping () -> Void) {
+            self.device = device; self.bundle = bundle; self.source = source; self.worktree = worktree; self.simulator = simulator; self.owner = owner
             self.xcodePath = xcodePath
             self.beforeBuild = beforeBuild
         }
@@ -44,7 +47,7 @@ final class CommandRunController {
     private let reuseXcodeDerivedData: Bool
     private let derivedDataRoot: URL
     private let log: (String) -> Void
-    init(executable: String = "/usr/bin/xcrun", queryTimeout: TimeInterval = 6, cacheRoot: URL? = nil, derivedDataRoot: URL? = nil, log: @escaping (String) -> Void = { _ in }) {
+    init(executable: String = "/usr/bin/xcrun", queryTimeout: TimeInterval = 20, cacheRoot: URL? = nil, derivedDataRoot: URL? = nil, log: @escaping (String) -> Void = { _ in }) {
         self.executable = executable; self.queryTimeout = queryTimeout
         self.reuseXcodeDerivedData = cacheRoot == nil
         self.cacheRoot = cacheRoot ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!.appendingPathComponent("LayerLens/CommandBuilds", isDirectory: true)
@@ -52,8 +55,8 @@ final class CommandRunController {
         self.log = log
     }
 
-    func start(device: String, bundle: String, source: String, simulator: Bool, owner: String = "", order: Int = 0, xcodePath: String = "", beforeBuild: @escaping () -> Void = {}) -> String {
-        let job = Job(device: device, bundle: bundle, source: source, simulator: simulator, owner: owner, xcodePath: xcodePath, beforeBuild: beforeBuild)
+    func start(device: String, bundle: String, source: String, worktree: String = "", simulator: Bool, owner: String = "", order: Int = 0, xcodePath: String = "", beforeBuild: @escaping () -> Void = {}) -> String {
+        let job = Job(device: device, bundle: bundle, source: source, worktree: worktree, simulator: simulator, owner: owner, xcodePath: xcodePath, beforeBuild: beforeBuild)
         lock.lock()
         jobs = jobs.filter { _, old in
             !["succeeded", "failed", "cancelled", "superseded", "skipped"].contains(old.status) || Date().timeIntervalSince(old.created) < 3600
@@ -143,6 +146,21 @@ final class CommandRunController {
         return (job.status, job.detail, job.buildStarted)
     }
 
+    func statusDetail(id: String, since: Int = 0) -> [String: Any]? {
+        lock.lock(); defer { lock.unlock() }
+        guard let job = jobs[id] else { return nil }
+        let start = max(0, since - job.outputBaseIndex)
+        let logs = start < job.outputLines.count ? Array(job.outputLines.dropFirst(start)) : []
+        return [
+            "status": job.status,
+            "detail": job.detail,
+            "buildStarted": job.buildStarted,
+            "elapsed": Int(max(0, Date().timeIntervalSince(job.created))),
+            "logCursor": job.outputBaseIndex + job.outputLines.count,
+            "logs": logs,
+        ]
+    }
+
     private func takeNext(_ device: String) -> Job? {
         guard active[device] == nil, let job = pending.removeValue(forKey: device) else { return nil }
         active[device] = job
@@ -187,19 +205,137 @@ final class CommandRunController {
         }
         return true
     }
-    private static func buildProgress(_ line: String) -> String? {
-        let fields = line.split(whereSeparator: \.isWhitespace).map(String.init)
+    private static func readableOutputLine(_ rawLine: String) -> String? {
+        let trimmed = rawLine.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n"))
+        guard !trimmed.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        if trimmed.hasPrefix("    ") {
+            let body = trimmed.trimmingCharacters(in: .whitespaces)
+            if body.hasPrefix("cd ") || body.hasPrefix("export ") || body.hasPrefix("/Applications/") || body.hasPrefix("builtin-") || body.hasPrefix("/usr/bin/") || body.count > 220 {
+                let lower = body.lowercased()
+                if !(lower.contains("error:") || lower.contains("warning:") || lower.contains("undefined symbols")) {
+                    return nil
+                }
+            }
+        }
+        return trimmed.count > 400 ? String(trimmed.prefix(397)) + "..." : trimmed
+    }
+
+    private func appendOutput(_ job: Job, _ line: String) {
+        lock.lock()
+        appendOutputLocked(job, line)
+        lock.unlock()
+    }
+
+    private func appendOutputLocked(_ job: Job, _ line: String) {
+        if job.outputLines.last == line { return }
+        job.outputLines.append(line)
+        if job.outputLines.count > 400 {
+            let drop = job.outputLines.count - 400
+            job.outputLines.removeFirst(drop)
+            job.outputBaseIndex += drop
+        }
+    }
+
+    static let skipPackageResolutionFlags = ["-disableAutomaticPackageResolution", "-skipPackageUpdates"]
+
+    /// 检查构建目录是否已有已解析的 SwiftPM 状态，有则跳过自动解析与更新检查。
+    static func hasResolvedPackages(in derivedDataPath: String) -> Bool {
+        FileManager.default.fileExists(atPath: URL(fileURLWithPath: derivedDataPath).appendingPathComponent("SourcePackages/workspace-state.json").path)
+    }
+
+    static func isPackageResolutionFailure(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("could not resolve package dependencies")
+            || lower.contains("automatic dependency resolution is disabled")
+            || lower.contains("automatic package resolution is disabled")
+            || lower.contains("a resolved file is required when automatic dependency resolution is disabled")
+    }
+
+    static func isGenericDestinationFailure(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("requires a provisioning profile")
+            || lower.contains("no profiles for")
+            || lower.contains("isn't registered in your developer account")
+            || lower.contains("doesn't include the currently selected device")
+            || lower.contains("no devices are registered")
+            || lower.contains("no signing certificate")
+            || lower.contains("unable to find a destination matching")
+    }
+
+    static func replacingDestination(in arguments: [String], with destination: String) -> [String] {
+        var updated = arguments
+        if let index = updated.firstIndex(of: "-destination"), index + 1 < updated.count {
+            updated[index + 1] = destination
+        }
+        return updated
+    }
+
+    private func attemptBuild(_ job: Job, base: [String], derivedDataPath derived: String) -> (Int32, String)? {
+        let skipFlags = Self.hasResolvedPackages(in: derived) ? Self.skipPackageResolutionFlags : []
+        guard let result = runProcess(job, base + skipFlags + ["build"], cancellable: true, marksBuild: true) else { return nil }
+        guard result.0 != 0, !skipFlags.isEmpty, Self.isPackageResolutionFailure(result.1) else { return result }
+        log("command-run id=\(job.id) phase=build-retry reason=package-resolution")
+        appendOutput(job, "[LayerLens] SwiftPM 依赖可能已变更，正在重新解析并构建…")
+        return runProcess(job, base + ["build"], cancellable: true, marksBuild: true)
+    }
+
+    private func runBuild(_ job: Job, base: [String], derivedDataPath derived: String) -> (Int32, String)? {
+        guard let result = attemptBuild(job, base: base, derivedDataPath: derived) else { return nil }
+        guard result.0 != 0, !job.simulator, Self.isGenericDestinationFailure(result.1) else { return result }
+        log("command-run id=\(job.id) phase=build-retry reason=device-destination")
+        appendOutput(job, "[LayerLens] 通用构建目标受阻，正在指定当前设备重试…")
+        return attemptBuild(job, base: Self.replacingDestination(in: base, with: "id=\(job.device)"), derivedDataPath: derived)
+    }
+
+    private static func targetName(in line: String) -> String? {
+        guard let start = line.range(of: "in target '")?.upperBound,
+              let end = line[start...].firstIndex(of: "'") else { return nil }
+        let name = String(line[start..<end])
+        return name.isEmpty ? nil : name
+    }
+
+    static func buildProgress(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("Resolve Package Graph") { return "解析 SwiftPM 依赖" }
+        if trimmed.hasPrefix("Resolved source packages:") { return "匹配运行目标" }
+        if trimmed.hasPrefix("ComputeTargetDependencyGraph") || trimmed.hasPrefix("ComputePackagePrebuildTargetDependencyGraph") || trimmed.hasPrefix("CreateBuildDescription") || trimmed.hasPrefix("GatherProvisioningInputs") {
+            return "规划构建"
+        }
+        if trimmed == "** BUILD SUCCEEDED **" { return "构建完成" }
+        let fields = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
         guard let kind = fields.first else { return nil }
         switch kind {
         case "SwiftCompile", "CompileSwift", "CompileC", "CompileCXX":
             let extensions = [".swift", ".m", ".mm", ".c", ".cc", ".cpp"]
-            guard let path = fields.dropFirst().first(where: { field in extensions.contains { field.hasSuffix($0) } }) else { return nil }
-            return "编译 " + URL(fileURLWithPath: path).lastPathComponent
-        case "Ld": return "链接"
-        case "CodeSign": return "签名"
+            let cleaned = trimmed.replacingOccurrences(of: "\\ ", with: " ")
+            if let path = cleaned.split(whereSeparator: \.isWhitespace).dropFirst().first(where: { field in extensions.contains { field.hasSuffix($0) } }) {
+                return "编译 " + URL(fileURLWithPath: String(path)).lastPathComponent
+            }
+            if let target = targetName(in: trimmed) { return "编译 " + target }
+            return nil
+        case "CompileSwiftSources", "SwiftDriver", "SwiftDriver\\":
+            if let target = targetName(in: trimmed) { return "编译模块 " + target }
+            return "准备 Swift 编译"
+        case "SwiftEmitModule", "SwiftMergeGeneratedHeaders":
+            if let target = targetName(in: trimmed) { return "生成模块 " + target }
+            return "生成 Swift 模块"
+        case "Ld":
+            if let target = targetName(in: trimmed) { return "链接 " + target }
+            return "链接"
+        case "CodeSign":
+            if let app = fields.dropFirst().first(where: { $0.hasSuffix(".app") || $0.hasSuffix(".framework") }) {
+                return "签名 " + URL(fileURLWithPath: app).lastPathComponent
+            }
+            return "签名"
         case "CompileAssetCatalog", "CompileAssetCatalogVariant": return "编译资源"
-        case "LinkStoryboards": return "处理界面资源"
-        case "PhaseScriptExecution": return "执行构建脚本"
+        case "LinkStoryboards", "CompileStoryboard", "CompileXIB": return "处理界面资源"
+        case "PhaseScriptExecution":
+            let rest = trimmed.dropFirst("PhaseScriptExecution".count).trimmingCharacters(in: .whitespaces)
+            let beforeTarget = rest.components(separatedBy: " (in target").first ?? rest
+            let scriptName = beforeTarget.components(separatedBy: " /").first?.replacingOccurrences(of: "\\ ", with: " ").trimmingCharacters(in: .whitespaces) ?? ""
+            return scriptName.isEmpty ? "执行构建脚本" : "脚本 " + String(scriptName.prefix(24))
+        case "ProcessInfoPlistFile", "ProcessProductPackaging": return "处理配置"
+        case "CopySwiftLibs", "Touch", "Validate": return "打包校验"
         default: return nil
         }
     }
@@ -266,9 +402,12 @@ final class CommandRunController {
                     while let end = progressLine.firstIndex(of: 10) {
                         let line = String(decoding: progressLine[..<end], as: UTF8.self)
                         progressLine.removeSubrange(...end)
-                        if let detail = Self.buildProgress(line) {
+                        let formatted = Self.readableOutputLine(line)
+                        let detail = Self.buildProgress(line)
+                        if formatted != nil || detail != nil {
                             lock.lock()
-                            if job.status == "building" && !job.cancelled { job.detail = detail }
+                            if let formatted, !job.cancelled { appendOutputLocked(job, formatted) }
+                            if let detail, job.status == "building" && !job.cancelled { job.detail = detail }
                             lock.unlock()
                         }
                     }
@@ -288,7 +427,11 @@ final class CommandRunController {
         if expired { return (-1, "项目配置查询超时") }
         return (process.terminationStatus, String(decoding: output, as: UTF8.self))
     }
-    private func fail(_ job: Job, _ message: String) { _ = update(job, "failed", String(message.suffix(4000))) }
+    private func fail(_ job: Job, _ message: String) {
+        let short = message.split(whereSeparator: \.isNewline).first.map(String.init) ?? message
+        appendOutput(job, "[LayerLens] 失败: \(String(short.prefix(300)))")
+        _ = update(job, "failed", String(message.suffix(4000)))
+    }
 
     private func run(_ job: Job, useSavedScheme: Bool = true, useSavedHost: Bool = true, refreshed: Bool = false, verificationDeadline: TimeInterval? = nil) {
         var deadline = verificationDeadline ?? (ProcessInfo.processInfo.systemUptime + queryTimeout)
@@ -297,10 +440,16 @@ final class CommandRunController {
         if !job.xcodePath.isEmpty && !XcodeController.installedXcodes().contains(where: { $0.path == URL(fileURLWithPath: job.xcodePath).resolvingSymlinksInPath().path }) {
             fail(job, "所选 Xcode 不可用，请重新选择"); return
         }
-        guard !job.source.isEmpty else { fail(job, "未找到 App 上报的源码路径，无法查找项目"); return }
-        let sourceDir = URL(fileURLWithPath: job.source).deletingLastPathComponent().standardizedFileURL
-        let packageBuild = XcodeSourcePath.packageBuildDirectory(containing: sourceDir)
-        let localPackage = XcodeSourcePath.isLocalLayerLensPackage(job.source)
+        let hasWorktree = !job.worktree.isEmpty
+        if !hasWorktree && job.source.isEmpty { fail(job, "未找到 App 上报的源码路径，无法查找项目"); return }
+        let sourceDir = hasWorktree
+            ? URL(fileURLWithPath: job.worktree).standardizedFileURL
+            : URL(fileURLWithPath: job.source).deletingLastPathComponent().standardizedFileURL
+        if hasWorktree && !FileManager.default.fileExists(atPath: sourceDir.path) {
+            fail(job, "所选工作区目录不存在，请重新选择"); return
+        }
+        let packageBuild = hasWorktree ? nil : XcodeSourcePath.packageBuildDirectory(containing: sourceDir)
+        let localPackage = hasWorktree ? false : XcodeSourcePath.isLocalLayerLensPackage(job.source)
         let needsHostResolution = packageBuild != nil || localPackage
         let resolveStarted = ProcessInfo.processInfo.systemUptime
         let resolvedHost = needsHostResolution
@@ -320,17 +469,17 @@ final class CommandRunController {
             run(job, useSavedScheme: false, useSavedHost: false, refreshed: refreshed, verificationDeadline: deadline)
             return true
         }
-        log("command-run id=\(job.id) phase=host-resolution source=\(resolvedHost?.source ?? "source") elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - resolveStarted) * 1000))")
+        log("command-run id=\(job.id) phase=host-resolution source=\(hasWorktree ? "worktree" : (resolvedHost?.source ?? "source")) elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - resolveStarted) * 1000))")
         if needsHostResolution && hostProject == nil {
             fail(job, packageBuild != nil
                 ? "无法从 Xcode 构建目录或本地记录确定宿主项目，请先在 Xcode 中运行此 App"
                 : "无法从构建产物唯一确定宿主项目，请先在 Xcode 中运行此 App")
             return
         }
-        if hostProject == nil && !FileManager.default.fileExists(atPath: sourceDir.path) {
+        if !hasWorktree && hostProject == nil && !FileManager.default.fileExists(atPath: sourceDir.path) {
             fail(job, "App 上报的源码目录不存在，无法查找项目"); return
         }
-        let savedKey = hostProject.map { job.bundle + "|" + $0 } ?? job.bundle
+        let savedKey = hostProject.map { job.bundle + "|" + $0 } ?? (hasWorktree ? job.bundle + "|wt|" + sourceDir.path : job.bundle)
         let saved = useSavedScheme ? (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [String: String]])?[savedKey] : nil
         let savedProject = hostProject ?? saved.flatMap { Self.resolveRelative($0["path"] ?? "", from: sourceDir) }
         let sdk = job.simulator ? "iphonesimulator" : "iphoneos"
@@ -340,7 +489,7 @@ final class CommandRunController {
         func plans(_ project: String) -> [(String, XcodeRunPlan.Candidate)]? {
             guard remaining() > 0 else { resolutionFailed = true; return [] }
             let flag = project.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
-            guard let list = runProcess(job, ["xcodebuild", flag, project, "-list", "-json", "-disableAutomaticPackageResolution", "-skipPackageUpdates"], cancellable: true, timeout: remaining()) else { return nil }
+            guard let list = runProcess(job, ["xcodebuild", flag, project, "-list", "-json"] + Self.skipPackageResolutionFlags, cancellable: true, timeout: remaining()) else { return nil }
             let jsonText = list.1.firstIndex(of: "{").map { String(list.1[$0...]) } ?? list.1
             guard list.0 == 0, let data = jsonText.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let info = (json["workspace"] ?? json["project"]) as? [String: Any], let names = info["schemes"] as? [String] else { resolutionFailed = true; return [] }
@@ -350,14 +499,14 @@ final class CommandRunController {
                 let key = candidate.project + "\n" + candidate.configuration
                 if failedTargetSettings.contains(key) { continue }
                 if targetSettings[key] == nil {
-                    guard let result = runProcess(job, ["xcodebuild", "-project", candidate.project, "-alltargets", "-configuration", candidate.configuration, "-sdk", sdk, "-showBuildSettings", "-json", "-disableAutomaticPackageResolution", "-skipPackageUpdates"], cancellable: true, timeout: remaining()) else { return nil }
+                    guard let result = runProcess(job, ["xcodebuild", "-project", candidate.project, "-alltargets", "-configuration", candidate.configuration, "-sdk", sdk, "-showBuildSettings", "-json"] + Self.skipPackageResolutionFlags, cancellable: true, timeout: remaining()) else { return nil }
                     guard result.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(result.1.utf8)) else { resolutionFailed = true; failedTargetSettings.insert(key); continue }
                     targetSettings[key] = values
                 }
                 guard let values = targetSettings[key], XcodeRunPlan.matchesBundle(values, candidate: candidate, bundleId: job.bundle) else { continue }
                 // 项目级结果仅用于筛选，最终仍验证工作区和 Scheme 的实际 Bundle ID。
                 guard remaining() > 0 else { resolutionFailed = true; break }
-                guard let exact = runProcess(job, ["xcodebuild", flag, project, "-scheme", candidate.scheme, "-configuration", candidate.configuration, "-sdk", sdk, "-showBuildSettings", "-json", "-disableAutomaticPackageResolution", "-skipPackageUpdates"], cancellable: true, timeout: remaining()) else { return nil }
+                guard let exact = runProcess(job, ["xcodebuild", flag, project, "-scheme", candidate.scheme, "-configuration", candidate.configuration, "-sdk", sdk, "-showBuildSettings", "-json"] + Self.skipPackageResolutionFlags, cancellable: true, timeout: remaining()) else { return nil }
                 guard exact.0 == 0, let verified = XcodeRunPlan.decodeSettings(Data(exact.1.utf8)) else { resolutionFailed = true; continue }
                 if XcodeRunPlan.matchesBundle(verified, candidate: candidate, bundleId: job.bundle) { matched.append((project, candidate)) }
             }
@@ -400,7 +549,14 @@ final class CommandRunController {
                 matches.append(contentsOf: found)
                 if remaining() <= 0 { resolutionFailed = true; break }
             }
-            guard !resolutionFailed else { fail(job, "项目配置查询超时或无法读取，请检查项目后重试"); return }
+            guard !resolutionFailed else {
+                let timedOut = remaining() <= 0
+                let limit = queryTimeout >= 1 ? "（已超过 \(Int(queryTimeout)) 秒）" : ""
+                fail(job, timedOut
+                    ? "查询项目配置超时\(limit)，请重试或在 Xcode 中先运行一次"
+                    : "无法读取项目配置，请检查工程是否有效或先在 Xcode 中打开构建一次")
+                return
+            }
             // 仅去掉工作区已包含的同一项目入口，不合并不同工作区。
             func identity(_ candidate: XcodeRunPlan.Candidate) -> String {
                 [candidate.project, candidate.target, candidate.scheme, candidate.configuration].joined(separator: "\n")
@@ -409,7 +565,10 @@ final class CommandRunController {
             let unique = matches.filter { $0.0.hasSuffix(".xcworkspace") || !workspaceIDs.contains(identity($0.1)) }
             guard unique.count == 1, let match = unique.first else {
                 if unique.isEmpty, retryWithoutSavedHost() { return }
-                fail(job, unique.isEmpty ? "未找到与此 App Bundle ID 匹配的项目和 Scheme" : "多个项目或 Scheme 匹配此 App，请保留唯一的运行配置")
+                let location = hasWorktree ? "所选工作区（\(sourceDir.lastPathComponent)）" : "当前源码目录"
+                fail(job, unique.isEmpty
+                    ? "在\(location)未找到与 \(job.bundle) 匹配的项目和 Scheme"
+                    : "多个项目或 Scheme 匹配 \(job.bundle)，请保留唯一的运行配置")
                 return
             }
             chosen = match
@@ -431,7 +590,11 @@ final class CommandRunController {
         }
         let derived = shared?.path ?? cacheRoot.appendingPathComponent(digest, isDirectory: true).path
         log("command-run id=\(job.id) phase=derived-data source=\(shared == nil ? "isolated" : "xcode") path=\(derived)")
-        let base = ["xcodebuild", flag, project, "-scheme", plan.scheme, "-configuration", plan.configuration, "-destination", "id=\(job.device)", "-derivedDataPath", derived]
+        let projectName = URL(fileURLWithPath: project).lastPathComponent
+        appendOutput(job, "[LayerLens] 工程: \(projectName) · Scheme: \(plan.scheme) · 缓存: \(shared == nil ? "独立隔离" : "复用 Xcode")")
+        // 真机构建先用通用 iOS 目标，避免 xcodebuild 在 CoreDevice 目标解析阶段长阻塞；仅在需要设备签名等场景回退到具体设备 ID。
+        let destination = job.simulator ? "id=\(job.device)" : "generic/platform=iOS"
+        let base = ["xcodebuild", flag, project, "-scheme", plan.scheme, "-configuration", plan.configuration, "-destination", destination, "-derivedDataPath", derived]
         // 已确认项目和 Scheme 时先构建；常规产物无需调用 showBuildSettings。
         let launch = Self.launchOptions(project: project, plan: plan)
         guard !launch.unsupported else { fail(job, "此 Scheme 的运行脚本或自定义工作目录需要通过 Xcode 运行"); return }
@@ -444,7 +607,7 @@ final class CommandRunController {
                 job.beforeBuild()
                 log("command-run id=\(job.id) phase=home elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - homeStarted) * 1000))")
             }
-            guard let built = runProcess(job, base + ["build"], cancellable: true, marksBuild: true) else { return }
+            guard let built = runBuild(job, base: base, derivedDataPath: derived) else { return }
             guard built.0 == 0 else { fail(job, built.1); return }
             builtDirectly = true
             deadline = ProcessInfo.processInfo.systemUptime + queryTimeout
@@ -469,7 +632,7 @@ final class CommandRunController {
             value = cached
         } else {
             guard remaining() > 0 else { fail(job, "项目配置查询超时"); return }
-            let settingsArguments = base + ["-showBuildSettings", "-json"]
+            let settingsArguments = base + Self.skipPackageResolutionFlags + ["-showBuildSettings", "-json"]
             guard let settings = runProcess(job, settingsArguments, cancellable: true, timeout: remaining()) else { return }
             guard settings.0 == 0, let values = XcodeRunPlan.decodeSettings(Data(settings.1.utf8)) else {
                 fail(job, settings.1.isEmpty ? "无法读取当前 Scheme 的构建配置" : settings.1); return
@@ -550,7 +713,7 @@ final class CommandRunController {
             log("command-run id=\(job.id) phase=home elapsed_ms=\(Int((ProcessInfo.processInfo.systemUptime - homeStarted) * 1000))")
         }
         if !builtDirectly {
-            guard let built = runProcess(job, base + ["build"], cancellable: true, marksBuild: true) else { return }
+            guard let built = runBuild(job, base: base, derivedDataPath: derived) else { return }
             guard built.0 == 0 else { fail(job, built.1); return }
         }
         guard Self.appMatchesBundle(app, bundleId: job.bundle) else {
@@ -563,10 +726,12 @@ final class CommandRunController {
             fail(job, "构建成功，但指定产物的 Bundle ID 与当前 App 不匹配"); return
         }
         guard update(job, "installing") else { return }
+        appendOutput(job, "[LayerLens] 构建完成，正在安装到设备…")
         let install = job.simulator ? ["simctl", "install", job.device, app.path] : ["devicectl", "device", "install", "app", "--device", job.device, app.path]
         guard let installed = runProcess(job, install, cancellable: false) else { return }
         guard installed.0 == 0 else { fail(job, installed.1); return }
         guard mayLaunch(job), update(job, "launching") else { return }
+        appendOutput(job, "[LayerLens] 正在启动 App…")
         guard let launched = runProcess(job, command, cancellable: false, environment: environment, requireSelection: true) else { return }
         guard launched.0 == 0 else { fail(job, launched.1); return }
         if let hostProject {

@@ -64,6 +64,50 @@ import Foundation
             assert(done.wait(timeout: .now() + 15) == .success)
         }
         assert(run(["rev-parse", "HEAD"]).text == beforeCommit, "The other branch must not be committed")
+
+        // Multi-worktree enumeration, short collision-free naming, and common git dir recovery.
+        assert(GitController.shortWorktreeNames(for: [
+            "/Users/dev/.codex/worktrees/ea74/App",
+            "/Users/dev/.codex/worktrees/ab12/App",
+            "/Users/dev/Workspace/App-main",
+        ]) == ["ea74", "ab12", "App-main"])
+        let porcelain = """
+        worktree /Users/dev/Workspace/App
+        HEAD 1111111222222
+        branch refs/heads/main
+
+        worktree /Users/dev/.codex/worktrees/ea74/App
+        HEAD 3333333444444
+        detached
+
+        worktree /Users/dev/.codex/worktrees/deleted/App
+        HEAD 5555555666666
+        prunable gitdir file points to non-existent location
+
+        worktree /Users/dev/Workspace/App.bare
+        bare
+
+        """
+        let parsed = GitController.parseWorktrees(porcelain, exists: { $0 != "/Users/dev/.codex/worktrees/deleted/App" })
+        assert(parsed.count == 2)
+        assert(parsed[0].name == "Workspace" && parsed[0].branch == "main" && parsed[0].isMain && !parsed[0].detached)
+        assert(parsed[1].name == "ea74" && parsed[1].branch == "" && parsed[1].head == "3333333" && !parsed[1].isMain && parsed[1].detached)
+
+        let wtB = root + "-wt-b"
+        try? FileManager.default.removeItem(atPath: wtB)
+        defer { try? FileManager.default.removeItem(atPath: wtB) }
+        _ = run(["worktree", "add", "-b", "feat/worktree-b", wtB])
+        let listed = controller.worktrees(for: root)
+        let wtBResolved = URL(fileURLWithPath: wtB).resolvingSymlinksInPath().path
+        let rootResolved = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
+        assert(listed.count == 2 && listed.contains(where: { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == wtBResolved && $0.branch == "feat/worktree-b" }), "listed=\(listed) wtB=\(wtB)")
+        let commonDir = controller.commonGitDirectory(for: wtB)
+        assert(commonDir != nil)
+        _ = run(["worktree", "remove", wtB])
+        if let commonDir {
+            let afterRemove = controller.worktrees(for: commonDir)
+            assert(afterRemove.count == 1 && URL(fileURLWithPath: afterRemove[0].path).resolvingSymlinksInPath().path == rootResolved)
+        }
         print("PASS actual Git stage, unstage and discard treat brackets, wildcards and pathspec-like names literally")
     }
 }

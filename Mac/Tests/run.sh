@@ -82,6 +82,7 @@ swift_test home-button Mac/LayerLens/SimulatorBridge.swift Mac/Tests/SimHomeButt
 swift_test live-video Mac/LayerLens/LiveVideo.swift Mac/Tests/LiveVideoTests.swift
 swift_test target-history Mac/LayerLens/TargetHistory.swift Mac/Tests/TargetHistoryTests.swift
 swift_test target-state Mac/LayerLens/TargetStateHub.swift Mac/Tests/TargetStateHubTests.swift
+swift_test device-discovery Mac/LayerLens/BoundedProcess.swift Mac/LayerLens/HTTPMessage.swift Mac/LayerLens/HTTPClient.swift Mac/LayerLens/Usbmux.swift Mac/LayerLens/AppEventStream.swift Mac/LayerLens/WebSocketConnection.swift Mac/LayerLens/TargetHistory.swift Mac/LayerLens/TargetStateHub.swift Mac/LayerLens/TargetRegistry.swift Mac/Tests/DeviceDiscoveryTests.swift
 swift_test mcp-context Mac/LayerLens/MCPContext.swift Mac/Tests/MCPContextTests.swift
 swift_test screen-color-picker Mac/LayerLens/ScreenColorPicker.swift Mac/Tests/ScreenColorPickerTests.swift
 swift_test mcp-records Mac/LayerLens/MCPRecords.swift Mac/Tests/MCPRecordsTests.swift
@@ -105,7 +106,7 @@ swift_test viewer-epoch "${common[@]}" Mac/Tests/NetworkViewerTestSupport.swift 
 
 for file in \
   GitViewStateTests.cjs GitInteractionTests.cjs RecordClearTests.cjs TargetSelectionTests.cjs TargetTaskTests.cjs AutoFollowTests.cjs PageActivityTests.cjs LiveVideoDecoderTests.cjs LiveBudgetWebTests.cjs NetworkAsyncStateTests.cjs \
-  NetworkCaptureActionTests.cjs NetworkSmallScreenTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs CanvasSelectionTests.cjs Stage3DPaintOrderTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LiveCaptureDeadlineTests.cjs LiveManualReconnectTests.cjs LiveTouchCaptureStateTests.cjs LivePixelZoomTests.cjs MCPContextWebTests.cjs MCPCanvasTests.cjs SystemColorPickerTests.cjs; do
+  NetworkCaptureActionTests.cjs NetworkSmallScreenTests.cjs NetworkViewerWebTests.cjs CommandRunWebTests.cjs XcodeRunTests.cjs WorktreeWebTests.cjs CanvasSelectionTests.cjs Stage3DPaintOrderTests.cjs LiveInspectTests.cjs LiveHomeTests.cjs LiveResumeTests.cjs LiveVideoStateTests.cjs LiveCaptureDeadlineTests.cjs LiveManualReconnectTests.cjs LiveTouchCaptureStateTests.cjs LivePixelZoomTests.cjs MCPContextWebTests.cjs MCPCanvasTests.cjs SystemColorPickerTests.cjs; do
   printf '[Node] %s\n' "$file"
   node "Mac/Tests/$file"
 done

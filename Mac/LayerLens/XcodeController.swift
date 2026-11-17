@@ -7,6 +7,7 @@
 //
 
 import AppKit
+import Darwin
 
 /// 按选中 App 的 Bundle ID 验证 Scheme, 再通过 AppleScript 在指定设备上运行.
 /// 由 LayerLens 进程执行, 系统的"自动化"权限归属 LayerLens.
@@ -23,6 +24,7 @@ final class XcodeController {
             case scriptFailed = "script_failed"
             case busy = "xcode_busy"
             case schemeUnavailable = "xcode_scheme_unverified"
+            case schemeTimeout = "xcode_scheme_timeout"
             case destinationUnavailable = "xcode_destination_unavailable"
         }
 
@@ -63,7 +65,7 @@ final class XcodeController {
     private var sessions: [String: RunSession] = [:]
 
     /// 精确匹配 Run Action 的 App Bundle ID, 不沿用无关 Scheme / 设备。
-    func run(sourceFile: String, deviceId: String, bundleId: String, simulator: Bool, xcodePath: String = "", beforeBuild: () -> Void = {}) -> Result<String, Failure> {
+    func run(sourceFile: String, worktreeRoot: String = "", deviceId: String, bundleId: String, simulator: Bool, xcodePath: String = "", beforeBuild: () -> Void = {}) -> Result<String, Failure> {
         let trace = UUID().uuidString
         let started = ProcessInfo.processInfo.systemUptime
         log("xcode-run id=\(trace) app=\(bundleId) device=\(deviceId) start")
@@ -77,10 +79,16 @@ final class XcodeController {
         defer { operationLock.unlock() }
         guard !bundleId.isEmpty, !deviceId.isEmpty else { return .failure(Failure(code: .schemeUnavailable)) }
         let selected = xcodePath.isEmpty ? Self.defaultXcodePath() : URL(fileURLWithPath: xcodePath).resolvingSymlinksInPath().path
-        guard let selected, Self.installedXcodes().contains(where: { $0.path == selected }) else { return .failure(Failure(code: .xcodeUnavailable)) }
-        guard runningXcodePaths().contains(where: { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == selected }) else { return .failure(.xcodeNotRunning) }
-        return timed("permission") { checkPermission(ask: true) }.flatMap {
-            timed("workspace") { workspace(for: sourceFile, xcodePath: selected) }
+        guard let selected, Self.installedXcodes().contains(where: { $0.path == selected }) else {
+            log("xcode-run id=\(trace) failed code=xcode_unavailable")
+            return .failure(Failure(code: .xcodeUnavailable))
+        }
+        guard isXcodeRunning(at: selected) else {
+            log("xcode-run id=\(trace) failed code=xcode_not_running selected=\(selected)")
+            return .failure(.xcodeNotRunning)
+        }
+        let outcome: Result<String, Failure> = timed("permission") { checkPermission(ask: true, xcodePath: selected) }.flatMap {
+            timed("workspace") { workspace(for: sourceFile, worktreeRoot: worktreeRoot, xcodePath: selected) }
         }.flatMap { xcode, path in
             log("xcode-run id=\(trace) project=\(path) xcode=\(xcode)")
             let metadata = """
@@ -91,13 +99,18 @@ final class XcodeController {
                 let names = output.components(separatedBy: "\n")
                 let schemes = Array(names.dropFirst()).filter { !$0.isEmpty }
                 let sdk = simulator ? "iphonesimulator" : "iphoneos"
-                let deadline = Date().addingTimeInterval(6)
+                let deadline = Date().addingTimeInterval(20)
                 let builder = xcode + "/Contents/Developer/usr/bin/xcodebuild"
+                var queryTimedOut = false
                 func settings(_ arguments: [String]) -> [[String: Any]]? {
                     let remaining = deadline.timeIntervalSinceNow
-                    guard remaining > 0, let result = timed("build-settings", { BoundedProcess.capture(builder,
-                        arguments + ["-showBuildSettings", "-json", "-sdk", sdk, "-disableAutomaticPackageResolution", "-skipPackageUpdates"], timeout: remaining, hardTimeout: true) }),
-                        !result.timedOut, result.status == 0 else { return nil }
+                    guard remaining > 0 else { queryTimedOut = true; return nil }
+                    guard let result = timed("build-settings", { BoundedProcess.capture(builder,
+                        arguments + ["-showBuildSettings", "-json", "-sdk", sdk, "-disableAutomaticPackageResolution", "-skipPackageUpdates"], timeout: remaining, hardTimeout: true) }) else {
+                        return nil
+                    }
+                    if result.timedOut { queryTimedOut = true; return nil }
+                    guard result.status == 0 else { return nil }
                     return XcodeRunPlan.decodeSettings(result.data)
                 }
                 let candidates = XcodeRunPlan.candidates(workspace: path, schemes: schemes)
@@ -114,12 +127,30 @@ final class XcodeController {
                     plan = verified
                     log("xcode-run id=\(trace) phase=plan source=saved")
                 } else {
-                    guard let found = XcodeRunPlan.choose(candidates, active: names.first ?? "", bundleId: bundleId, settings: { project, config in
-                        settings(["-project", project, "-alltargets", "-configuration", config])
-                    }) else { return .failure(Failure(code: .schemeUnavailable)) }
                     let containerFlag = path.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
-                    guard let actual = settings([containerFlag, path, "-scheme", found.scheme, "-configuration", found.configuration]),
-                          XcodeRunPlan.matchesBundle(actual, candidate: found, bundleId: bundleId) else { return .failure(Failure(code: .schemeUnavailable)) }
+                    let activeName = names.first ?? ""
+                    let activeMatches = candidates.filter { $0.scheme == activeName }
+                    var matchedPlan: XcodeRunPlan.Candidate?
+                    if activeMatches.count == 1, let activeCandidate = activeMatches.first,
+                       let actual = settings([containerFlag, path, "-scheme", activeCandidate.scheme, "-configuration", activeCandidate.configuration]),
+                       XcodeRunPlan.matchesBundle(actual, candidate: activeCandidate, bundleId: bundleId) {
+                        matchedPlan = activeCandidate
+                    }
+                    if matchedPlan == nil, !queryTimedOut {
+                        guard let found = XcodeRunPlan.choose(candidates, active: activeName, bundleId: bundleId, settings: { project, config in
+                            settings(["-project", project, "-alltargets", "-configuration", config])
+                        }) else {
+                            return .failure(Failure(code: queryTimedOut ? .schemeTimeout : .schemeUnavailable))
+                        }
+                        guard let actual = settings([containerFlag, path, "-scheme", found.scheme, "-configuration", found.configuration]),
+                              XcodeRunPlan.matchesBundle(actual, candidate: found, bundleId: bundleId) else {
+                            return .failure(Failure(code: queryTimedOut ? .schemeTimeout : .schemeUnavailable))
+                        }
+                        matchedPlan = found
+                    }
+                    guard let found = matchedPlan else {
+                        return .failure(Failure(code: queryTimedOut ? .schemeTimeout : .schemeUnavailable))
+                    }
                     plan = found
                     var updated = savedPlans
                     updated[savedKey] = ["scheme": found.scheme, "project": found.project, "target": found.target, "configuration": found.configuration]
@@ -156,6 +187,10 @@ final class XcodeController {
                 }
             }
         }
+        if case .failure(let failure) = outcome {
+            log("xcode-run id=\(trace) failed code=\(failure.code.rawValue)\(failure.message.isEmpty ? "" : " detail=\(failure.message)")")
+        }
+        return outcome
     }
 
     func status(runId: String) -> Result<RunStatus, Failure> {
@@ -164,7 +199,7 @@ final class XcodeController {
         guard let session = sessions[runId], Date().timeIntervalSince(session.created) < 900 else {
             return .success(RunStatus(status: "cancelled", detail: ""))
         }
-        return checkPermission(ask: false).flatMap { _ in
+        return checkPermission(ask: false, xcodePath: session.xcode).flatMap { _ in
             let script = """
             set doc to first workspace document whose path is \(quoted(session.path))
             set actionResult to last scheme action result of doc
@@ -201,7 +236,7 @@ final class XcodeController {
     /// 汇总所有运行中 Xcode 打开的工作区一起匹配, 返回匹配到的 Xcode 应用路径和工作区路径
     static func installedXcodes() -> [(path: String, version: String, name: String)] {
         var seen = Set<String>()
-        var urls = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: xcodeBundleId)
+        var urls = onMainIfGUI { NSWorkspace.shared.urlsForApplications(withBundleIdentifier: xcodeBundleId) }
         for directory in [URL(fileURLWithPath: "/Applications", isDirectory: true), FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)] {
             urls += (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.filter { $0.pathExtension.lowercased() == "app" } ?? []
         }
@@ -221,7 +256,7 @@ final class XcodeController {
         return developer.deletingLastPathComponent().deletingLastPathComponent().path
     }
 
-    private func workspace(for sourceFile: String, xcodePath: String = "") -> Result<(xcode: String, path: String), Failure> {
+    private func workspace(for sourceFile: String, worktreeRoot: String = "", xcodePath: String = "") -> Result<(xcode: String, path: String), Failure> {
         var owners: [(xcode: String, path: String)] = []
         var lastFailure: Failure?
         for xcode in runningXcodePaths() where xcodePath.isEmpty || URL(fileURLWithPath: xcode).resolvingSymlinksInPath().path == URL(fileURLWithPath: xcodePath).resolvingSymlinksInPath().path {
@@ -233,21 +268,100 @@ final class XcodeController {
             }
         }
         // 同一工作区在多个 Xcode 中打开时取第一个
-        if let path = Self.match(sourceFile: sourceFile, workspaces: owners.map(\.path)), let owner = owners.first(where: { $0.path == path }) {
+        if let path = Self.match(sourceFile: sourceFile, worktreeRoot: worktreeRoot, workspaces: owners.map(\.path)), let owner = owners.first(where: { $0.path == path }) {
             return .success(owner)
         }
         // 所有 Xcode 都查询失败(如未授权)时报告失败原因, 否则视为未打开项目
         return .failure(owners.isEmpty ? lastFailure ?? .projectNotOpen : .projectNotOpen)
     }
 
-    /// 运行中的 Xcode 应用路径, 当前激活的排在前面
+    /// 运行中的 Xcode 应用路径, 当前激活的排在前面。
+    /// AppKit 的 NSRunningApplication 在后台线程偶发返回空列表, 因此在主线程读取并结合内核进程表兜底。
     private func runningXcodePaths() -> [String] {
-        NSRunningApplication.runningApplications(withBundleIdentifier: Self.xcodeBundleId)
-            .sorted { $0.isActive && !$1.isActive }
-            .compactMap { $0.bundleURL?.path }
+        runningXcodeApps().map(\.path)
     }
 
-    static func match(sourceFile: String, workspaces: [String]) -> String? {
+    private func runningXcodeApps() -> [(pid: pid_t, path: String)] {
+        var result: [(pid: pid_t, path: String)] = []
+        var seenPaths = Set<String>()
+        let appKitApps: [(pid: pid_t, path: String)] = Self.onMainIfGUI {
+            NSRunningApplication.runningApplications(withBundleIdentifier: Self.xcodeBundleId)
+                .filter { !$0.isTerminated }
+                .sorted { $0.isActive && !$1.isActive }
+                .compactMap { app in
+                    guard let path = app.bundleURL?.resolvingSymlinksInPath().path else { return nil }
+                    return (app.processIdentifier, path)
+                }
+        }
+        for item in appKitApps where seenPaths.insert(item.path).inserted {
+            result.append(item)
+        }
+        for item in Self.kernelRunningXcodes() where seenPaths.insert(item.path).inserted {
+            result.append(item)
+        }
+        return result
+    }
+
+    private func runningXcodePID(at path: String? = nil) -> pid_t? {
+        let apps = runningXcodeApps()
+        guard let path else { return apps.first?.pid }
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        return apps.first(where: { $0.path == resolved })?.pid
+    }
+
+    private func isXcodeRunning(at path: String) -> Bool {
+        runningXcodePID(at: path) != nil
+    }
+
+    private static func onMainIfGUI<T>(_ work: () -> T) -> T {
+        if Thread.isMainThread || NSApp == nil {
+            return work()
+        }
+        return DispatchQueue.main.sync(execute: work)
+    }
+
+    static func xcodeBundlePath(fromExecutablePath executablePath: String) -> String? {
+        guard executablePath.hasSuffix("/Contents/MacOS/Xcode") else { return nil }
+        let appPath = String(executablePath.dropLast("/Contents/MacOS/Xcode".count))
+        return URL(fileURLWithPath: appPath).resolvingSymlinksInPath().path
+    }
+
+    private static func kernelRunningXcodes() -> [(pid: pid_t, path: String)] {
+        let count = proc_listallpids(nil, 0)
+        var pids = [pid_t](repeating: 0, count: max(Int(count) * 2, 1024))
+        let actual = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard actual > 0 else { return [] }
+        var found: [(pid: pid_t, path: String)] = []
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        for i in 0..<Int(actual) {
+            let pid = pids[i]
+            guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { continue }
+            let executable = String(cString: buffer)
+            guard let appPath = xcodeBundlePath(fromExecutablePath: executable),
+                  Bundle(path: appPath)?.bundleIdentifier == Self.xcodeBundleId else { continue }
+            found.append((pid, appPath))
+        }
+        return found
+    }
+
+    static func match(sourceFile: String, worktreeRoot: String = "", workspaces: [String]) -> String? {
+        if !worktreeRoot.isEmpty {
+            let root = XcodeSourcePath.normalizedPath(worktreeRoot)
+            let inWorktree = workspaces.filter { workspace in
+                let path = XcodeSourcePath.normalizedPath(workspace)
+                return path == root || path.hasPrefix(root + "/")
+            }
+            guard !inWorktree.isEmpty else { return nil }
+            if inWorktree.count == 1 { return inWorktree[0] }
+            let primary = inWorktree.filter { !$0.contains("/Pods/") }
+            let pool = primary.isEmpty ? inWorktree : primary
+            return pool.min { lhs, rhs in
+                let lWs = lhs.hasSuffix(".xcworkspace"), rWs = rhs.hasSuffix(".xcworkspace")
+                if lWs != rWs { return lWs }
+                let lDepth = lhs.split(separator: "/").count, rDepth = rhs.split(separator: "/").count
+                return lDepth != rDepth ? lDepth < rDepth : lhs < rhs
+            }
+        }
         let directory = { (path: String) in (path as NSString).deletingLastPathComponent + "/" }
         if (sourceFile as NSString).isAbsolutePath,
            let buildDirectory = XcodeSourcePath.packageBuildDirectory(containing: URL(fileURLWithPath: sourceFile).deletingLastPathComponent()) {
@@ -277,11 +391,11 @@ final class XcodeController {
     // MARK: - AppleScript
 
     /// 查询"自动化"权限; ask 为 false 时不弹窗, 避免后台轮询触发系统窗口并阻塞
-    private func checkPermission(ask: Bool) -> Result<Void, Failure> {
-        guard !NSRunningApplication.runningApplications(withBundleIdentifier: Self.xcodeBundleId).isEmpty else {
+    private func checkPermission(ask: Bool, xcodePath: String? = nil) -> Result<Void, Failure> {
+        guard let pid = runningXcodePID(at: xcodePath) else {
             return .failure(.xcodeNotRunning)
         }
-        let target = NSAppleEventDescriptor(bundleIdentifier: Self.xcodeBundleId)
+        let target = NSAppleEventDescriptor(processIdentifier: pid)
         guard let descriptor = target.aeDesc else {
             return .failure(.scriptFailed)
         }
@@ -293,7 +407,8 @@ final class XcodeController {
         case OSStatus(errAEEventWouldRequireUserConsent):
             return .failure(.permissionRequired)
         case OSStatus(procNotFound):
-            return .failure(.xcodeNotRunning)
+            let stillRunning = xcodePath.map { isXcodeRunning(at: $0) } ?? !runningXcodeApps().isEmpty
+            return stillRunning ? .failure(.scriptFailed) : .failure(.xcodeNotRunning)
         default:
             return .failure(.scriptFailed)
         }
@@ -302,7 +417,7 @@ final class XcodeController {
     /// body 需以 return 返回文本, 列表转文本时以换行连接. 用 osascript 子进程执行, 不阻塞主线程(首次运行等待权限弹窗时也不卡窗口);
     /// 子进程的"自动化"权限仍归属 LayerLens. xcode 为应用路径, 指定发送给哪个 Xcode
     private func execute(_ body: String, xcode: String, timeout: TimeInterval = 3) -> Result<String, Failure> {
-        guard !NSRunningApplication.runningApplications(withBundleIdentifier: Self.xcodeBundleId).isEmpty else {
+        guard isXcodeRunning(at: xcode) else {
             return .failure(.xcodeNotRunning)
         }
         let source = """
@@ -570,10 +685,23 @@ enum XcodeSourcePath {
         return nil
     }
 
+    private struct SimulatorHostCacheEntry {
+        let binary: String
+        let modified: Date?
+        let size: UInt64
+        let project: String?
+    }
+    private static let simulatorHostLock = NSLock()
+    private static var simulatorHostCache: [String: SimulatorHostCacheEntry] = [:]
+
     static func simulatorBinaryHostProject(deviceId: String, bundleId: String, xcrunPath: String = "/usr/bin/xcrun") -> String? {
         guard !deviceId.isEmpty && !bundleId.isEmpty else { return nil }
+        let cacheKey = deviceId + "\n" + bundleId
         guard let container = BoundedProcess.capture(xcrunPath, ["simctl", "get_app_container", deviceId, bundleId], timeout: 3),
-              container.status == 0, !container.timedOut else { return nil }
+              container.status == 0, !container.timedOut else {
+            simulatorHostLock.lock(); simulatorHostCache.removeValue(forKey: cacheKey); simulatorHostLock.unlock()
+            return nil
+        }
         let appPath = String(decoding: container.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !appPath.isEmpty else { return nil }
         let appURL = URL(fileURLWithPath: appPath)
@@ -585,8 +713,17 @@ enum XcodeSourcePath {
             appURL.appendingPathComponent(executable + ".debug.dylib").path,
             appURL.appendingPathComponent(executable).path,
         ]
-        guard let binary = candidates.first(where: { fm.fileExists(atPath: $0) }),
-              let nm = BoundedProcess.capture("/usr/bin/nm", ["-ap", binary], timeout: 5),
+        guard let binary = candidates.first(where: { fm.fileExists(atPath: $0) }) else { return nil }
+        let attrs = try? fm.attributesOfItem(atPath: binary)
+        let modified = attrs?[.modificationDate] as? Date
+        let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+        simulatorHostLock.lock()
+        let cached = simulatorHostCache[cacheKey]
+        simulatorHostLock.unlock()
+        if let cached, cached.binary == binary, cached.modified == modified, cached.size == size {
+            return cached.project
+        }
+        guard let nm = BoundedProcess.capture("/usr/bin/nm", ["-ap", binary], timeout: 5),
               nm.status == 0, !nm.timedOut else { return nil }
         let directories = String(decoding: nm.data, as: UTF8.self)
             .split(whereSeparator: \.isNewline)
@@ -595,7 +732,11 @@ enum XcodeSourcePath {
                 let path = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
                 return path.hasPrefix("/") && path.hasSuffix("/") ? path : nil
             }
-        return hostProject(fromSourceDirectories: directories)
+        let resolved = hostProject(fromSourceDirectories: directories)
+        simulatorHostLock.lock()
+        simulatorHostCache[cacheKey] = SimulatorHostCacheEntry(binary: binary, modified: modified, size: size, project: resolved)
+        simulatorHostLock.unlock()
+        return resolved
     }
 
     static func hostProject(fromSourceDirectories directories: [String]) -> String? {
@@ -689,6 +830,22 @@ enum XcodeSourcePath {
         let project = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
         let parent = project.deletingLastPathComponent()
         return project.lastPathComponent == "project.xcworkspace" && parent.pathExtension == "xcodeproj" ? parent.path : project.path
+    }
+
+    /// 沿首个已存在的父目录解析符号链接，避免存在路径（如 /tmp）与尚未创建路径（如 /private/tmp/...）前缀不一致。
+    static func normalizedPath(_ path: String) -> String {
+        let fm = FileManager.default
+        var current = URL(fileURLWithPath: path).standardizedFileURL
+        var tail: [String] = []
+        while current.path != "/" && !fm.fileExists(atPath: current.path) {
+            tail.append(current.lastPathComponent)
+            current = current.deletingLastPathComponent()
+        }
+        var resolved = current.resolvingSymlinksInPath()
+        for component in tail.reversed() {
+            resolved.appendPathComponent(component)
+        }
+        return resolved.standardizedFileURL.path
     }
 
     static func sourceDirectory(for sourceFile: String) -> String? {

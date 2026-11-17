@@ -3653,6 +3653,7 @@ function currentAppAway() {
   if (!currentDevice() || targets.pinned || stayingOffline()) return false;
   if (!targets.bundleId) return true;
   // 构建、安装期间 App 的断连和后台状态是预期现象，不应触发自动跟随。
+  if (typeof xcode !== 'undefined' && xcode.running && xcode.job?.deviceId === targets.deviceId && xcode.job?.bundleId === targets.bundleId) return false;
   if (typeof commandRuns !== 'undefined' && commandRuns.has(commandKey(targets.deviceId, targets.bundleId))) return false;
   // 正在把当前选择拉到前台时不要自动跟随仍在前台的旧 App
   if (pendingSwitch?.deviceId === targets.deviceId && pendingSwitch.bundleId === targets.bundleId) return false;
@@ -3772,6 +3773,7 @@ function switchTargetInPlace(bundleId, activating = false, appName = '') {
   } else {
     loadAppInfo();
   }
+  if (typeof refreshWorktreeState === 'function') refreshWorktreeState(false);
   clearHierarchy();
   if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
   // 换目标先显示设备实时画面, 用户再进入 2D/3D 时读取新层级。
@@ -3814,6 +3816,7 @@ function showDeviceOnly() {
   $('appName').textContent = name;
   appInfo.base = '';
   appState.warning = '';
+  if (typeof refreshWorktreeState === 'function') refreshWorktreeState(false);
   document.title = `${name} - LayerLens`;
   document.body.classList.remove('has-app');
   showEmptyState(t('请选择 App 查看视图层级'), t('也可以切换到实时查看设备画面'));
@@ -3902,7 +3905,6 @@ async function checkForeground() {
   if (!pageActivity.active || foregroundCheck.running || !currentAppAway()) return;
   foregroundCheck.running = true;
   const initialRevision = targets.followRevision || 0;
-  let missingKey = '', missingSince = 0;
   try {
     for (let attempt = 0; attempt < 15 && pageActivity.active && currentAppAway(); attempt++) {
       try {
@@ -3914,19 +3916,10 @@ async function checkForeground() {
           followForeground(next);
           return;
         }
-        // 只有明确后台/已退出才退回设备; 通信超时仍是未知状态。
+        // 在后台、挂起或离线时，只要没有其他前台 App 就保留最后一次选中，确保网络、日志、改动和运行按钮不丢失。
         const app = currentApp();
         const absent = targets.bundleId && (app ? appInBackground(app) : appState.value === 'offline');
-        if (absent) {
-          // 仅进入后台不切换目标; 没有其他前台 App 时保持当前选择。
-          if (selectedTargetInBackground()) return;
-          if (missingKey !== key) { missingKey = key; missingSince = Date.now(); }
-          if (Date.now() - missingSince >= 1000) {
-            // 同设备切换保留视频 WebSocket、解码器和当前帧。
-            switchTarget(deviceId, '');
-            return;
-          }
-        } else { missingKey = ''; missingSince = 0; }
+        if (absent || selectedTargetInBackground()) return;
       } catch (e) {
         // 下次再试
       }
@@ -4182,7 +4175,7 @@ async function callXcode(command, job) {
   try {
     const run = encodeURIComponent(job.runId || '');
     const res = command === 'run'
-      ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: job.bundleId, device: job.deviceId, ...(job.xcodePath ? {xcodePath: job.xcodePath} : {}) }), signal: controller.signal })
+      ? await fetch('/api/hub/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: job.bundleId, device: job.deviceId, ...(job.xcodePath ? {xcodePath: job.xcodePath} : {}), ...(job.worktree ? {worktree: job.worktree} : {}) }), signal: controller.signal })
       : await fetch(`/api/hub/run-status?run=${run}`, { cache: 'no-store', signal: controller.signal });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -4202,6 +4195,7 @@ function runErrorText(e) {
     permission_denied: t('没有控制 Xcode 的权限, 请在 系统设置 › 隐私与安全性 › 自动化 中允许'),
     permission_required: t('需要允许 LayerLens 控制 Xcode'),
     xcode_busy: t('Xcode 正忙, 请稍后再试'),
+    xcode_scheme_timeout: t('查询运行 Scheme 超时，请重试'),
     xcode_scheme_unverified: t('无法确认选中 App 对应的运行 Scheme，请在 Xcode 中检查 Scheme 和 Run 配置'),
     xcode_destination_unavailable: t('当前 Scheme 不支持选中的设备，请在 Xcode 中检查运行目标'),
   };
@@ -4219,7 +4213,8 @@ function setRunning(on) {
   xcode.running = on;
   clearTimeout(xcode.timer);
   $('xcodeRun').classList.toggle('loading', on);
-  $('xcodeRun').title = on ? t('正在运行… 点击取消跟踪') : t('在 Xcode 中运行');
+  const wt = !on && typeof worktreeLabel === 'function' ? worktreeLabel() : '';
+  $('xcodeRun').title = on ? t('正在运行… 点击取消跟踪') : wt ? t('在 Xcode 中运行') + ` · ${wt}` : t('在 Xcode 中运行');
 }
 
 // 结束跟踪: 旧 App 仍在则回到在线并提示, 否则显示离线提示条
@@ -4242,7 +4237,8 @@ async function xcodeRun() {
     endRun();
     return;
   }
-  const job = { deviceId: targets.deviceId, bundleId: targets.bundleId, xcodePath: selectedXcodePath, controller: new AbortController(), hint: null };
+  const worktree = typeof selectedWorktreeForRun === 'function' ? selectedWorktreeForRun() : '';
+  const job = { deviceId: targets.deviceId, bundleId: targets.bundleId, xcodePath: selectedXcodePath, worktree, controller: new AbortController(), hint: null };
   xcode.job = job;
   setRunning(true);
   try {
@@ -4320,20 +4316,38 @@ let runMode = 'command';
 try { runMode = localStorage.getItem('layerlens_run_mode') || 'command'; } catch (e) { /* ignore */ }
 if (!['command', 'xcode'].includes(runMode)) runMode = 'command';
 function showCommandRunError(detail) {
-  $('runErrorText').textContent = t('运行失败: {0}', detail);
+  const text = (detail || '').trim();
+  $('runErrorTitle').textContent = t('运行失败');
+  $('runErrorText').textContent = text;
+  $('runErrorText').hidden = !text;
   $('runError').hidden = false;
 }
 function commandKey(device, app) { return device + '|' + app; }
 function syncCommandRun() {
   if (runMode !== 'command') return;
-  const job = commandRuns.get(commandKey(targets.deviceId, targets.bundleId));
+  const key = commandKey(targets.deviceId, targets.bundleId);
+  const job = commandRuns.get(key);
   const active = !!job;
+  const wt = !active && typeof worktreeLabel === 'function' ? worktreeLabel() : '';
   $('xcodeRun').classList.toggle('loading', active);
-  $('xcodeRun').title = active ? t('正在运行… 点击取消') : t('命令行运行');
+  $('xcodeRun').title = active ? t('正在运行… 点击取消') : wt ? t('命令行运行') + ` · ${wt}` : t('命令行运行');
   $('xcodeRun').setAttribute('aria-label', $('xcodeRun').title);
+  const sticky = !active && typeof isFailedRunLogVisible === 'function' && isFailedRunLogVisible(key);
+  const wrap = $('runProgressWrap');
   const progress = $('runProgress');
-  progress.hidden = !active;
-  if (active) progress.textContent = t(job.label || '等待运行') + (job.progress ? ' · ' + job.progress : '');
+  const progressText = $('runProgressText');
+  if (wrap) wrap.hidden = !active && !sticky;
+  if (progress) {
+    progress.hidden = !active && !sticky;
+    progress.classList.toggle('failed', !active && sticky);
+  }
+  const textTarget = progressText && progressText !== progress ? progressText : progress;
+  if (active && textTarget) {
+    textTarget.textContent = t(job.label || '等待运行') + (job.progress ? ' · ' + job.progress : '');
+  } else if (sticky && textTarget) {
+    textTarget.textContent = t('编译失败');
+  }
+  if (typeof syncRunLogUI === 'function') syncRunLogUI(job, active, sticky, key);
 }
 let commandRunsRevision = 0;
 const commandRunDeviceRevision = new Map();
@@ -4355,7 +4369,8 @@ function trackCommandRun(job) {
       const timeout = setTimeout(() => controller.abort(), 5000);
       let response, result;
       try {
-        response = await fetch('/api/hub/command-run-status?run=' + encodeURIComponent(job.id), {cache: 'no-store', signal: controller.signal});
+        const since = job.logCursor || 0;
+        response = await fetch('/api/hub/command-run-status?run=' + encodeURIComponent(job.id) + '&since=' + since, {cache: 'no-store', signal: controller.signal});
         if (!current()) return;
         if (response.status === 404) {
           commandRuns.delete(key); finishCommandFollowGuard(job); syncCommandRun(); return;
@@ -4364,6 +4379,13 @@ function trackCommandRun(job) {
       } finally { clearTimeout(timeout); }
       if (!current()) return;
       if (!response.ok) throw new Error(result.error || '运行状态不可用');
+      if (typeof result.elapsed === 'number') {
+        job.startedAt = Date.now() - result.elapsed * 1000;
+      }
+      if (Array.isArray(result.logs) && result.logs.length && typeof appendCommandRunLogs === 'function') {
+        appendCommandRunLogs(key, result.logs);
+      }
+      if (typeof result.logCursor === 'number') job.logCursor = result.logCursor;
       if (result.buildStarted && !job.liveSwitched && job.device === targets.deviceId && job.app === targets.bundleId) {
         job.liveSwitched = true;
         setMode('live');
@@ -4374,6 +4396,8 @@ function trackCommandRun(job) {
         const guard = commandFollowGuard(job.device);
         if (result.status === 'skipped' && guard?.app === job.app) saveCommandFollowGuard(null, job.device);
         else finishCommandFollowGuard(job);
+        if (result.status === 'failed' && typeof markCommandRunFailed === 'function') markCommandRunFailed(key);
+        else if (typeof clearCommandRunFailed === 'function') clearCommandRunFailed(key);
         syncCommandRun();
         if (job.device === targets.deviceId && job.app === targets.bundleId && result.status === 'failed') showCommandRunError(result.detail);
         return;
@@ -4437,12 +4461,15 @@ async function commandRun() {
   for (const [oldKey, oldJob] of commandRuns) {
     if (oldJob.device === device) commandRuns.delete(oldKey);
   }
-  const job = {device, app, cancelled: false, order: nextCommandRunOrder()};
+  const job = {device, app, cancelled: false, order: nextCommandRunOrder(), startedAt: Date.now(), logCursor: 0};
+  $('runError').hidden = true;
+  if (typeof resetCommandRunLogs === 'function') resetCommandRunLogs(key);
   commandRuns.set(key, job); syncCommandRun();
   const current = () => commandRuns.get(key) === job;
   try {
     const path = typeof selectedXcodePath === 'undefined' ? '' : selectedXcodePath;
-    const res = await fetch('/api/hub/command-run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, app, owner: commandRunOwner, order: job.order, ...(path ? {xcodePath: path} : {})})});
+    const worktree = typeof selectedWorktreeForRun === 'function' ? selectedWorktreeForRun() : '';
+    const res = await fetch('/api/hub/command-run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, app, owner: commandRunOwner, order: job.order, ...(path ? {xcodePath: path} : {}), ...(worktree ? {worktree} : {})})});
     const result = await res.json();
     if (!res.ok || !result.runId) throw new Error(result.error || '运行失败');
     job.id = result.runId;
@@ -4456,6 +4483,215 @@ function runSelected() { if (runMode === 'xcode') xcodeRun(); else commandRun();
 
 function syncLiveCursor() {
   $('liveWrap').classList.toggle('inspecting', canInspect() && (live.inspect || live.altHeld));
+}
+
+const runLogState = { open: false, failedKey: '', key: '', rendered: 0, timer: 0, logs: new Map() };
+
+function resetCommandRunLogs(key) {
+  runLogState.logs.set(key, []);
+  if (runLogState.failedKey === key) runLogState.failedKey = '';
+  if (runLogState.key === key) runLogState.rendered = 0;
+}
+
+function appendCommandRunLogs(key, lines) {
+  if (!Array.isArray(lines) || !lines.length) return;
+  const list = runLogState.logs.get(key) || [];
+  list.push(...lines);
+  if (list.length > 400) list.splice(0, list.length - 400);
+  runLogState.logs.set(key, list);
+  if (runLogState.key === key && runLogState.rendered > list.length) runLogState.rendered = 0;
+}
+
+function markCommandRunFailed(key) {
+  if (runLogState.open && (runLogState.logs.get(key)?.length || 0) > 0) runLogState.failedKey = key;
+}
+
+function clearCommandRunFailed(key) {
+  if (!key || runLogState.failedKey === key) runLogState.failedKey = '';
+}
+
+function isFailedRunLogVisible(key) {
+  return runLogState.open && runLogState.failedKey === key && (runLogState.logs.get(key)?.length || 0) > 0;
+}
+
+function runLogLineClass(line) {
+  if (line.startsWith('[LayerLens] 失败:') || /(?:^|\s)(?:fatal )?error:|\*\* BUILD FAILED \*\*/i.test(line)) return 'run-log-line err';
+  if (/(?:^|\s)warning:/i.test(line)) return 'run-log-line warn';
+  if (line === '** BUILD SUCCEEDED **') return 'run-log-line ok';
+  if (line.startsWith('[LayerLens]')) return 'run-log-line meta';
+  return 'run-log-line';
+}
+
+function updateRunProgressClock(job, active) {
+  const timeEl = $('runProgressTime');
+  if (!timeEl) return;
+  if (!active || !job?.startedAt) {
+    timeEl.textContent = '';
+    return;
+  }
+  const seconds = Math.max(0, Math.floor((Date.now() - job.startedAt) / 1000));
+  timeEl.textContent = `${seconds}s`;
+}
+
+function syncRunLogUI(job, active, sticky, key) {
+  const wrap = $('runProgressWrap'), progress = $('runProgress'), panel = $('runLogPanel'), body = $('runLogBody');
+  clearInterval(runLogState.timer);
+  runLogState.timer = 0;
+  updateRunProgressClock(job, active);
+  if (active && job?.startedAt) {
+    runLogState.timer = setInterval(() => {
+      const currentKey = commandKey(targets.deviceId, targets.bundleId);
+      const currentJob = runMode === 'command' ? commandRuns.get(currentKey) : null;
+      if (!currentJob) { clearInterval(runLogState.timer); runLogState.timer = 0; return; }
+      updateRunProgressClock(currentJob, true);
+    }, 1000);
+  }
+  if (!progress || !panel || !body || typeof body.replaceChildren !== 'function') return;
+  const shown = (active || sticky) && runLogState.open;
+  if (wrap) wrap.classList.toggle('open', shown);
+  progress.setAttribute('aria-expanded', String(shown));
+  panel.hidden = !shown;
+  if (!shown) return;
+  const lines = runLogState.logs.get(key) || [];
+  if (runLogState.key !== key) {
+    runLogState.key = key;
+    runLogState.rendered = 0;
+  }
+  if (runLogState.rendered === 0) body.replaceChildren();
+  if (!lines.length) {
+    if (!body.firstElementChild || !body.firstElementChild.classList.contains('run-log-empty')) {
+      body.replaceChildren(el('div', 'run-log-empty', t('等待输出…')));
+    }
+    return;
+  }
+  if (body.firstElementChild?.classList.contains('run-log-empty')) body.replaceChildren();
+  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 28;
+  for (let i = runLogState.rendered; i < lines.length; i++) {
+    body.append(el('div', runLogLineClass(lines[i]), lines[i]));
+  }
+  runLogState.rendered = lines.length;
+  if (nearBottom) body.scrollTop = body.scrollHeight;
+}
+
+const worktreeState = { deviceId: '', bundleId: '', activeWorktree: '', liveWorktree: '', overridden: false, worktrees: [] };
+let worktreeSeq = 0;
+
+function activeWorktreeEntry() {
+  if (!worktreeState.activeWorktree) return null;
+  return worktreeState.worktrees.find((item) => item.path === worktreeState.activeWorktree) || {
+    path: worktreeState.activeWorktree,
+    name: worktreeState.activeWorktree.split('/').filter(Boolean).pop() || '',
+    branch: '',
+    detached: false,
+  };
+}
+
+function worktreeLabel() {
+  const entry = activeWorktreeEntry();
+  if (!entry) return '';
+  if (entry.name && entry.branch && entry.name !== entry.branch) return `${entry.name} · ${entry.branch}`;
+  return entry.branch || entry.name || '';
+}
+
+function selectedWorktreeForRun() {
+  return worktreeState.overridden ? worktreeState.activeWorktree : '';
+}
+
+function renderWorktreeUI() {
+  const chip = $('worktreeChip'), text = $('worktreeChipText'), btn = $('runModeBtn');
+  if (!chip || !text || !btn) return;
+  const entry = activeWorktreeEntry();
+  const label = worktreeLabel();
+  const hasMultiple = worktreeState.worktrees.length > 1 || !!worktreeState.overridden;
+  const visible = !!targets.bundleId && !!label;
+  chip.hidden = !visible;
+  chip.classList.toggle('overridden', visible && !!worktreeState.overridden);
+  btn.classList.toggle('has-worktree', visible);
+  text.textContent = visible ? label : '';
+  if (visible && entry) {
+    const summary = [entry.branch || t('游离 HEAD'), entry.name].filter((v, i, arr) => v && arr.indexOf(v) === i).join(' · ');
+    const hint = hasMultiple ? t('切换运行工作区') : t('运行方式');
+    btn.title = `${hint}\n${summary}\n${entry.path}`;
+  } else {
+    btn.title = t('运行方式');
+  }
+  const heading = $('worktreeMenuHeading'), itemsBox = $('worktreeItems');
+  if (heading && itemsBox) {
+    const showList = visible && hasMultiple && worktreeState.worktrees.length > 0;
+    heading.hidden = !showList;
+    itemsBox.hidden = !showList;
+    if (showList) {
+      itemsBox.replaceChildren();
+      worktreeState.worktrees.forEach((wt) => {
+        const item = document.createElement('button');
+        item.className = 'menu-item run-mode-item';
+        item.dataset.worktreePath = wt.path;
+        item.setAttribute('role', 'menuitemradio');
+        item.setAttribute('aria-checked', String(wt.path === worktreeState.activeWorktree));
+        item.title = [wt.branch || t('游离 HEAD'), wt.path].filter(Boolean).join('\n');
+        const labelEl = el('span', 'run-worktree-label');
+        const primary = wt.name || wt.branch || '';
+        labelEl.append(el('span', 'run-worktree-name', primary));
+        const secondary = wt.branch && wt.name !== wt.branch ? wt.branch : (wt.detached && !wt.branch ? t('游离') : '');
+        if (secondary) labelEl.append(el('span', 'run-worktree-branch', secondary));
+        item.append(labelEl, el('span', 'run-mode-check', '✓'));
+        itemsBox.append(item);
+      });
+    } else {
+      itemsBox.replaceChildren();
+    }
+  }
+  if (runMode === 'command') syncCommandRun();
+  else setRunning(xcode.running);
+}
+
+function applyWorktreePayload(data) {
+  worktreeState.deviceId = data.deviceId || '';
+  worktreeState.bundleId = data.bundleId || '';
+  worktreeState.activeWorktree = data.activeWorktree || '';
+  worktreeState.liveWorktree = data.liveWorktree || '';
+  worktreeState.overridden = !!data.overridden;
+  worktreeState.worktrees = Array.isArray(data.worktrees) ? data.worktrees : [];
+  renderWorktreeUI();
+}
+
+async function refreshWorktreeState(verify = false) {
+  const deviceId = targets.deviceId || '', bundleId = targets.bundleId || '';
+  const seq = ++worktreeSeq;
+  if (!deviceId || !bundleId) {
+    applyWorktreePayload({ deviceId, bundleId, activeWorktree: '', liveWorktree: '', overridden: false, worktrees: [] });
+    return;
+  }
+  try {
+    const query = new URLSearchParams({ device: deviceId, app: bundleId, ...(verify ? { verify: '1' } : {}) });
+    const res = await fetch('/api/hub/worktrees?' + query, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (seq !== worktreeSeq || targets.deviceId !== deviceId || targets.bundleId !== bundleId) return;
+    applyWorktreePayload(data);
+  } catch (e) { /* keep last known state on transient hub errors */ }
+}
+
+async function selectWorktree(path) {
+  const deviceId = targets.deviceId || '', bundleId = targets.bundleId || '';
+  if (!deviceId || !bundleId || !path) return;
+  const targetPath = path === worktreeState.liveWorktree ? '' : path;
+  const seq = ++worktreeSeq;
+  try {
+    const res = await fetch('/api/hub/worktree', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device: deviceId, app: bundleId, path: targetPath }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (seq !== worktreeSeq || targets.deviceId !== deviceId || targets.bundleId !== bundleId) return;
+    applyWorktreePayload(data);
+    if (typeof git !== 'undefined' && typeof gitConnect === 'function') {
+      git.repo = null;
+      if (typeof gitVisible === 'function' && gitVisible()) gitConnect();
+    }
+  } catch (e) { /* ignore transient error */ }
 }
 
 // 选择元素需要连上已集成的 App; 否则实时画面当普通模拟器用, ⌥ + 点击按普通点击处理
@@ -4737,10 +4973,15 @@ function setupLiveEvents() {
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
   $('menuHeal').addEventListener('click', () => openPanel('heal'));
+  $('runErrorCopy').addEventListener('click', () => {
+    const text = $('runErrorText').textContent || $('runErrorTitle').textContent;
+    if (text) copyText(text, '复制');
+  });
   $('runErrorClose').addEventListener('click', () => { $('runError').hidden = true; });
   const syncRunModeMenu = () => {
     $('runModeMenu').querySelectorAll('[data-run-mode]').forEach(item => item.setAttribute('aria-checked', String(item.dataset.runMode === runMode)));
     $('runModeMenu').querySelectorAll('[data-xcode-path]').forEach(item => item.setAttribute('aria-checked', String(item.dataset.xcodePath === selectedXcodePath)));
+    $('runModeMenu').querySelectorAll('[data-worktree-path]').forEach(item => item.setAttribute('aria-checked', String(item.dataset.worktreePath === worktreeState.activeWorktree)));
   };
   let xcodeMenuRevision = 0;
   const refreshXcodeMenu = async () => {
@@ -4781,20 +5022,42 @@ function setupLiveEvents() {
   syncCommandRun();
   $('runModeBtn').addEventListener('click', () => {
     togglePopover('runModeMenu');
-    if (!$('runModeMenu').hidden) refreshXcodeMenu();
+    if (!$('runModeMenu').hidden) { refreshXcodeMenu(); refreshWorktreeState(true); }
     $('runModeBtn').setAttribute('aria-expanded', String(!$('runModeMenu').hidden && !$('runModeMenu').classList.contains('closing')));
   });
   $('runModeMenu').addEventListener('click', (event) => {
+    const wtItem = event.target.closest('[data-worktree-path]');
+    if (wtItem) {
+      hidePopovers();
+      selectWorktree(wtItem.dataset.worktreePath);
+      return;
+    }
     const item = event.target.closest('[data-run-mode], [data-xcode-path]');
     if (!item) return;
     hidePopovers();
     if (Object.hasOwn(item.dataset, 'xcodePath')) selectedXcodePath = item.dataset.xcodePath;
     else runMode = item.dataset.runMode;
-    $('runProgress').hidden = true;
+    $('runProgressWrap').hidden = true;
+    runLogState.failedKey = '';
     if (runMode === 'xcode') $('xcodeRun').setAttribute('aria-label', t('在 Xcode 中运行'));
     try { localStorage.setItem('layerlens_run_mode', runMode); localStorage.setItem('layerlens_xcode_path', selectedXcodePath); } catch (e) { /* ignore */ }
     syncRunModeMenu();
     syncCommandRun();
+  });
+  $('runProgress').addEventListener('click', () => {
+    runLogState.open = !runLogState.open;
+    if (!runLogState.open) runLogState.failedKey = '';
+    syncCommandRun();
+  });
+  $('runLogClose').addEventListener('click', () => {
+    runLogState.open = false;
+    runLogState.failedKey = '';
+    syncCommandRun();
+  });
+  $('runLogCopy').addEventListener('click', () => {
+    const key = commandKey(targets.deviceId, targets.bundleId);
+    const lines = runLogState.logs.get(key) || [];
+    if (lines.length) copyText(lines.join('\n'), '复制');
   });
   $('xcodeRun').addEventListener('click', runSelected);
   $('appBannerRun').addEventListener('click', runSelected);
@@ -9375,6 +9638,7 @@ async function start() {
     renderSelectedAppName();
     appState.blank = true;
     setAppState('offline');
+    if (typeof refreshWorktreeState === 'function') refreshWorktreeState(true);
     return;
   }
   loadAppInfo();
@@ -9393,6 +9657,7 @@ function loadAppInfo(job = targetTask) {
     appInfo.base = `${info.version} · ${info.os}`;
     $('appMeta').title = `${info.bundleId} · ${info.device}`;
     updateAppMeta();
+    if (typeof refreshWorktreeState === 'function') refreshWorktreeState(false);
   }).catch((e) => {
     if (seq !== appInfoSeq || key !== logTargetKey() || (job && !taskCurrent(job))) return;
     // App 刚换端口等情况下取不到, 仍显示名称, 事件流重连后会重新加载

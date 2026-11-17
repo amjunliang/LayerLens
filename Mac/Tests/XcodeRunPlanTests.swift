@@ -64,6 +64,22 @@ import Foundation
         let data = try JSONSerialization.data(withJSONObject: [setting("Alpha", "com.test.alpha")])
         precondition(XcodeRunPlan.decodeSettings(Data("warning: diagnostic\n".utf8) + data)?.count == 1)
         precondition(XcodeRunPlan.decodeSettings(Data("not JSON".utf8)) == nil)
+        precondition(XcodeController.xcodeBundlePath(fromExecutablePath: "/Applications/Xcode 26.6.app/Contents/MacOS/Xcode") == "/Applications/Xcode 26.6.app")
+        precondition(XcodeController.xcodeBundlePath(fromExecutablePath: "/Applications/Xcode 26.6.app/Contents/MacOS/xcodebuild") == nil)
+
+        let wtA = root.appendingPathComponent("wt/ea74/App")
+        let wtB = root.appendingPathComponent("wt/ab12/App")
+        let wtC = root.appendingPathComponent("wt/cc99/App")
+        for dir in [wtA, wtB, wtC] { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+        let wsA = wtA.appendingPathComponent("App.xcworkspace").path
+        let wsB = wtB.appendingPathComponent("App.xcworkspace").path
+        let podsB = wtB.appendingPathComponent("Pods/Pods.xcodeproj").path
+        let srcA = wtA.appendingPathComponent("Pods/LayerLens/Bridge.m").path
+        let matchedB = XcodeController.match(sourceFile: srcA, worktreeRoot: wtB.path, workspaces: [wsA, podsB, wsB])
+        precondition(matchedB == wsB,
+                     "Explicit worktree override must target the chosen worktree's primary workspace: got=\(String(describing: matchedB)) expected=\(wsB)")
+        precondition(XcodeController.match(sourceFile: srcA, worktreeRoot: wtC.path, workspaces: [wsA, wsB]) == nil,
+                     "Must not fall back to another worktree when the selected worktree is not open in Xcode")
         if CommandLine.arguments.count == 4 {
             let workspacePath = CommandLine.arguments[1]
             let actualSettings = XcodeRunPlan.decodeSettings(try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))!

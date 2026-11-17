@@ -31,6 +31,7 @@
     <symbol id="i-pin" viewBox="0 0 1025 1024"><path d="M320 839.68l-238.592 174.08c-8.704 6.656-19.456 9.728-29.696 9.728-12.8 0-26.112-5.12-35.84-14.848-17.92-17.92-20.48-46.08-5.12-66.56l212.992-288.256L56.32 487.424C39.936 471.04 36.864 445.44 48.128 425.472c8.192-12.8 76.8-112.64 229.376-75.264 2.56 0.512 5.12 0.512 8.192 1.024 6.144 0.512 13.312 1.024 20.992 2.56 32.256 5.12 89.6-20.48 139.264-62.976 47.616-40.448 78.336-87.552 78.336-120.32 0-7.68 0-15.872-0.512-23.552-1.024-30.72-3.072-77.824 31.744-112.64 41.472-41.472 107.52-45.056 153.088-7.68 1.024 0.512 1.536 1.536 2.56 2.56 24.576 24.064 276.48 275.968 279.04 278.528 21.504 21.504 33.792 50.688 33.792 81.408s-11.776 59.392-33.792 80.896c-34.816 34.816-82.432 33.28-113.664 31.744-7.168 0-15.36-0.512-23.04-0.512-30.72 0-67.584 21.504-103.936 60.928-50.688 55.296-81.92 126.464-79.36 158.72 1.024 10.24 3.072 28.16 3.584 30.72 36.864 149.504-62.976 217.6-74.752 225.28-20.48 12.288-46.592 9.216-62.976-7.168l-165.376-165.376-50.688 35.328z"/></symbol>
     <symbol id="i-device" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.2h.01"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
     <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></symbol>
     <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
@@ -90,11 +91,15 @@
       <button data-mode="2d" class="active">2D</button>
       <button data-mode="3d">3D</button>
     </div>
+  </div>
+  <div class="toolbar-right">
     <div class="toolbar-actions">
       <button class="icon-btn has-live-only" id="xcodeRun" title="在 Xcode 中运行" aria-label="在 Xcode 中运行"><svg class="icon"><use href="#i-play"/></svg></button>
       <div class="popover-anchor run-mode-anchor">
-        <button class="icon-btn" id="runModeBtn" title="运行方式" aria-label="运行方式" aria-haspopup="menu" aria-expanded="false"><svg class="icon"><use href="#i-chevron-down"/></svg></button>
+        <button class="icon-btn run-mode-btn" id="runModeBtn" title="运行方式" aria-label="运行方式" aria-haspopup="menu" aria-expanded="false"><span class="worktree-chip" id="worktreeChip" hidden><svg class="icon"><use href="#i-branch"/></svg><span class="worktree-chip-text" id="worktreeChipText"></span></span><svg class="icon"><use href="#i-chevron-down"/></svg></button>
         <div class="popover menu run-mode-menu" id="runModeMenu" role="menu" hidden>
+          <div class="run-menu-heading" id="worktreeMenuHeading" hidden>工作区</div>
+          <div id="worktreeItems" hidden></div>
           <div class="run-menu-heading">Xcode 版本</div>
           <div id="xcodeVersionItems"><button class="menu-item run-mode-item" role="menuitemradio" data-xcode-path="" aria-checked="true"><span>系统默认</span><span class="run-mode-check" aria-hidden="true">✓</span></button></div>
           <div class="run-menu-heading">运行方式</div>
@@ -102,19 +107,17 @@
           <button class="menu-item run-mode-item" role="menuitemradio" data-run-mode="xcode" aria-checked="false"><span>在 Xcode 中运行</span><span class="run-mode-check" aria-hidden="true">✓</span></button>
         </div>
       </div>
-      <button class="icon-btn" id="refreshBtn" title="刷新 (R)" aria-label="刷新"><svg class="icon"><use href="#i-refresh"/></svg></button>
     </div>
-  </div>
-  <div class="toolbar-right">
-    <div class="popover-anchor help-anchor">
-      <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
+    <div class="toolbar-tools">
+      <div class="popover-anchor help-anchor">
+        <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
+      </div>
+      <button class="icon-btn" id="sandboxBtn" title="沙盒文件" aria-label="沙盒文件"><svg class="icon"><use href="#i-folder"/></svg></button>
+      <button class="icon-btn toggle" id="logToggle" title="日志与网络面板 (L / N)" aria-label="日志与网络面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg><span class="tab-badge toggle-badge" id="termToggleCount" hidden></span></button>
+      <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
     </div>
-    <button class="icon-btn" id="sandboxBtn" title="沙盒文件" aria-label="沙盒文件"><svg class="icon"><use href="#i-folder"/></svg></button>
-    <button class="icon-btn toggle" id="logToggle" title="日志与网络面板 (L / N)" aria-label="日志与网络面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg><span class="tab-badge toggle-badge" id="termToggleCount" hidden></span></button>
-    <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
   </div>
 </header>
-<div id="runProgress" class="run-progress" role="status" hidden></div>
 
 <div class="popover-anchor event-anchor"><div class="popover event-pop" id="eventPop" hidden></div></div>
 
@@ -146,6 +149,7 @@
         <button class="icon-btn" id="liveSwitcher" title="多任务" aria-label="多任务"><svg class="icon"><use href="#i-switcher"/></svg></button>
       </div>
       <div class="float-group">
+        <button class="icon-btn non-live-only" id="refreshBtn" title="刷新 (R)" aria-label="刷新"><svg class="icon"><use href="#i-refresh"/></svg></button>
         <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
         <button class="icon-btn toggle live-only pixel-zoom" id="livePixelZoom" title="原始像素 1:1" aria-label="原始像素 1:1">1:1</button>
         <button class="icon-btn flat-only toggle" id="colorPick" title="取色 (C)" aria-label="取色" aria-pressed="false"><svg class="icon"><use href="#i-picker"/></svg></button>
@@ -179,20 +183,39 @@
       <canvas class="loupe-canvas" id="loupeCanvas"></canvas>
       <div class="loupe-info"><span class="loupe-swatch" id="loupeSwatch"></span><span class="loupe-hex" id="loupeHex"></span><span class="loupe-rgb" id="loupeRgb"></span></div>
     </div>
-    <div class="app-banner" id="appBanner" hidden>
-      <span class="app-banner-text" id="appBannerText"></span>
-      <button class="app-banner-link" id="appBannerLink" hidden></button>
-      <button class="app-banner-run" id="appBannerRun" hidden>运行</button>
-    </div>
-    <div class="app-banner live-only" id="liveCaptureWarning" role="status" hidden>
-      <span class="app-banner-text" id="liveCaptureWarningText">画面可能已停止更新</span>
-      <button class="app-banner-run" id="liveCaptureReconnect">重新连接</button>
-      <button class="app-banner-link" id="liveCaptureDismiss">忽略</button>
-    </div>
-    <div class="app-banner live-only" id="liveHeal" hidden>
-      <span class="app-banner-text" id="liveHealText"></span>
-      <button class="app-banner-run" id="liveHealBtn">修复</button>
-      <button class="app-banner-link" id="liveHealClose">忽略</button>
+    <div class="canvas-top-banners">
+      <div id="runProgressWrap" class="run-progress-wrap" hidden>
+        <div class="run-progress-bar">
+          <button type="button" id="runProgress" class="run-progress" role="status" aria-expanded="false" title="点击展开/收起编译输出">
+            <span class="run-progress-dot" aria-hidden="true"></span>
+            <span id="runProgressText" class="run-progress-text"></span>
+            <span id="runProgressTime" class="run-progress-time"></span>
+            <svg class="icon run-progress-icon" aria-hidden="true"><use href="#i-terminal"/></svg>
+          </button>
+          <div class="run-log-actions">
+            <button type="button" id="runLogCopy" class="mini-btn" title="复制编译输出">复制</button>
+            <button type="button" id="runLogClose" class="icon-btn" title="关闭" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+          </div>
+        </div>
+        <div id="runLogPanel" class="run-log-panel" hidden>
+          <div id="runLogBody" class="run-log-body" role="log" aria-live="off"></div>
+        </div>
+      </div>
+      <div class="app-banner" id="appBanner" hidden>
+        <span class="app-banner-text" id="appBannerText"></span>
+        <button class="app-banner-link" id="appBannerLink" hidden></button>
+        <button class="app-banner-run" id="appBannerRun" hidden>运行</button>
+      </div>
+      <div class="app-banner live-only" id="liveCaptureWarning" role="status" hidden>
+        <span class="app-banner-text" id="liveCaptureWarningText">画面可能已停止更新</span>
+        <button class="app-banner-run" id="liveCaptureReconnect">重新连接</button>
+        <button class="app-banner-link" id="liveCaptureDismiss">忽略</button>
+      </div>
+      <div class="app-banner live-only" id="liveHeal" hidden>
+        <span class="app-banner-text" id="liveHealText"></span>
+        <button class="app-banner-run" id="liveHealBtn">修复</button>
+        <button class="app-banner-link" id="liveHealClose">忽略</button>
+      </div>
     </div>
     <div class="empty-state" id="emptyState" hidden>
       <svg class="empty-icon"><use href="#i-device"/></svg>
@@ -416,8 +439,15 @@
 
 <div class="toast" id="toast"></div>
 <div class="run-error" id="runError" role="alert" hidden>
-  <div class="run-error-text" id="runErrorText"></div>
-  <button class="icon-btn run-error-close" id="runErrorClose" title="关闭" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+  <svg class="icon run-error-icon" aria-hidden="true"><use href="#i-alert"/></svg>
+  <div class="run-error-body">
+    <div class="run-error-title" id="runErrorTitle">运行失败</div>
+    <div class="run-error-text" id="runErrorText"></div>
+  </div>
+  <div class="run-error-actions">
+    <button class="icon-btn run-error-btn" id="runErrorCopy" title="复制错误信息" aria-label="复制错误信息"><svg class="icon"><use href="#i-copy"/></svg></button>
+    <button class="icon-btn run-error-btn" id="runErrorClose" title="关闭" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+  </div>
 </div>
 <script src="/assets/i18n.js"></script>
 <script src="/assets/select-guard.js"></script>

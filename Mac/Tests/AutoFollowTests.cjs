@@ -88,6 +88,14 @@ function create(bundleId = '') {
   await installing.ctx.checkForeground();
   assert.deepEqual(installing.follows, ['b'], 'Normal auto-follow resumes after the run');
 
+  const xcodeBuilding = create('a');
+  xcodeBuilding.ctx.xcode = { running: true, job: { deviceId: 'phone', bundleId: 'a' } };
+  xcodeBuilding.a.foreground = false; xcodeBuilding.b.foreground = true; xcodeBuilding.appState.value = 'offline';
+  await xcodeBuilding.ctx.checkForeground(); await xcodeBuilding.settle();
+  assert.equal(xcodeBuilding.targets.bundleId, 'a', 'An active Xcode run must remain selected during long builds');
+  assert.equal(xcodeBuilding.follows.length, 0, 'An active Xcode run must not auto-follow another foreground app');
+  assert.equal(xcodeBuilding.fallback.length, 0, 'An active Xcode run must not fall back to device-only');
+
   const desktop = create('a'); desktop.a.foreground = false; desktop.appState.value = 'background';
   await desktop.ctx.checkForeground(); await desktop.settle();
   assert.equal(desktop.fallback.length, 0, 'Background alone must not change the selected target');
@@ -106,7 +114,8 @@ function create(bundleId = '') {
   const exited = create('a'); exited.ctx.state.selected = 'label'; exited.ctx.state.nodes.set('label', {});
   exited.a.foreground = false; exited.appState.value = 'offline'; exited.appState.connected = false;
   await exited.ctx.checkForeground(); await exited.settle();
-  assert.equal(exited.fallback.length, 1, 'A cache from an exited app still falls back to device-only');
+  assert.equal(exited.fallback.length, 0, 'Suspended or offline app without another foreground app must keep the last selection');
+  assert.equal(exited.targets.bundleId, 'a');
 
   const unknown = create('a'); unknown.a.foreground = undefined; unknown.appState.connected = false;
   await unknown.ctx.checkForeground(); assert.equal(unknown.fallback.length, 0, 'Timeout alone is not background evidence');

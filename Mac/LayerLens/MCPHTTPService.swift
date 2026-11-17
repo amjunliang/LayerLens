@@ -152,6 +152,7 @@ final class MCPHTTPService {
                 let sourceFile = registry.sourceFile(deviceId: context.deviceId, bundleId: context.bundleId)
                 let sourceRoot = git.repository(deviceId: context.deviceId, bundleId: context.bundleId, sourceFile: sourceFile)
                     ?? XcodeSourcePath.sourceDirectory(deviceId: context.deviceId, bundleId: context.bundleId, sourceFile: sourceFile)
+                    ?? registry.worktreeOverride(deviceId: context.deviceId, bundleId: context.bundleId).flatMap { git.repository(forDirectory: $0) }
                 guard let snapshot = store.snapshot(context: context, sourceRoot: sourceRoot) else {
                     completion(Self.toolError(Self.staleSnapshot))
                     return

@@ -31,7 +31,11 @@ import Foundation
           if [ "$previous" = '-derivedDataPath' ]; then derived="$argument"; break; fi
           previous="$argument"
         done
-        products="$derived/Build/Products/Debug-iphonesimulator"
+        sdk='iphonesimulator'
+        case " $* " in
+          *" generic/platform=iOS "*|*" id=device-ios "*) sdk='iphoneos';;
+        esac
+        products="$derived/Build/Products/Debug-$sdk"
         case " $* " in
           *" -list "*) echo list >> '\(root.path)/events'; if [ -f '\(root.path)/hang' ]; then sleep 5; fi; cat '\(root.path)/schemes.json';;
           *" -showBuildSettings "*)
@@ -46,6 +50,22 @@ import Foundation
             esac
             sed "s|MOCK_BUILD_DIR|$products|g" "$settings";;
           *" build "*)
+            echo "$*" >> '\(root.path)/build-events'
+            if [ -f '\(root.path)/fail-pkg-resolve-when-skipped' ]; then
+              case " $* " in
+                *" -disableAutomaticPackageResolution "*)
+                  echo 'xcodebuild: error: Could not resolve package dependencies:'
+                  echo '  a resolved file is required when automatic dependency resolution is disabled'
+                  exit 1;;
+              esac
+            fi
+            if [ -f '\(root.path)/fail-generic-dest' ]; then
+              case " $* " in
+                *" generic/platform=iOS "*)
+                  echo "error: No profiles for 'com.example.App' were found"
+                  exit 1;;
+              esac
+            fi
             if [ -f '\(root.path)/fail-build' ]; then echo 'forced build error'; exit 1; fi
             mkdir -p "$products/App.app"
             cp '\(root.path)/app-info.plist' "$products/App.app/Info.plist"
@@ -471,6 +491,136 @@ import Foundation
             derived.appendingPathComponent("SourcePackages/checkouts/Bar/").path,
             appSourceDir.path + "/"
         ]) == project.standardizedFileURL.path, "Must resolve unique host project from source directories")
+
+        // Switching to a sibling worktree when the originally reported source directory no longer exists.
+        try? fm.removeItem(at: root.appendingPathComponent("retargeted-settings.json"))
+        let wtB = root.appendingPathComponent("worktrees/wt-b")
+        let wtBProject = wtB.appendingPathComponent("App.xcodeproj")
+        try fm.createDirectory(at: wtBProject.appendingPathComponent("xcshareddata/xcschemes"), withIntermediateDirectories: true)
+        try scheme.write(to: wtBProject.appendingPathComponent("xcshareddata/xcschemes/App.xcscheme"), atomically: true, encoding: .utf8)
+        let wtBSettings: [[String: Any]] = [["target": "App", "buildSettings": ["PRODUCT_BUNDLE_IDENTIFIER": bundle, "WRAPPER_EXTENSION": "app", "PROJECT_FILE_PATH": wtBProject.path, "TARGET_BUILD_DIR": "MOCK_BUILD_DIR", "WRAPPER_NAME": "App.app"]]]
+        try JSONSerialization.data(withJSONObject: wtBSettings).write(to: root.appendingPathComponent("settings.json"))
+        try "{\"project\":{\"schemes\":[\"App\"]}}".write(to: root.appendingPathComponent("schemes.json"), atomically: true, encoding: .utf8)
+        let missingSource = root.appendingPathComponent("worktrees/deleted-wt-a/Pods/LayerLens/Bridge.m").path
+        let wtRun = controller.start(device: "device-wt", bundle: bundle, source: missingSource, worktree: wtB.path, simulator: true)
+        let wtDeadline = Date().addingTimeInterval(10)
+        while !["succeeded", "failed"].contains(controller.status(id: wtRun)?.0 ?? "") && Date() < wtDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(controller.status(id: wtRun)?.0 == "succeeded",
+                     "Command run with explicit worktree must build even when old source directory was deleted: \(controller.status(id: wtRun)?.1 ?? "")")
+        let wtSaved = (UserDefaults.standard.dictionary(forKey: "LayerLensCommandRunRelativeProjects") as? [String: [String: String]])?[bundle + "|wt|" + wtB.standardizedFileURL.path]
+        precondition(wtSaved?["path"] == "App.xcodeproj" && wtSaved?["scheme"] == "App",
+                     "Per-worktree command-run cache must isolate from base bundle key")
+        let missingWtRun = controller.start(device: "device-wt", bundle: bundle, source: source.path, worktree: root.appendingPathComponent("worktrees/missing").path, simulator: true)
+        let missingWtDeadline = Date().addingTimeInterval(5)
+        while !["succeeded", "failed"].contains(controller.status(id: missingWtRun)?.0 ?? "") && Date() < missingWtDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        precondition(controller.status(id: missingWtRun)?.0 == "failed",
+                     "Command run must fail cleanly when selected worktree does not exist")
+
+        let detail0 = controller.statusDetail(id: wtRun, since: 0)
+        let cursor0 = detail0?["logCursor"] as? Int ?? 0
+        let logs0 = detail0?["logs"] as? [String] ?? []
+        precondition(cursor0 > 0 && logs0.contains(where: { $0.contains("Scheme: App") }),
+                     "statusDetail must expose build milestone and output lines with cursor")
+        let detailNext = controller.statusDetail(id: wtRun, since: cursor0)
+        precondition((detailNext?["logs"] as? [String])?.isEmpty == true && (detailNext?["logCursor"] as? Int) == cursor0,
+                     "Incremental log cursor must avoid re-sending already delivered lines")
+
+        // SwiftPM skip flags & automatic fallback on package-resolution errors.
+        let spmRoot = root.appendingPathComponent("spm-test")
+        let spmProject = spmRoot.appendingPathComponent("App.xcodeproj")
+        let spmSource = spmRoot.appendingPathComponent("Sources/Bridge.m")
+        let spmDerivedRoot = spmRoot.appendingPathComponent("XcodeDerived")
+        let spmDerived = spmDerivedRoot.appendingPathComponent("App")
+        try fm.createDirectory(at: spmProject.appendingPathComponent("xcshareddata/xcschemes"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: spmSource.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createDirectory(at: spmDerived, withIntermediateDirectories: true)
+        try "".write(to: spmSource, atomically: true, encoding: .utf8)
+        try scheme.write(to: spmProject.appendingPathComponent("xcshareddata/xcschemes/App.xcscheme"), atomically: true, encoding: .utf8)
+        let spmBundle = "com.layerlens.test.spm.\(UUID().uuidString)"
+        let spmSettings: [[String: Any]] = [["target": "App", "buildSettings": ["PRODUCT_BUNDLE_IDENTIFIER": spmBundle, "WRAPPER_EXTENSION": "app", "PROJECT_FILE_PATH": spmProject.path, "TARGET_BUILD_DIR": "MOCK_BUILD_DIR", "WRAPPER_NAME": "App.app"]]]
+        try JSONSerialization.data(withJSONObject: spmSettings).write(to: root.appendingPathComponent("settings.json"))
+        let spmAppInfo = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": spmBundle], format: .xml, options: 0)
+        try spmAppInfo.write(to: root.appendingPathComponent("app-info.plist"))
+        precondition(!CommandRunController.hasResolvedPackages(in: spmDerived.path))
+        let spmController = CommandRunController(
+            executable: executable.path,
+            cacheRoot: nil,
+            derivedDataRoot: spmDerivedRoot)
+        let spmInfo = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": spmProject.path], format: .xml, options: 0)
+        try spmInfo.write(to: spmDerived.appendingPathComponent("info.plist"))
+        func runAndWait(_ block: () -> String) -> String {
+            let id = block()
+            let stop = Date().addingTimeInterval(10)
+            while !["succeeded", "failed"].contains(spmController.status(id: id)?.0 ?? "") && Date() < stop {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            return id
+        }
+        let coldSpmId = runAndWait { spmController.start(device: "device-spm", bundle: spmBundle, source: spmSource.path, simulator: true) }
+        precondition(spmController.status(id: coldSpmId)?.0 == "succeeded", spmController.status(id: coldSpmId)?.1 ?? "cold spm failed")
+        let buildEvents1 = try String(contentsOf: root.appendingPathComponent("build-events"), encoding: .utf8)
+        let coldBuildLine = buildEvents1.split(separator: "\n").last.map(String.init) ?? ""
+        precondition(!coldBuildLine.contains("-disableAutomaticPackageResolution"),
+                     "Build without SourcePackages/workspace-state.json must allow SwiftPM resolution")
+
+        let spmStateFile = spmDerived.appendingPathComponent("SourcePackages/workspace-state.json")
+        try fm.createDirectory(at: spmStateFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "{}".write(to: spmStateFile, atomically: true, encoding: .utf8)
+        precondition(CommandRunController.hasResolvedPackages(in: spmDerived.path))
+        let warmSpmId = runAndWait { spmController.start(device: "device-spm", bundle: spmBundle, source: spmSource.path, simulator: true) }
+        precondition(spmController.status(id: warmSpmId)?.0 == "succeeded", spmController.status(id: warmSpmId)?.1 ?? "warm spm failed")
+        let buildEvents2 = try String(contentsOf: root.appendingPathComponent("build-events"), encoding: .utf8)
+        let warmBuildLine = buildEvents2.split(separator: "\n").last.map(String.init) ?? ""
+        precondition(warmBuildLine.contains("-disableAutomaticPackageResolution") && warmBuildLine.contains("-skipPackageUpdates"),
+                     "Build with existing SourcePackages/workspace-state.json must skip SwiftPM resolution and updates")
+
+        try "".write(to: root.appendingPathComponent("fail-pkg-resolve-when-skipped"), atomically: true, encoding: .utf8)
+        let retrySpmId = runAndWait { spmController.start(device: "device-spm", bundle: spmBundle, source: spmSource.path, simulator: true) }
+        try fm.removeItem(at: root.appendingPathComponent("fail-pkg-resolve-when-skipped"))
+        precondition(spmController.status(id: retrySpmId)?.0 == "succeeded",
+                     "Package resolution failure with skip flags must fall back to full resolution and succeed")
+        let buildEvents3 = try String(contentsOf: root.appendingPathComponent("build-events"), encoding: .utf8)
+        let retryLines = buildEvents3.dropFirst(buildEvents2.count).split(separator: "\n").map(String.init)
+        precondition(retryLines.count == 2 && retryLines[0].contains("-disableAutomaticPackageResolution") && !retryLines[1].contains("-disableAutomaticPackageResolution"),
+                     "Fallback must invoke build once with skip flags and once without")
+        let retryLogs = (spmController.statusDetail(id: retrySpmId, since: 0)?["logs"] as? [String]) ?? []
+        precondition(retryLogs.contains { $0.contains("SwiftPM 依赖可能已变更") })
+
+        try "".write(to: root.appendingPathComponent("fail-build"), atomically: true, encoding: .utf8)
+        let ordinaryFailId = runAndWait { spmController.start(device: "device-spm", bundle: spmBundle, source: spmSource.path, simulator: true) }
+        try fm.removeItem(at: root.appendingPathComponent("fail-build"))
+        precondition(spmController.status(id: ordinaryFailId)?.0 == "failed")
+        let buildEvents4 = try String(contentsOf: root.appendingPathComponent("build-events"), encoding: .utf8)
+        precondition(buildEvents4.dropFirst(buildEvents3.count).split(separator: "\n").count == 1,
+                     "Ordinary compile errors must not trigger SwiftPM resolution retry")
+        precondition(CommandRunController.isPackageResolutionFailure("xcodebuild: error: Could not resolve package dependencies:"))
+        precondition(!CommandRunController.isPackageResolutionFailure("error: cannot find 'Foo' in scope"))
+        precondition(CommandRunController.buildProgress("Resolve Package Graph") == "解析 SwiftPM 依赖")
+        precondition(CommandRunController.buildProgress("Resolved source packages:") == "匹配运行目标")
+
+        precondition(warmBuildLine.contains("-destination id=device-spm"),
+                     "Simulator build must continue targeting its simulator ID")
+        let iosId = runAndWait { spmController.start(device: "device-ios", bundle: spmBundle, source: spmSource.path, simulator: false) }
+        precondition(spmController.status(id: iosId)?.0 == "succeeded", spmController.status(id: iosId)?.1 ?? "generic ios failed")
+        let buildEvents5 = try String(contentsOf: root.appendingPathComponent("build-events"), encoding: .utf8)
+        let iosBuildLine = buildEvents5.split(separator: "\n").last.map(String.init) ?? ""
+        precondition(iosBuildLine.contains("-destination generic/platform=iOS") && !iosBuildLine.contains("id=device-ios"),
+                     "Physical iOS builds must default to generic/platform=iOS to avoid CoreDevice wait")
+
+        try "".write(to: root.appendingPathComponent("fail-generic-dest"), atomically: true, encoding: .utf8)
+        let iosFallbackId = runAndWait { spmController.start(device: "device-ios", bundle: spmBundle, source: spmSource.path, simulator: false) }
+        try fm.removeItem(at: root.appendingPathComponent("fail-generic-dest"))
+        precondition(spmController.status(id: iosFallbackId)?.0 == "succeeded",
+                     "Physical device destination fallback must recover when generic/platform=iOS fails provisioning")
+        let buildEvents6 = try String(contentsOf: root.appendingPathComponent("build-events"), encoding: .utf8)
+        let iosFallbackLines = buildEvents6.dropFirst(buildEvents5.count).split(separator: "\n").map(String.init)
+        precondition(iosFallbackLines.count == 2 && iosFallbackLines[0].contains("generic/platform=iOS") && iosFallbackLines[1].contains("id=device-ios"))
+        let iosFallbackLogs = (spmController.statusDetail(id: iosFallbackId, since: 0)?["logs"] as? [String]) ?? []
+        precondition(iosFallbackLogs.contains { $0.contains("通用构建目标受阻") })
 
         print("PASS command run: latest per device, install/launch isolation and scheme options")
     }

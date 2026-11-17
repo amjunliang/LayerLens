@@ -14,6 +14,15 @@ import Network
 /// 工作区改动面板: 仓库由 App 上报的编译源文件路径推断, 网页只传 bundleId, 不接受任意路径.
 /// 只在有网页观看时监听仓库文件变化(FSEvents), 变化后防抖执行 git status 推送; 无人观看时不执行任何 git 命令
 final class GitController {
+    struct Worktree: Equatable {
+        let path: String
+        let name: String
+        let branch: String
+        let head: String
+        let isMain: Bool
+        let detached: Bool
+    }
+
     struct Output {
         let status: Int32
         let stdout: Data
@@ -76,14 +85,14 @@ final class GitController {
         repository(forDirectory: XcodeSourcePath.sourceDirectory(deviceId: deviceId, bundleId: bundleId, sourceFile: sourceFile))
     }
 
-    private func repository(forDirectory directory: String?) -> String? {
+    func repository(forDirectory directory: String?) -> String? {
         guard let directory else { return nil }
         rootsLock.lock()
         let cached = roots[directory]
         rootsLock.unlock()
         if let cached, FileManager.default.fileExists(atPath: cached) { return cached }
         guard FileManager.default.fileExists(atPath: directory) else { return nil }
-        let output = Self.run(directory, ["rev-parse", "--show-toplevel"], timeout: 10)
+        let output = Self.run(directory, ["rev-parse", "--show-toplevel"], timeout: 10, readOnly: true)
         guard output.ok else { return nil }
         let root = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !root.isEmpty else { return nil }
@@ -91,6 +100,122 @@ final class GitController {
         roots[directory] = root
         rootsLock.unlock()
         return root
+    }
+
+    /// 仓库共享的 `.git` 目录，用于某棵 worktree 删除后仍枚举其余兄弟 worktree
+    func commonGitDirectory(for repository: String) -> String? {
+        guard !repository.isEmpty, FileManager.default.fileExists(atPath: repository) else { return nil }
+        let output = Self.run(repository, ["rev-parse", "--git-common-dir"], timeout: 5, readOnly: true)
+        guard output.ok else { return nil }
+        let raw = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        let url = raw.hasPrefix("/")
+            ? URL(fileURLWithPath: raw).standardizedFileURL
+            : URL(fileURLWithPath: repository).appendingPathComponent(raw).standardizedFileURL
+        return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
+    }
+
+    func worktrees(for directory: String) -> [Worktree] {
+        guard !directory.isEmpty else { return [] }
+        let fm = FileManager.default
+        let candidate: String
+        if directory.hasSuffix("/.git") {
+            let parent = URL(fileURLWithPath: directory).deletingLastPathComponent().path
+            candidate = fm.fileExists(atPath: parent) ? parent : directory
+        } else {
+            candidate = directory
+        }
+        guard fm.fileExists(atPath: candidate) else { return [] }
+        let args = candidate.hasSuffix("/.git") || candidate.hasSuffix(".git")
+            ? ["--git-dir", candidate, "worktree", "list", "--porcelain"]
+            : ["worktree", "list", "--porcelain"]
+        let output = Self.run(fm.fileExists(atPath: candidate) ? candidate : "/", args, timeout: 5, readOnly: true)
+        guard output.ok else { return [] }
+        return Self.parseWorktrees(output.text)
+    }
+
+    static func parseWorktrees(_ output: String, exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [Worktree] {
+        struct Entry {
+            var path = ""
+            var head = ""
+            var branch = ""
+            var bare = false
+            var prunable = false
+            var detached = false
+        }
+        var entries: [Entry] = []
+        var current = Entry()
+        func flush() {
+            if !current.path.isEmpty { entries.append(current) }
+            current = Entry()
+        }
+        for rawLine in output.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            if line.isEmpty {
+                flush()
+                continue
+            }
+            if line.hasPrefix("worktree ") {
+                current.path = URL(fileURLWithPath: String(line.dropFirst("worktree ".count))).standardizedFileURL.path
+            } else if line.hasPrefix("HEAD ") {
+                current.head = String(line.dropFirst("HEAD ".count).prefix(7))
+            } else if line.hasPrefix("branch ") {
+                let ref = String(line.dropFirst("branch ".count))
+                current.branch = ref.hasPrefix("refs/heads/") ? String(ref.dropFirst("refs/heads/".count)) : ref
+            } else if line == "detached" {
+                current.detached = true
+            } else if line == "bare" {
+                current.bare = true
+            } else if line == "prunable" || line.hasPrefix("prunable ") {
+                current.prunable = true
+            }
+        }
+        flush()
+        let indexed = entries.enumerated().filter { !$0.element.bare && !$0.element.prunable && exists($0.element.path) }
+        let names = shortWorktreeNames(for: indexed.map(\.element.path))
+        return zip(indexed, names).map { pair, name in
+            let (originalIndex, entry) = pair
+            return Worktree(
+                path: entry.path,
+                name: name,
+                branch: entry.branch,
+                head: entry.head,
+                isMain: originalIndex == 0,
+                detached: entry.detached || entry.branch.isEmpty
+            )
+        }
+    }
+
+    /// 生成简短可区分的工作树名：末级目录名唯一时直接取末级；撞名时向上取第一个能区分的父目录段（如 ea74 / ab12）。
+    static func shortWorktreeNames(for paths: [String]) -> [String] {
+        let componentsList = paths.map { path -> [String] in
+            URL(fileURLWithPath: path).standardizedFileURL.pathComponents.filter { $0 != "/" }
+        }
+        var names = componentsList.map { $0.last ?? "" }
+        let originalLeaves = names
+        let leafCounts = Dictionary(originalLeaves.map { ($0, 1) }, uniquingKeysWith: +)
+        let collidedIndices = originalLeaves.indices.filter { (leafCounts[originalLeaves[$0]] ?? 0) > 1 }
+        guard !collidedIndices.isEmpty else { return names }
+        let maxDepth = collidedIndices.map { componentsList[$0].count }.max() ?? 0
+        for index in collidedIndices {
+            let parts = componentsList[index]
+            let sameLeaf = collidedIndices.filter { $0 != index && originalLeaves[$0] == originalLeaves[index] }
+            for offset in 1..<maxDepth {
+                let pos = parts.count - 1 - offset
+                guard pos >= 0 else { break }
+                let segment = parts[pos]
+                let unique = sameLeaf.allSatisfy { other in
+                    let otherParts = componentsList[other]
+                    let otherPos = otherParts.count - 1 - offset
+                    return otherPos < 0 || otherParts[otherPos] != segment
+                }
+                if unique && !segment.isEmpty {
+                    names[index] = segment
+                    break
+                }
+            }
+        }
+        return names
     }
 
     // MARK: - Commands

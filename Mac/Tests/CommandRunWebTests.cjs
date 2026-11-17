@@ -12,10 +12,14 @@ function firePoll() {
 }
 const session = new Map();
 let followGuard = null;
-const node = { classList: { toggle() {} }, setAttribute() {}, title: '', hidden: true, textContent: '' };
+const elements = new Map();
+const getNode = id => {
+  if (!elements.has(id)) elements.set(id, { classList: { toggle() {} }, setAttribute() {}, title: '', hidden: true, textContent: '' });
+  return elements.get(id);
+};
 const ctx = { Map, crypto: { randomUUID: () => 'window-1' }, localStorage: { getItem: () => null },
   sessionStorage: { getItem: key => session.get(key) || null, setItem: (key, value) => session.set(key, value) },
-  targets: { deviceId: 'phone', bundleId: 'A' }, pageActivity: {active: true}, xcode: { running: false }, $: () => node,
+  targets: { deviceId: 'phone', bundleId: 'A' }, pageActivity: {active: true}, xcode: { running: false }, $: getNode,
   commandFollowGuard: () => followGuard, saveCommandFollowGuard() {}, finishCommandFollowGuard() {},
   currentDevice: () => ({id: 'phone'}), currentApp: () => ({appName: 'B'}),
   activateSelectedAppLater: (...args) => activations.push(args),
@@ -59,6 +63,12 @@ const reply = (r, data) => r.resolve({ok: true, json: async () => data});
   pending = firePoll();
   reply(requests.at(-1), {status: 'failed', detail: 'No project', buildStarted: false}); await pending;
   assert.deepEqual(modes, ['live'], 'A lookup failure must leave the view unchanged');
+  assert.equal(getNode('runError').hidden, false, 'A failed run must show the run error banner');
+  assert.equal(getNode('runErrorTitle').textContent, '运行失败');
+  assert.equal(getNode('runErrorText').textContent, 'No project');
+  assert.equal(getNode('runErrorText').hidden, false);
+  ctx.showCommandRunError('');
+  assert.equal(getNode('runErrorText').hidden, true, 'An empty detail must hide the error detail body');
   ctx.targets.bundleId = 'A';
   const restoring = ctx.restoreCommandRuns();
   const snapshot = requests.at(-1);
@@ -113,7 +123,8 @@ const reply = (r, data) => r.resolve({ok: true, json: async () => data});
   assert(timeoutIndex >= 0, 'A status query must have a timeout');
   timers.splice(timeoutIndex, 1)[0].callback();
   await timedPoll;
-  assert(node.textContent.includes('正在重新连接运行状态'), 'A stalled status request must show retry feedback');
+  assert(getNode('runProgressText').textContent.includes('正在重新连接运行状态'), 'A stalled status request must show retry feedback');
+  assert.equal(getNode('runError').hidden, true, 'Starting a new run must clear the previous run error banner');
   assert(timers.some(item => item.delay === 1000), 'A timed-out status request must retry');
   console.log('PASS command run UI: rapid A/B/A, build-time switch and lookup failure');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -6,6 +6,7 @@
 //  Copyright © 2026 YueYou. Released under the MIT License.
 //
 
+import AppKit
 import Foundation
 import Network
 
@@ -38,7 +39,7 @@ enum DeviceKind: String {
     case device
 }
 
-struct DeviceRecord {
+struct DeviceRecord: Equatable {
     let id: String
     let kind: DeviceKind
     let name: String
@@ -66,6 +67,7 @@ final class TargetRegistry {
     static let refreshInterval: TimeInterval = 2
 
     private let queue = DispatchQueue(label: "com.layerlens.registry")
+    private let log: (String) -> Void
     private let session: URLSession
     private var timer: DispatchSourceTimer?
     private var simulators: [DeviceRecord] = []
@@ -78,11 +80,22 @@ final class TargetRegistry {
     /// 未启动(或正在启动 / 关闭)的模拟器, 网页列出后可以启动
     private var offlineSimulators: [(record: DeviceRecord, state: String)] = []
     private var usbDevices: [Usbmux.Device] = []
-    /// UDID -> devicectl 查到的名称和系统版本, 每台设备只查一次
+    /// devicectl 报告的有线真机, usbmuxd 漏报或休眠恢复慢时兜底
+    private var wiredDevices: [DeviceRecord] = []
+    /// UDID -> devicectl 查到的名称和系统版本
     private var deviceDetails: [String: (name: String, os: String, model: String)] = [:]
-    private var detailsLoading: Set<String> = []
+    private var refreshingDeviceDetails = false
+    private var refreshDeviceDetailsAgain = false
+    private var nextDeviceDetailsRefresh = Date.distantPast
+    private static let deviceDetailsInterval: TimeInterval = 10
+    private static let deviceDetailsFailureCooldown: TimeInterval = 20
+    private var wakeObserver: NSObjectProtocol?
+    private var lastUsbmuxError: String?
+    private var lastDevicectlFailed = false
+    private var lastDeviceSummary = ""
     private var apps: [AppRecord] = []
     private var scanning = false
+    private var scanAgain = false
     private var stopped = false
     /// 短暂通信超时不能立即当作挂起; 成功响应或端口移除时重置。
     private var scanMisses: [String: Int] = [:]
@@ -96,6 +109,12 @@ final class TargetRegistry {
     /// 设备 -> Bundle ID -> 编译时源文件路径, App 未运行时也能据此让 Xcode 运行
     private var sourceFiles: [String: [String: String]]
     private static let sourceFilesKey = "LayerLensDeviceSourceFiles"
+    /// 设备 -> Bundle ID -> 手动切换的目标工作树根目录，直到 App 重新连接上报新路径前持续生效
+    private var worktreeOverrides: [String: [String: String]]
+    private static let worktreeOverridesKey = "LayerLensDeviceWorktrees"
+    /// 设备 -> Bundle ID -> 仓库共享 `.git` 目录，用于在某棵 worktree 被删除后仍可枚举兄弟 worktree
+    private var commonGitDirs: [String: [String: String]]
+    private static let commonGitDirsKey = "LayerLensDeviceGitDirs"
     /// 出现过的设备和 App, 断开后仍在菜单中显示; 网页和 App 窗口共用一份, 重启后保留
     /// { 设备 ID: { id, name, model, os, kind, apps: { Bundle ID: { bundleId, appName, version, capture } } } }
     private var history: [String: [String: Any]]
@@ -118,16 +137,29 @@ final class TargetRegistry {
     private var appStates: [[String: Any]] = []
 
     func stop() {
-        queue.sync { stopped = true; timer?.cancel(); stateMonitor.stop() }
+        let observer: NSObjectProtocol? = queue.sync {
+            stopped = true
+            timer?.cancel()
+            stateMonitor.stop()
+            let current = wakeObserver
+            wakeObserver = nil
+            return current
+        }
+        if let observer {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
         BoundedProcess.stopAll()
     }
 
-    init() {
+    init(log: @escaping (String) -> Void = { _ in }) {
+        self.log = log
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 1
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: configuration)
         sourceFiles = UserDefaults.standard.dictionary(forKey: Self.sourceFilesKey) as? [String: [String: String]] ?? [:]
+        worktreeOverrides = UserDefaults.standard.dictionary(forKey: Self.worktreeOverridesKey) as? [String: [String: String]] ?? [:]
+        commonGitDirs = UserDefaults.standard.dictionary(forKey: Self.commonGitDirsKey) as? [String: [String: String]] ?? [:]
         history = TargetHistory.sanitized(UserDefaults.standard.dictionary(forKey: Self.historyKey) as? [String: [String: Any]] ?? [:])
         backfillHistory()
         UserDefaults.standard.set(history, forKey: Self.historyKey)
@@ -162,6 +194,62 @@ final class TargetRegistry {
         queue.sync { sourceFiles[deviceId]?[bundleId] ?? "" }
     }
 
+    func rememberSourceFile(_ file: String, deviceId: String, bundleId: String) {
+        guard !deviceId.isEmpty, !bundleId.isEmpty, !file.isEmpty else { return }
+        queue.sync {
+            guard sourceFiles[deviceId]?[bundleId] != file else { return }
+            sourceFiles[deviceId, default: [:]][bundleId] = file
+            UserDefaults.standard.set(sourceFiles, forKey: Self.sourceFilesKey)
+            if worktreeOverrides[deviceId]?.removeValue(forKey: bundleId) != nil {
+                UserDefaults.standard.set(worktreeOverrides, forKey: Self.worktreeOverridesKey)
+            }
+        }
+    }
+
+    func worktreeOverride(deviceId: String, bundleId: String) -> String? {
+        queue.sync {
+            guard let path = worktreeOverrides[deviceId]?[bundleId], !path.isEmpty else { return nil }
+            return path
+        }
+    }
+
+    func setWorktreeOverride(_ path: String?, deviceId: String, bundleId: String) {
+        guard !deviceId.isEmpty, !bundleId.isEmpty else { return }
+        queue.sync {
+            if let path, !path.isEmpty {
+                let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+                guard worktreeOverrides[deviceId]?[bundleId] != normalized else { return }
+                worktreeOverrides[deviceId, default: [:]][bundleId] = normalized
+            } else {
+                guard worktreeOverrides[deviceId]?.removeValue(forKey: bundleId) != nil else { return }
+            }
+            UserDefaults.standard.set(worktreeOverrides, forKey: Self.worktreeOverridesKey)
+        }
+    }
+
+    func commonGitDir(deviceId: String, bundleId: String) -> String? {
+        queue.sync {
+            guard let path = commonGitDirs[deviceId]?[bundleId], !path.isEmpty else { return nil }
+            return path
+        }
+    }
+
+    func rememberCommonGitDir(_ path: String, deviceId: String, bundleId: String) {
+        guard !deviceId.isEmpty, !bundleId.isEmpty, !path.isEmpty else { return }
+        queue.sync {
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard commonGitDirs[deviceId]?[bundleId] != normalized else { return }
+            commonGitDirs[deviceId, default: [:]][bundleId] = normalized
+            UserDefaults.standard.set(commonGitDirs, forKey: Self.commonGitDirsKey)
+        }
+    }
+
+    func isAppConnected(deviceId: String, bundleId: String) -> Bool {
+        queue.sync {
+            apps.contains { $0.deviceId == deviceId && $0.bundleId == bundleId }
+        }
+    }
+
     func foregroundApps(deviceId: String) -> [String] {
         queue.sync {
             appStates.compactMap { state in
@@ -183,10 +271,22 @@ final class TargetRegistry {
     }
 
     func start() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.queue.async { [weak self] in
+                guard let self, !self.stopped else { return }
+                self.log("system wake: refreshing USB devices")
+                self.nextDeviceDetailsRefresh = .distantPast
+                self.refreshDeviceDetails(force: true)
+                self.refreshUSBDevices { self.scanApps(completion: nil) }
+            }
+        }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: Self.refreshInterval)
         timer.setEventHandler { [weak self] in
             self?.refreshSimulators()
+            self?.refreshDeviceDetails()
             // 先取 USB 设备列表再扫描, 本轮即可扫到真机上的 App
             self?.refreshUSBDevices { self?.scanApps(completion: nil) }
         }
@@ -231,7 +331,7 @@ final class TargetRegistry {
         queue.async { [self] in
             if simulators.contains(where: { $0.id == deviceId }) {
                 completion(.simulator)
-            } else if usbDevices.contains(where: { $0.udid == deviceId }) {
+            } else if usbDevices.contains(where: { $0.udid == deviceId }) || wiredDevices.contains(where: { $0.id == deviceId }) {
                 completion(.device)
             } else if let app = apps.first(where: { $0.deviceId == deviceId }) {
                 if case .local = app.endpoint { completion(.simulator) } else { completion(.device) }
@@ -279,6 +379,9 @@ final class TargetRegistry {
                 return
             }
             var devices = simulators + usbDevices.map { usbRecord($0) }
+            for wired in wiredDevices where !devices.contains(where: { $0.id == wired.id }) {
+                devices.append(wired)
+            }
             // 未出现在 simctl / usbmuxd 结果中的设备(刷新时机不同)补上
             for app in apps where !devices.contains(where: { $0.id == app.deviceId }) {
                 if case .local = app.endpoint {
@@ -365,7 +468,9 @@ final class TargetRegistry {
                 var apps = entry["apps"] as? [String: Any] ?? [:]
                 if !bundleId.isEmpty { apps[bundleId] = nil }
                 entry["apps"] = apps
-                let online = simulators.contains { $0.id == deviceId } || usbDevices.contains { $0.udid == deviceId }
+                let online = simulators.contains { $0.id == deviceId }
+                    || usbDevices.contains { $0.udid == deviceId }
+                    || wiredDevices.contains { $0.id == deviceId }
                 history[deviceId] = bundleId.isEmpty || (apps.isEmpty && !online) ? nil : entry
                 saveHistory()
             }
@@ -469,68 +574,163 @@ final class TargetRegistry {
 
     // MARK: - USB devices
 
+    struct DeviceControlSnapshot {
+        let details: [String: (name: String, os: String, model: String)]
+        let wired: [DeviceRecord]
+    }
+
     private func refreshUSBDevices(completion: @escaping () -> Void) {
-        Usbmux.listDevices(queue: queue) { [weak self] devices in
+        Usbmux.listDevicesDetailed(queue: queue) { [weak self] devices, error in
             defer { completion() }
             // 偶发请求失败时沿用上次结果, 避免设备上的 App 被清空
             guard let self else { return }
             self.usbListed = true
-            guard let devices else { return }
+            guard let devices else {
+                if self.lastUsbmuxError != error {
+                    self.lastUsbmuxError = error
+                    self.log("usbmux listDevices failed: \(error ?? "unknown")")
+                }
+                if self.usbDevices.isEmpty {
+                    self.refreshDeviceDetails()
+                }
+                return
+            }
+            if self.lastUsbmuxError != nil {
+                self.lastUsbmuxError = nil
+                self.log("usbmux listDevices recovered")
+            }
             let previouslyConnected = Set(self.usbDevices.map(\.udid))
+            let currentlyConnected = Set(devices.map(\.udid))
             self.usbDevices = devices
-            // 初次连接和断开后的重新连接都重新读取, 以发现设备改名或系统升级.
-            devices.filter {
-                (!previouslyConnected.contains($0.udid) || self.deviceDetails[$0.udid] == nil)
-                    && !self.detailsLoading.contains($0.udid)
-            }.forEach { self.loadDetails(udid: $0.udid) }
+            let added = currentlyConnected.subtracting(previouslyConnected)
+            let removed = previouslyConnected.subtracting(currentlyConnected)
+            if !removed.isEmpty {
+                self.wiredDevices.removeAll { removed.contains($0.id) }
+            }
+            if (!added.isEmpty || !removed.isEmpty) && self.scanning {
+                self.scanAgain = true
+            }
+            let missingDetails = devices.contains { self.deviceDetails[$0.udid] == nil }
+            if !added.isEmpty || !removed.isEmpty || missingDetails {
+                self.refreshDeviceDetails(force: !added.isEmpty || !removed.isEmpty)
+            }
+            self.logDeviceChanges()
         }
     }
 
-    /// 名称优先取 devicectl, 其次取设备上 App 上报的名称
+    private func logDeviceChanges() {
+        let usbmuxList = usbDevices.map(\.udid).sorted().joined(separator: ",")
+        let wiredList = wiredDevices.map(\.id).sorted().joined(separator: ",")
+        let summary = "usbmux=[\(usbmuxList)] wired=[\(wiredList)]"
+        guard summary != lastDeviceSummary else { return }
+        lastDeviceSummary = summary
+        log("usb devices: \(summary)")
+    }
+
+    /// 名称优先取 devicectl, 其次取设备上 App 上报的名称或历史名称
     private func usbRecord(_ device: Usbmux.Device) -> DeviceRecord {
         let app = apps.first { $0.deviceId == device.udid }
         let details = deviceDetails[device.udid]
-        let name = details?.name.nonEmpty ?? app?.info["deviceName"] as? String ?? "iPhone"
-        let os = details?.os.nonEmpty ?? app?.info["os"] as? String ?? ""
-        return DeviceRecord(id: device.udid, kind: .device, name: name, os: os, model: details?.model ?? "")
+        let saved = history[device.udid]
+        let name = details?.name.nonEmpty ?? app?.info["deviceName"] as? String ?? (saved?["name"] as? String)?.nonEmpty ?? "iPhone"
+        let os = details?.os.nonEmpty ?? app?.info["os"] as? String ?? (saved?["os"] as? String)?.nonEmpty ?? ""
+        let model = details?.model.nonEmpty ?? (saved?["model"] as? String)?.nonEmpty ?? ""
+        return DeviceRecord(id: device.udid, kind: .device, name: name, os: os, model: model)
     }
 
-    private func loadDetails(udid: String) {
-        detailsLoading.insert(udid)
+    private func refreshDeviceDetails(force: Bool = false) {
+        guard !stopped else { return }
+        if refreshingDeviceDetails {
+            if force { refreshDeviceDetailsAgain = true }
+            return
+        }
+        guard force || Date() >= nextDeviceDetailsRefresh else { return }
+        refreshingDeviceDetails = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let details = Self.devicectlDetails()
-            self?.queue.async {
-                guard let self else { return }
-                self.detailsLoading.remove(udid)
-                self.deviceDetails.merge(details) { _, new in new }
-                // 查不到(如 Xcode 版本过旧)时记为空, 不再重复查询
-                if self.deviceDetails[udid] == nil {
-                    self.deviceDetails[udid] = ("", "", "")
+            let snapshot = Self.devicectlSnapshot()
+            self?.queue.async { [weak self] in
+                guard let self, !self.stopped else { return }
+                self.refreshingDeviceDetails = false
+                if let snapshot {
+                    if self.lastDevicectlFailed {
+                        self.lastDevicectlFailed = false
+                        self.log("devicectl list devices recovered")
+                    }
+                    self.nextDeviceDetailsRefresh = Date().addingTimeInterval(Self.deviceDetailsInterval)
+                    var changed = self.wiredDevices != snapshot.wired
+                    for (udid, detail) in snapshot.details {
+                        let old = self.deviceDetails[udid]
+                        if old == nil || old! != detail {
+                            changed = true
+                        }
+                    }
+                    self.deviceDetails.merge(snapshot.details) { _, new in new }
+                    self.wiredDevices = snapshot.wired
+                    self.logDeviceChanges()
+                    if changed { self.publishInventory() }
+                } else {
+                    if !self.lastDevicectlFailed {
+                        self.lastDevicectlFailed = true
+                        self.log("devicectl list devices failed or timed out")
+                    }
+                    self.nextDeviceDetailsRefresh = Date().addingTimeInterval(Self.deviceDetailsFailureCooldown)
+                }
+                if self.refreshDeviceDetailsAgain {
+                    self.refreshDeviceDetailsAgain = false
+                    self.refreshDeviceDetails(force: true)
                 }
             }
         }
     }
 
+    private static let directDevicectlPath = "/Library/Developer/PrivateFrameworks/CoreDevice.framework/Resources/bin/devicectl"
+
     /// 解析 `devicectl list devices --json-output`, 只能输出到文件
-    private static func devicectlDetails() -> [String: (name: String, os: String, model: String)] {
+    private static func devicectlSnapshot() -> DeviceControlSnapshot? {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("layerlens-devices-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
-        guard run("/usr/bin/xcrun", ["devicectl", "list", "devices", "--quiet", "--json-output", file.path]) != nil,
-              let data = try? Data(contentsOf: file),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let useDirect = FileManager.default.isExecutableFile(atPath: directDevicectlPath)
+        let executable = useDirect ? directDevicectlPath : "/usr/bin/xcrun"
+        var arguments = ["list", "devices", "--quiet", "--json-output", file.path]
+        if !useDirect { arguments.insert("devicectl", at: 0) }
+        guard run(executable, arguments) != nil,
+              let data = try? Data(contentsOf: file) else {
+            return nil
+        }
+        return parseDeviceControlJSON(data)
+    }
+
+    static func parseDeviceControlJSON(_ data: Data) -> DeviceControlSnapshot? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let devices = (json["result"] as? [String: Any])?["devices"] as? [[String: Any]] else {
-            return [:]
+            return nil
         }
-        var result: [String: (name: String, os: String, model: String)] = [:]
+        var details: [String: (name: String, os: String, model: String)] = [:]
+        var wired: [DeviceRecord] = []
         for device in devices {
-            let hardware = device["hardwareProperties"] as? [String: Any] ?? [:]
-            let properties = device["deviceProperties"] as? [String: Any] ?? [:]
-            guard let udid = hardware["udid"] as? String, let name = properties["name"] as? String else { continue }
-            let version = properties["osVersionNumber"] as? String ?? ""
-            let platform = hardware["platform"] as? String ?? "iOS"
-            result[udid] = (name, version.isEmpty ? "" : "\(platform) \(version)", hardware["marketingName"] as? String ?? "")
+            let props = device["properties"] as? [String: Any]
+            let hardware = device["hardwareProperties"] as? [String: Any] ?? props?["hardware"] as? [String: Any] ?? [:]
+            let legacyProps = device["deviceProperties"] as? [String: Any] ?? [:]
+            let state = props?["state"] as? [String: Any] ?? [:]
+            let software = props?["software"] as? [String: Any] ?? [:]
+            let connection = device["connectionProperties"] as? [String: Any] ?? props?["connection"] as? [String: Any] ?? [:]
+            let reality = hardware["reality"] as? String ?? "physical"
+            guard reality == "physical",
+                  let udid = hardware["udid"] as? String, !udid.isEmpty else { continue }
+            let name = (legacyProps["name"] as? String)?.nonEmpty ?? (state["name"] as? String)?.nonEmpty ?? ""
+            let version = (legacyProps["osVersionNumber"] as? String)?.nonEmpty
+                ?? ((software["osVersionNumber"] as? [String: Any])?["stringValue"] as? String)?.nonEmpty ?? ""
+            let platform = (hardware["platform"] as? String)?.nonEmpty ?? "iOS"
+            let os = version.isEmpty ? "" : "\(platform) \(version)"
+            let model = (hardware["marketingName"] as? String)?.nonEmpty ?? (hardware["productType"] as? String)?.nonEmpty ?? ""
+            if !name.isEmpty {
+                details[udid] = (name, os, model)
+            }
+            if connection["transportType"] as? String == "wired" {
+                wired.append(DeviceRecord(id: udid, kind: .device, name: name.nonEmpty ?? "iPhone", os: os, model: model))
+            }
         }
-        return result
+        return DeviceControlSnapshot(details: details, wired: wired.sorted { $0.name < $1.name })
     }
 
     // MARK: - Apps
@@ -611,6 +811,10 @@ final class TargetRegistry {
             waiters.forEach { $0() }
             if complete { markReady() }
             publishInventory()
+            if scanAgain {
+                scanAgain = false
+                scanApps(completion: nil)
+            }
         }
     }
 
@@ -659,14 +863,21 @@ final class TargetRegistry {
 
     private func rememberSourceFiles() {
         var changed = false
+        var overrideChanged = false
         for app in apps {
             if let file = app.info["sourceFile"] as? String, !file.isEmpty, sourceFiles[app.deviceId]?[app.bundleId] != file {
                 sourceFiles[app.deviceId, default: [:]][app.bundleId] = file
                 changed = true
+                if worktreeOverrides[app.deviceId]?.removeValue(forKey: app.bundleId) != nil {
+                    overrideChanged = true
+                }
             }
         }
         if changed {
             UserDefaults.standard.set(sourceFiles, forKey: Self.sourceFilesKey)
+        }
+        if overrideChanged {
+            UserDefaults.standard.set(worktreeOverrides, forKey: Self.worktreeOverridesKey)
         }
     }
 

@@ -10,7 +10,7 @@ import AppKit
 
 /// 界面全部由网页提供, 原生部分只有承载网页的窗口、系统菜单和菜单栏图标
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private let registry = TargetRegistry()
+    private let registry = TargetRegistry(log: LiveLog.write)
     private lazy var server: HubServer = HubServer(registry: registry, pickScreenColor: { [weak self] owner, completion in
         guard let self else { completion(nil, true); return }
         self.startScreenColorPicker(owner: owner, completion: completion)
