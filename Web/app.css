@@ -387,6 +387,7 @@ body.log-max .canvas-top-banners { visibility: hidden; }
 /* 设备行: 状态点 + 名称 + 系统版本, 右侧电源按钮 */
 .target-device-row { display: flex; align-items: center; gap: 4px; }
 .target-device { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-weight: 600; }
+.target-menu > .target-device { width: 100%; }
 .target-device-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target-device-os { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: normal; font-size: 12px; }
 button.target-device { border: none; background: none; border-radius: var(--r-control); text-align: left; }
@@ -395,7 +396,7 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 .target-device.offline { font-weight: normal; color: var(--text-2); }
 /* App 缩进到设备名称下, 左侧竖线表示归属 */
 .target-apps { margin: 0 0 4px 11px; padding-left: 8px; border-left: 1px solid var(--border); }
-.target-app { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: none; background: none; border-radius: var(--r-control); text-align: left; }
+.target-app { position: relative; display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: none; background: none; border-radius: var(--r-control); text-align: left; }
 .target-app:hover { background: var(--hover); }
 .target-app.current { background: var(--selected, var(--hover)); }
 .target-app .status-dot { width: 6px; height: 6px; background: var(--success); }
@@ -406,12 +407,16 @@ button.target-device.current { background: var(--selected, var(--hover)); }
 /* 正在切换到的 App */
 .target-app.switching .target-app-meta { color: var(--accent); }
 .target-app.switching .status-dot { background: var(--accent); }
-/* 已断开的历史记录: 悬停时显示移除按钮, 代替右侧的说明 */
-.target-remove { display: none; flex: none; align-items: center; justify-content: center; width: 18px; height: 18px; margin-left: auto; border-radius: var(--r-control); color: var(--muted); }
+/* 已断开的历史记录: 悬停时显示移除按钮, 保留占位避免菜单宽度抖动 */
+.target-remove { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 18px; height: 18px; margin-left: auto; border-radius: var(--r-control); color: var(--muted); visibility: hidden; pointer-events: none; }
 .target-remove .icon { width: 12px; height: 12px; }
 .target-remove:hover { background: var(--hover); color: var(--text); }
-.target-app:hover .target-remove, .target-device:hover .target-remove { display: inline-flex; }
-.target-app:hover .target-remove ~ .target-app-meta, .target-app.away:not(.current):hover .target-app-meta { display: none; }
+.target-app .target-remove { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); margin-left: 0; }
+.target-app:hover .target-remove, .target-app:focus-visible .target-remove,
+.target-device:hover .target-remove, .target-device:focus-visible .target-remove { visibility: visible; pointer-events: auto; }
+.target-app.away:not(.current) .target-app-meta { min-width: 18px; text-align: right; }
+.target-app:hover .target-remove ~ .target-app-meta, .target-app.away:not(.current):hover .target-app-meta,
+.target-app.away:not(.current):focus-visible .target-app-meta { visibility: hidden; }
 .target-app-name { flex: 1; min-width: 0; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.4; }
 .target-app-meta { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .target-badge { padding: 0 5px; border-radius: 3px; background: var(--danger); color: #fff; font-size: 11px; line-height: 16px; }
@@ -485,35 +490,25 @@ kbd {
   background: var(--panel);
 }
 
-/* layout: 桌面三栏, 侧栏可收起 / 小屏单栏, 工具栏两端的开关切换面板 */
+/* layout: 全屏画布作底，桌面侧栏与底部面板悬浮覆盖（避免开关面板导致画布跳动与重缩放），小屏单栏抽屉 */
 .layout {
   flex: 1;
-  display: grid;
   min-height: 0;
+  position: relative;
   /* 侧栏默认宽度, 中屏收窄; 拖动分隔条后由 --tree-w / --detail-w 覆盖 */
   --tree-d: 300px;
   --detail-d: 340px;
-  grid-template-columns: var(--tree-w, var(--tree-d)) 1px minmax(0, 1fr) 1px var(--detail-w, var(--detail-d));
-  /* 第二、三行为日志面板, 与 Xcode 一样左侧层级树占满高度, 右侧延伸到详情面板下方, 关闭时高度为 0 */
-  grid-template-rows: minmax(0, 1fr) 0 0;
-  grid-template-areas: "tree s1 canvas s2 detail" "tree s1 s4 s4 s4" "tree s1 log log log";
 }
-body.log-open .layout { grid-template-rows: minmax(120px, 1fr) 1px var(--log-h, 240px); }
-/* 日志最大化: 盖住整个布局区域, 其他面板保持原样, 还原后无需重新布局 */
-.layout { position: relative; }
-body.log-open.log-max .log-pane { position: absolute; inset: 0; z-index: 30; grid-area: 1 / 1 / -1 / -1; }
 /* 独立的日志窗口: 只显示日志面板 */
 body.logs-window .toolbar, body.logs-window .layout > :not(.log-pane) { display: none !important; }
 /* 底部收边: 像 Claude.app 一样浮在内容上的淡出渐变, 内容延伸到窗口底部; 各滚动区底部留出 --edge-fade, 滚到底时内容不被遮住.
    层级高于最大化的日志面板(30), 低于菜单与弹窗(50+) */
 .statusbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: var(--edge-fade); pointer-events: none; background: linear-gradient(to bottom, color-mix(in srgb, var(--panel) 0%, transparent), var(--panel)); }
 body.logs-window .layout { display: flex; }
-body.logs-window .log-pane { display: flex !important; flex: 1; }
+body.logs-window .log-pane { display: flex !important; position: static !important; width: auto !important; height: auto !important; flex: 1; box-shadow: none !important; }
 body.logs-window #logClose, body.logs-window #logMax, body.logs-window #logPopout, body:not(.logs-window) #logDock { display: none; }
 .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); }
-.tree-pane { grid-area: tree; }
-.canvas-pane { grid-area: canvas; }
-.detail-pane { grid-area: detail; }
+.canvas-pane { position: absolute; inset: 0; z-index: 1; }
 .splitter { background: var(--border); position: relative; z-index: 2; touch-action: none; }
 /* 所有分隔线共用: 布局只占 1px, ::after 扩大拖动热区, ::before 在悬停和拖动时显示 3px 高亮条 */
 .splitter::after, .net-splitter::after { content: ""; position: absolute; inset: 0 -6px; }
@@ -524,12 +519,10 @@ body.logs-window #logClose, body.logs-window #logMax, body.logs-window #logPopou
 .splitter:hover::before, .splitter.dragging::before, .net-splitter:hover::before, .net-splitter.dragging::before { background: var(--accent); }
 .splitter.vertical { cursor: col-resize; }
 .splitter.horizontal { cursor: row-resize; display: none; }
-.splitter[data-split="s1"] { grid-area: s1; }
-.splitter[data-split="s2"] { grid-area: s2; }
-.splitter[data-split="s3"] { grid-area: s3; }
-.splitter[data-split="s4"] { grid-area: s4; }
 body.log-open .splitter[data-split="s4"] { display: block; }
 .pane-header { padding: 8px; border-bottom: 1px solid var(--border); background: var(--panel-head); }
+.drawer-backdrop { display: none; }
+.narrow-only { display: none; }
 .tree-pane .pane-header { display: flex; align-items: center; gap: 4px; }
 .tree-pane .search-box { flex: 1; min-width: 0; }
 .filter-pop { min-width: 180px; }
@@ -621,7 +614,7 @@ body.log-open .splitter[data-split="s4"] { display: block; }
 .row .copy:hover { color: var(--accent); }
 
 /* canvas */
-.canvas-pane { background: var(--stage-bg); position: relative; overflow: hidden; }
+.canvas-pane { background: var(--stage-bg); overflow: hidden; }
 .crumbs {
   display: none;
   align-items: center;
@@ -657,6 +650,7 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 .stage-wrap { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .stage { position: relative; transform-origin: center center; flex: none; }
 .stage .shot { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; -webkit-user-select: none; user-select: none; }
+.stage .shot.shot-node { inset: auto; }
 .stage .box { position: absolute; pointer-events: none; border: 1px solid transparent; }
 .stage .box.hover { border-color: var(--accent); background: rgba(47, 107, 255, 0.12); }
 .stage .box.selected { border: 2px solid var(--accent); background: rgba(47, 107, 255, 0.18); }
@@ -1022,21 +1016,49 @@ body:not(.has-app) #liveInspect, body.app-offline #liveInspect { display: none; 
 .about-kv span:nth-child(odd) { color: var(--text-2); }
 .about-kv span:nth-child(even) { font-family: var(--mono); word-break: break-all; }
 
-/* 收起侧栏, 画布占满; 小屏一次只显示一个面板, 不受影响 */
+/* 桌面/中屏: 侧栏与底部日志均悬浮在全屏画布之上，开关面板时画布尺寸和中心保持稳定 */
 @media (min-width: 761px), (min-width: 601px) and (pointer: fine) {
-  body.tree-hidden .layout { grid-template-columns: 0 0 minmax(0, 1fr) 1px var(--detail-w, var(--detail-d)); }
-  body.detail-hidden .layout { grid-template-columns: var(--tree-w, var(--tree-d)) 1px minmax(0, 1fr) 0 0; }
-  body.tree-hidden.detail-hidden .layout { grid-template-columns: 0 0 minmax(0, 1fr) 0 0; }
+  .layout {
+    --canvas-inset-l: calc(var(--tree-w, var(--tree-d)) + 1px);
+    --canvas-inset-r: calc(var(--detail-w, var(--detail-d)) + 1px);
+    --canvas-inset-b: 0px;
+  }
+  body.tree-hidden .layout { --canvas-inset-l: 0px; }
+  body.detail-hidden .layout { --canvas-inset-r: 0px; }
+  body.log-open:not(.logs-window):not(.log-max) .layout { --canvas-inset-b: calc(var(--log-h, 240px) + 1px); }
+  .tree-pane { position: absolute; top: 0; bottom: 0; left: 0; width: var(--tree-w, var(--tree-d)); z-index: 25; box-shadow: var(--shadow); }
+  .splitter[data-split="s1"] { position: absolute; top: 0; bottom: 0; left: var(--tree-w, var(--tree-d)); width: 1px; z-index: 26; }
+  .detail-pane { position: absolute; top: 0; right: 0; bottom: var(--canvas-inset-b); width: var(--detail-w, var(--detail-d)); z-index: 25; box-shadow: var(--shadow); }
+  .splitter[data-split="s2"] { position: absolute; top: 0; right: var(--detail-w, var(--detail-d)); bottom: var(--canvas-inset-b); width: 1px; z-index: 26; }
+  .splitter[data-split="s3"] { display: none; }
+  .log-pane { position: absolute; left: var(--canvas-inset-l); right: 0; bottom: 0; height: var(--log-h, 240px); z-index: 26; box-shadow: var(--shadow); }
+  .splitter[data-split="s4"] { position: absolute; left: var(--canvas-inset-l); right: 0; bottom: var(--log-h, 240px); height: 1px; z-index: 27; }
+  body.log-open.log-max .log-pane { position: absolute; inset: 0; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; z-index: 30; }
   body.tree-hidden .tree-pane, body.tree-hidden .splitter[data-split="s1"],
   body.detail-hidden .detail-pane, body.detail-hidden .splitter[data-split="s2"] { display: none; }
+  .crumbs { padding-left: calc(8px + var(--canvas-inset-l)); padding-right: calc(8px + var(--canvas-inset-r)); }
+  .canvas-float { right: calc(12px + var(--canvas-inset-r)); }
+  .canvas-top-banners, .live-pixel-hint {
+    left: calc(var(--canvas-inset-l) + (100% - var(--canvas-inset-l) - var(--canvas-inset-r)) / 2);
+  }
+  .canvas-top-banners {
+    max-width: calc(100% - var(--canvas-inset-l) - var(--canvas-inset-r) - 96px);
+  }
+  .empty-state, .live-guide {
+    box-sizing: border-box;
+    padding: 24px calc(16px + var(--canvas-inset-r)) calc(24px + var(--canvas-inset-b)) calc(16px + var(--canvas-inset-l));
+  }
+  .target-task-status {
+    left: calc(var(--canvas-inset-l) + (100% - var(--canvas-inset-l) - var(--canvas-inset-r)) / 2);
+    top: calc((100% - var(--canvas-inset-b)) / 2);
+  }
 }
 
-/* 日志面板: 画布下方的抽屉; 虚拟列表, 单行模式行高固定, 换行模式按内容 */
-.log-pane { grid-area: log; display: none; position: relative; }
+/* 日志面板: 虚拟列表, 单行模式行高固定, 换行模式按内容 */
+.log-pane { display: none; box-sizing: border-box; background: var(--panel); }
 body.log-open .log-pane { display: flex; }
-/* 底部固定留出一条边距, 内容和横向滚动条不贴着窗口边缘 */
-.log-pane { box-sizing: border-box; background: var(--panel); }
 .log-head { display: flex; align-items: center; gap: 2px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: var(--panel-head); }
+.log-head-tools, .log-head-right { display: contents; }
 .log-head .icon-btn { width: 26px; height: 24px; flex: none; }
 .log-head .icon-btn.toggle.on { background: none; color: var(--accent); }
 @media (max-width: 1100px) {
@@ -1504,18 +1526,29 @@ body.log-open .log-pane { display: flex; }
   .toolbar-actions #runModeBtn.has-worktree { width: 22px; padding: 0; gap: 0; }
 }
 
-/* 桌面窄窗口: 工具栏紧凑 */
+/* 桌面窄窗口: 工具栏紧凑，保留缩写 App 名以识别目标 */
 @media (max-width: 760px) {
-  .toolbar { padding: 0 6px; gap: 8px; }
-  .app-name { display: none; }
+  .toolbar { padding: 0 6px; gap: 6px; }
+  .app-name { max-width: 112px; font-size: 13px; }
   .target-label { display: none; }
 }
 
 /* 小屏: 触屏窄屏, 或桌面窗口窄到工具栏放不下 */
 @media (max-width: 760px) and (pointer: coarse), (max-width: 600px) {
-  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 0 0; grid-template-areas: "canvas" "s4" "log"; }
-  body.log-open .layout { grid-template-rows: minmax(0, 1fr) 0 0; }
   .canvas-pane { display: flex; }
+  .narrow-only { display: inline-flex; flex: none; }
+  .target-btn { padding: 0 4px; gap: 4px; }
+  .app-name { max-width: 84px; font-size: 13px; }
+  .detail-pane .pane-header { display: flex; align-items: center; gap: 6px; }
+  .detail-pane .pane-header .segmented.full { flex: 1; min-width: 0; }
+  body[data-view="tree"] .drawer-backdrop, body[data-view="detail"] .drawer-backdrop, body.log-open:not(.logs-window):not(.log-max) .drawer-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 41;
+    background: rgba(0, 0, 0, 0.34);
+  }
+  body.log-open .drawer-backdrop { bottom: calc(min(var(--log-h, 240px), 100% - 32px)); }
   .tree-pane, .detail-pane { display: none; position: absolute; top: 0; bottom: 0; width: min(340px, calc(100% - 32px)); z-index: 42; box-shadow: var(--shadow); }
   .tree-pane { left: 0; }
   .detail-pane { right: 0; }
@@ -1523,14 +1556,31 @@ body.log-open .log-pane { display: flex; }
   body[data-view="tree"] .tree-pane, body[data-view="detail"] .detail-pane { display: flex; }
   .log-pane { display: none; }
   body.log-open .log-pane { display: flex; }
-  body.log-open:not(.logs-window):not(.log-max) .log-pane { position: absolute; grid-area: 1 / 1 / -1 / -1; left: 0; right: 0; bottom: 0; height: min(var(--log-h, 240px), calc(100% - 32px)); z-index: 42; border: 1px solid var(--border); border-radius: 0; box-shadow: var(--shadow); }
-  body.log-open:not(.logs-window):not(.log-max) .splitter[data-split="s4"] { position: absolute; grid-area: 1 / 1 / -1 / -1; left: 0; right: 0; bottom: calc(min(var(--log-h, 240px), 100% - 32px) - 1px); z-index: 43; }
+  body.log-open:not(.logs-window):not(.log-max) .log-pane { position: absolute; left: 0; right: 0; bottom: 0; height: min(var(--log-h, 240px), calc(100% - 32px)); z-index: 42; border: 1px solid var(--border); border-radius: 0; box-shadow: var(--shadow); }
+  body.log-open.log-max .log-pane { position: absolute; inset: 0; z-index: 44; height: auto; }
+  body.log-open:not(.logs-window):not(.log-max) .splitter[data-split="s4"] { position: absolute; left: 0; right: 0; bottom: calc(min(var(--log-h, 240px), 100% - 32px) - 1px); z-index: 43; }
+  .log-head { flex-wrap: wrap; row-gap: 4px; padding: 4px 6px; }
+  .log-head #logClose { position: static; }
+  .log-head-right { display: flex; align-items: center; gap: 2px; order: 2; margin-left: auto; flex: none; }
+  .log-head-tools {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    order: 3;
+    flex: 0 0 100%;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+  .log-head-tools::-webkit-scrollbar { display: none; }
+  .log-head-tools .log-search { min-width: 120px; }
+  .log-head-tools .git-repo, .log-head-tools .git-branch { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .net-detail { position: absolute; inset: 0; width: auto; z-index: 3; }
   .net-body:not(.has-detail) .net-detail { display: none; }
   .net-detail-back { display: inline-flex; order: 1; }
-  /* 小屏详情浮在底部面板上方, 面板全屏会破坏交互层级 */
-  #logMax { display: none; }
-  /* 窄屏差异覆盖底部面板上方的画布, 文件列表保持可见。 */
+  /* 窄屏非全屏时详情覆盖底部面板上方；全屏时在面板内部占满整页。 */
   .git-side { width: auto; max-width: none; min-width: 0; flex: 1; }
   .git-diff { position: absolute; inset: 0; z-index: 3; }
   body:not(.logs-window):not(.log-max) .git-diff { position: fixed; top: auto; left: 0; right: 0; bottom: min(var(--log-h, 240px), 100vh - 77px); height: max-content; max-height: max(0px, calc(100vh - min(var(--log-h, 240px), 100vh - 77px) - 117px)); z-index: 20; border: 1px solid var(--border); border-bottom: 0; border-radius: 0; overflow: hidden; box-shadow: var(--shadow); }
@@ -1540,8 +1590,9 @@ body.log-open .log-pane { display: flex; }
   .net-splitter { display: none; }
   .splitter { display: none; }
   body.log-open .splitter[data-split="s4"] { display: block; }
+  .splitter.horizontal::after { inset: -12px 0; }
   /* 两侧不小于内容宽度, 放不下时模式切换偏离中心也不与左侧重叠; 收紧间距, 快捷键入口(可按 ?)不显示 */
-  .toolbar { padding: 0 6px; gap: 8px; grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr); }
+  .toolbar { padding: 0 6px; gap: 6px; grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr); }
   #modeSeg button { min-width: 38px; padding: 2px 6px; }
   .toolbar-actions .icon-btn { width: 28px; }
   .help-anchor { display: none; }
@@ -1555,23 +1606,24 @@ body.log-open .log-pane { display: flex; }
   .row .arrow { width: 24px; height: 24px; }
   .attr .value, .kv, .nums input, .num-readonly { font-size: 14px; }
   .crumb:not(.current) .crumb-ivar { display: none; }
-  /* 窄屏画面受宽度限制: 浮动工具横排到底部居中, 左右只留 8px, 底部让出工具条, 画面可以更大 */
-  .stage-wrap, .live-wrap { padding: 8px 8px calc(60px + env(safe-area-inset-bottom)); }
-  .canvas-float { top: auto; right: auto; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom)); transform: translateX(-50%); flex-direction: row; }
-  /* 2D 与实时继续共用画面区域; 工具放右侧, 不再额外占用底部高度。 */
-  body:not(.mode-3d) .stage-wrap, .live-wrap { padding: 8px 8px calc(40px + env(safe-area-inset-bottom)); }
-  body:not(.mode-3d) .canvas-float { top: 38px; bottom: auto; left: auto; right: 8px; transform: none; flex-direction: column; }
-  body:not(.mode-3d) .float-group { flex-direction: column; }
-  body:not(.mode-3d) .float-group.live-only::after { width: auto; height: 1px; margin: 4px 6px; }
-  .float-group { flex-direction: row; }
-  .float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { width: 1px; height: auto; margin: 6px 4px; }
-  body:not(.mode-3d) .float-group.annotation-tools::before, body:not(.mode-3d) .float-group.three-only::before { width: auto; height: 1px; margin: 4px 6px; }
-  /* 层间距弹层向上弹出, 以整个工具条为参照水平居中, 不超出窗口 */
-  .canvas-float .popover-anchor { position: static; }
-  .spacing-pop { top: auto; left: 0; right: 0; bottom: calc(100% + 8px); width: max-content; margin: 0 auto; transform-origin: bottom center; }
-  .toast, .run-error { bottom: calc(64px + env(safe-area-inset-bottom)); }
+  /* 统一在画布右侧竖排收纳浮动工具，2D/3D/实时切换位置一致，底部留给 Home 条与提示。 */
+  .stage-wrap { padding: 8px 8px 16px; }
+  .live-wrap { padding: 8px 8px calc(44px + env(safe-area-inset-bottom)); }
+  .canvas-float { top: 38px; bottom: auto; left: auto; right: 8px; transform: none; flex-direction: column; max-height: calc(100% - 56px); overflow-y: auto; scrollbar-width: none; }
+  .canvas-float::-webkit-scrollbar { display: none; }
+  body.mode-live .canvas-float { top: 10px; }
+  .float-group { flex-direction: column; }
+  .float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { width: auto; height: 1px; margin: 4px 6px; }
+  .toast, .run-error { bottom: calc(52px + env(safe-area-inset-bottom)); }
   :root { --edge-fade: 0px; }
   .statusbar { display: none; }
+}
+
+@media (max-width: 480px) {
+  .toolbar { gap: 4px; }
+  #modeSeg button { min-width: 34px; padding: 2px 5px; font-size: 12px; }
+  .app-name { max-width: 72px; }
+  #sandboxBtn { display: none; }
 }
 
 /* 浮层动画, 接近 macOS: 菜单进入时轻微缩放并淡入, 退出只淡出; 面板进出带缩放. 退出由 JS 加 closing 类, 动画结束后再隐藏 */

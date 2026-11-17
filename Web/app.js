@@ -57,6 +57,7 @@ const state = {
   showHidden: true,
   showImages: true,
   subtreeOnly: false,
+  tempHidden: new Set(),
   groupOpen: {},
   spacing: 16,
   rotX: DEFAULT_ROT_X,
@@ -350,6 +351,16 @@ function showMenu(x, y, node, canvas, screenOnly) {
     menu.appendChild(moreItem);
     menu.appendChild(el('div', 'menu-separator'));
     menu.appendChild(makeItem(t('复制元素截图'), () => copyImage(fetchPNG(shotURL(node.oid, 'group')), '复制元素截图'), !node));
+    if (state.mode !== 'live') {
+      if (node?.tempHidden) {
+        menu.appendChild(makeItem(t('取消临时隐藏'), () => setTempHidden(node, false)));
+      } else {
+        menu.appendChild(makeItem(t('临时隐藏视图'), () => setTempHidden(node, true), !node || node.effHidden));
+      }
+      if (state.tempHidden.size) {
+        menu.appendChild(makeItem(t('恢复全部临时隐藏'), clearTempHidden));
+      }
+    }
     if (state.mode !== 'live' && isSwiftUILayoutContext(node)) {
       menu.appendChild(makeItem(t('捕获 SwiftUI 布局'), captureSwiftUILayout, !canCaptureSwiftUILayout()));
     }
@@ -400,32 +411,91 @@ function hideSubmenu(menu) {
   menu.submenu = null;
 }
 
-// 适应窗口: 缩放与平移归位, 3D 下同时恢复默认旋转角度
+// 计算桌面悬浮面板遮挡外的画布安全区，用于首次加载与手动适应窗口时的居中缩放。
+function safeCanvasInsets() {
+  if (isNarrow() || document.body.classList.contains('logs-window')) return { left: 0, right: 0, bottom: 0 };
+  const style = getComputedStyle($('layout'));
+  const px = (name, fallback = 0) => parseFloat(style.getPropertyValue(name)) || fallback;
+  const left = document.body.classList.contains('tree-hidden') ? 0 : px('--tree-w', px('--tree-d', 300)) + 1;
+  const right = document.body.classList.contains('detail-hidden') ? 0 : px('--detail-w', px('--detail-d', 340)) + 1;
+  const bottom = (document.body.classList.contains('log-open') && !document.body.classList.contains('log-max')) ? px('--log-h', 240) + 1 : 0;
+  return { left, right, bottom };
+}
+
+function safeContentArea(wrap) {
+  const style = getComputedStyle(wrap);
+  const padL = parseFloat(style.paddingLeft) || 0;
+  const padR = parseFloat(style.paddingRight) || 0;
+  const padT = parseFloat(style.paddingTop) || 0;
+  const padB = parseFloat(style.paddingBottom) || 0;
+  const fullW = wrap.clientWidth - padL - padR;
+  const fullH = wrap.clientHeight - padT - padB;
+  const inset = safeCanvasInsets();
+  const left = inset.left > 0 ? Math.max(padL, inset.left + 12) : padL;
+  const right = inset.right > 0 ? Math.max(padR, inset.right + 12) : padR;
+  const bottom = inset.bottom > 0 ? Math.max(padB, inset.bottom + (state.mode === 'live' ? 40 : 12)) : padB;
+  const width = Math.max(120, wrap.clientWidth - left - right);
+  const height = Math.max(120, wrap.clientHeight - padT - bottom);
+  return {
+    fullW, fullH, width, height,
+    offsetX: (left - right - (padL - padR)) / 2,
+    offsetY: -(bottom - padB) / 2,
+  };
+}
+
+// 适应窗口: 缩放与平移归位（桌面避开悬浮面板安全区）, 3D 下同时恢复默认旋转角度
 function fitView() {
   if (state.mode === 'live') {
-    state.zoom = 1;
-    state.panX = 0;
-    state.panY = 0;
+    const safe = safeContentArea($('liveWrap'));
+    const [sw, sh] = live.screen;
+    const deg = LIVE_ROTATION[live.orientation] || 0;
+    const [fw, fh] = Math.abs(deg) === 90 ? [sh, sw] : [sw, sh];
+    if (sw && sh && safe.fullW > 0 && safe.fullH > 0) {
+      const baseScale = Math.min(safe.fullW / fw, safe.fullH / fh);
+      const targetScale = Math.min(safe.width / fw, safe.height / fh);
+      state.zoom = Math.max(0.1, Math.min(1, targetScale / baseScale));
+    } else {
+      state.zoom = 1;
+    }
+    state.panX = safe.offsetX;
+    state.panY = safe.offsetY;
     layoutLive();
     return;
   }
+  const safe = safeContentArea($('stageWrap'));
   if (state.mode === '3d') {
     state.rotX = DEFAULT_ROT_X;
     state.rotY = DEFAULT_ROT_Y;
-  }
-  state.zoom = 1;
-  centerStage();
-  // 3D 按层叠旋转、透视后的实际范围缩放并居中, 与 2D 一样占满画布, 不随层数和间距忽大忽小
-  const bounds = state.mode === '3d' ? projectedBounds() : null;
-  if (bounds) {
-    const [width, height] = contentSize($('stageWrap'));
-    const fit = Math.min(width / (bounds.maxX - bounds.minX), height / (bounds.maxY - bounds.minY)) * planFitRatio();
-    state.zoom = Math.max(0.2, Math.min(6, fit));
+    state.zoom = 1;
     centerStage();
-    const next = projectedBounds();
-    state.panX -= (next.minX + next.maxX) / 2;
-    state.panY -= (next.minY + next.maxY) / 2;
+    // 3D 按层叠旋转、透视后的实际范围缩放并居中, 与 2D 一样占满可用安全区
+    const bounds = projectedBounds();
+    if (bounds) {
+      const fit = Math.min(safe.width / (bounds.maxX - bounds.minX), safe.height / (bounds.maxY - bounds.minY)) * planFitRatio();
+      state.zoom = Math.max(0.2, Math.min(6, fit));
+      centerStage();
+      const next = projectedBounds();
+      state.panX -= (next.minX + next.maxX) / 2;
+      state.panY -= (next.minY + next.maxY) / 2;
+    }
+  } else {
+    const win = currentWindow();
+    if (win && safe.fullW > 0 && safe.fullH > 0) {
+      const [, , fw, fh] = canvasFrame(win);
+      if (fw > 0 && fh > 0) {
+        const baseScale = Math.min(safe.fullW / fw, safe.fullH / fh);
+        const targetScale = Math.min(safe.width / fw, safe.height / fh);
+        state.zoom = Math.max(0.1, Math.min(1, targetScale / baseScale));
+      } else {
+        state.zoom = 1;
+      }
+    } else {
+      state.zoom = 1;
+    }
+    centerStage();
   }
+  state.panX += safe.offsetX;
+  state.panY += safe.offsetY;
   applyStageTransform();
 }
 
@@ -851,6 +921,7 @@ function showRefreshError(e) {
 }
 
 function applyHierarchy(roots) {
+  state.tempHidden.clear();
   state.stamp = Date.now();
   resetImages();
   if (state.nodes.get(state.selected)?.swiftUILayout) state.selected = null;
@@ -883,6 +954,12 @@ function setStatus(ok, message, refreshed = ok) {
   updateAppMeta();
 }
 
+function clearStaleStatusError() {
+  if (appState.value === 'online' && $('statusDot')?.classList.contains('error')) {
+    setStatus(true, '', false);
+  }
+}
+
 function updateAppMeta() {
   const count = state.nodes.size;
   $('appMeta').textContent = [appInfo.base, count ? t('{0} 节点', count) : ''].filter(Boolean).join(' · ');
@@ -901,12 +978,57 @@ function prepare(roots) {
     node.depth = depth;
     node.win = win || node;
     node.cls = node.classChain[0] || '?';
-    node.effHidden = node.hidden || node.alpha < 0.01 || (parent ? parent.effHidden : false);
     state.nodes.set(node.key, node);
     node.children.forEach((child) => walk(child, node, depth + 1, node.win));
   };
   roots.forEach((root) => walk(root, null, 0, null));
+  syncEffectiveHidden();
   if (isFirst) restoreNodeState();
+}
+
+function syncEffectiveHidden() {
+  const walk = (node, parentHidden, parentTempHidden) => {
+    node.tempHidden = state.tempHidden.has(node.key) || parentTempHidden;
+    node.effHidden = node.hidden || node.alpha < 0.01 || node.tempHidden || parentHidden;
+    node.children.forEach((child) => walk(child, node.effHidden, node.tempHidden));
+  };
+  state.roots.forEach((root) => walk(root, false, false));
+}
+
+function setTempHidden(node, hidden) {
+  if (!node) return;
+  if (hidden) {
+    state.tempHidden.add(node.key);
+  } else {
+    for (let p = node; p; p = p.parent) state.tempHidden.delete(p.key);
+  }
+  applyTempHiddenChange();
+}
+
+function clearTempHidden() {
+  if (!state.tempHidden.size) return;
+  state.tempHidden.clear();
+  applyTempHiddenChange();
+}
+
+function applyTempHiddenChange() {
+  syncEffectiveHidden();
+  const hoverNode = state.nodes.get(state.hover);
+  if (hoverNode && hoverNode.effHidden) {
+    state.hover = null;
+    hideHoverTip();
+  }
+  const selectedNode = state.nodes.get(state.selected);
+  if (selectedNode && selectedNode.tempHidden) {
+    state.selected = null;
+    state.vcFocus = false;
+    state.tabBeforeVC = null;
+    state.classTarget = null;
+    loadDetail();
+    if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
+  }
+  renderTree();
+  renderCanvas();
 }
 
 function keyWindow() {
@@ -1281,6 +1403,7 @@ async function setMode(mode) {
   const keepView = fromKind === toKind || !!saved;
   if (mode === 'live') {
     syncModeUI();
+    if (typeof clearStaleStatusError === 'function') clearStaleStatusError();
     liveStart();
     if (keepView) layoutLive();
     else fitView();
@@ -1316,6 +1439,7 @@ function planFitRatio() {
 
 // 小屏一次只显示一个面板: 层级 / 详情盖住画布, 再点一次收起回到画布
 function setView(view) {
+  if (view !== 'canvas' && document.body.classList.contains('log-max')) setLogMax(false);
   document.body.dataset.view = view;
   syncPanels();
 }
@@ -1380,6 +1504,23 @@ function syncModeUI() {
   $('modeSeg').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
 }
 
+function shotURLForNode(node, includeImages = state.showImages) {
+  if (!includeImages || !node.oid) return null;
+  // 不显示 CALayer 且只有 CALayer 子节点时, 子层不单独绘制, 取整体截图; 若有被临时隐藏的 CALayer 则只取自身截图
+  const onlyLayers = !state.showLayers
+    && node.children.length > 0
+    && node.children.every((child) => child.isLayer && !child.tempHidden);
+  return shotURL(node.oid, onlyLayers ? 'group' : 'solo');
+}
+
+function hasTempHiddenInWindow(win) {
+  if (!win || !state.tempHidden.size) return false;
+  for (const key of state.tempHidden) {
+    if (state.nodes.get(key)?.win === win) return true;
+  }
+  return false;
+}
+
 function renderCanvas() {
   const stage = $('stage');
   const win = currentWindow();
@@ -1397,20 +1538,33 @@ function renderCanvas() {
   // 旧节点已移除, 丢弃尚未发出的截图请求
   images.pending = [];
   if (state.mode === '2d') {
-    const img = el('img', 'shot');
-    img.draggable = false;
-    // 缓存命中时直接设置地址会重新请求, App 重启中会失败, 隐藏避免显示裂图
-    img.onerror = () => (img.style.visibility = 'hidden');
-    img.onload = () => (img.style.visibility = '');
-    loadImage(shotURL(win.oid, 'group'), (url) => (img.src = url));
-    stage.append(img, el('div', 'box hover'), el('div', 'box selected'));
+    if (hasTempHiddenInWindow(win)) {
+      drawableNodes(win).forEach((node) => {
+        const url = shotURLForNode(node, true);
+        if (!url) return;
+        const img = el('img', 'shot shot-node');
+        img.draggable = false;
+        img.style.left = (node.rect[0] - wx) + 'px';
+        img.style.top = (node.rect[1] - wy) + 'px';
+        img.style.width = node.rect[2] + 'px';
+        img.style.height = node.rect[3] + 'px';
+        img.onerror = () => (img.style.visibility = 'hidden');
+        img.onload = () => (img.style.visibility = '');
+        loadImage(url, (src) => (img.src = src));
+        stage.appendChild(img);
+      });
+    } else {
+      const img = el('img', 'shot');
+      img.draggable = false;
+      // 缓存命中时直接设置地址会重新请求, App 重启中会失败, 隐藏避免显示裂图
+      img.onerror = () => (img.style.visibility = 'hidden');
+      img.onload = () => (img.style.visibility = '');
+      loadImage(shotURL(win.oid, 'group'), (url) => (img.src = url));
+      stage.appendChild(img);
+    }
+    stage.append(el('div', 'box hover'), el('div', 'box selected'));
   } else {
-    stage3DSetNodes(drawableNodes(win), [wx, wy, w, h], (node) => {
-      if (!state.showImages || !node.oid) return null;
-      // 不显示 CALayer 且只有 CALayer 子节点时, 子层不单独绘制, 取整体截图; 旧版 Pod 也能显示视频播放层等内容
-      const onlyLayers = !state.showLayers && node.children.length > 0 && node.children.every((child) => child.isLayer);
-      return shotURL(node.oid, onlyLayers ? 'group' : 'solo');
-    });
+    stage3DSetNodes(drawableNodes(win), [wx, wy, w, h], shotURLForNode);
   }
   updatePivot();
   updateHighlights();
@@ -1517,10 +1671,10 @@ function focusSelected() {
     fitView();
     return;
   }
-  const [width, height] = contentSize($('stageWrap'));
+  const safe = safeContentArea($('stageWrap'));
   const base = stageScale(win) / state.zoom;
   // 元素已经足够大时只居中, 不比适应窗口更小
-  state.zoom = Math.max(1, Math.min(6, Math.min(width / node.rect[2], height / node.rect[3]) * FOCUS_FILL / base));
+  state.zoom = Math.max(1, Math.min(6, Math.min(safe.width / node.rect[2], safe.height / node.rect[3]) * FOCUS_FILL / base));
   if (state.mode === '3d') updatePivot();
   const [fx, fy, fw, fh] = canvasFrame(win);
   const center = {
@@ -1529,8 +1683,8 @@ function focusSelected() {
     z: state.mode === '3d' ? (node.level || 0) * state.spacing : 0,
   };
   const screen = projectToScreen(center);
-  state.panX -= screen.x;
-  state.panY -= screen.y;
+  state.panX += safe.offsetX - screen.x;
+  state.panY += safe.offsetY - screen.y;
   if (state.mode === '3d') state.panZ -= screen.z;
   applyStageTransform();
 }
@@ -1721,11 +1875,26 @@ function stagePoint(event) {
   return [(event.clientX - rect.left) / rect.width * win.rect[2], (event.clientY - rect.top) / rect.height * win.rect[3]];
 }
 
+// 仅在 2D / 3D 画布空白处左键双击且未启用取色/标注/平移按键时适应窗口
+function isStageBackgroundDoubleClick({ button, target, wrap, hasHit, mode, pickerOn, mcpTool, panHeld, recentTouchFit }) {
+  return button === 0
+    && mode !== 'live'
+    && !pickerOn
+    && !mcpTool
+    && !panHeld
+    && !recentTouchFit
+    && !!wrap
+    && !!target
+    && wrap.contains(target)
+    && !hasHit;
+}
+
 function setupCanvasEvents() {
   const wrap = $('stageWrap');
   const pointers = new Map();
   let drag = null;
   let lastTap = 0;
+  let lastTouchFitAt = 0;
 
   const nodeAtPoint = (point) => {
     if (!currentWindow()) return null;
@@ -1855,11 +2024,15 @@ function setupCanvasEvents() {
     const node = nodeAtPoint(e);
     if (node) select(node.key);
     else clearSelection();
-    if (e.pointerType === 'mouse') return;
-    // 触屏双击适应窗口
+    if (e.pointerType === 'mouse' || node) {
+      if (node) lastTap = 0;
+      return;
+    }
+    // 触屏双击空白区域适应窗口
     const now = Date.now();
     if (now - lastTap < DOUBLE_CLICK_MS) {
       fitView();
+      lastTouchFitAt = now;
       lastTap = 0;
     } else {
       lastTap = now;
@@ -1867,6 +2040,22 @@ function setupCanvasEvents() {
   };
   wrap.addEventListener('pointerup', endPointer);
   wrap.addEventListener('pointercancel', endPointer);
+  wrap.addEventListener('dblclick', (e) => {
+    const recentTouchFit = Date.now() - lastTouchFitAt < DOUBLE_CLICK_MS;
+    if (!isStageBackgroundDoubleClick({
+      button: e.button,
+      target: e.target,
+      wrap,
+      hasHit: !!nodeAtPoint(e),
+      mode: state.mode,
+      pickerOn: picker.on,
+      mcpTool: typeof mcpCanvas !== 'undefined' ? mcpCanvas.tool : null,
+      panHeld: panKey.held,
+      recentTouchFit,
+    })) return;
+    e.preventDefault();
+    fitView();
+  });
   wrap.addEventListener('pointerleave', (e) => {
     hideHoverTip();
     if (e.pointerType !== 'mouse' || drag) return;
@@ -1954,6 +2143,25 @@ const live = {
   healing: false,
 };
 
+function iosMajorVersion(os) {
+  const match = String(os || '').match(/\b(\d+)(?:\.\d+)?/);
+  return match ? Number(match[1]) : null;
+}
+
+function deviceLiveUnsupportedReason(device = currentDevice(), entry = targetHistory[targets.deviceId]) {
+  const kind = device?.kind || entry?.kind || '';
+  if (kind !== 'device') return '';
+  const os = device?.os || entry?.os || '';
+  const major = iosMajorVersion(os);
+  if (major !== null && major < 17) {
+    return t('真机实时画面需要 iOS 17 及以上系统（依赖 CoreDevice 隧道），当前设备为 {0}，请切换到 2D 或 3D 查看视图层级。', os);
+  }
+  if (/coredevice unsupported|iOS 17 or later is required/i.test(live.error || '')) {
+    return t('真机实时画面需要 iOS 17 及以上系统（依赖 CoreDevice 隧道），当前设备不支持，请切换到 2D 或 3D 查看视图层级。');
+  }
+  return '';
+}
+
 function liveAvailable() {
   return !!live.udid;
 }
@@ -2034,6 +2242,11 @@ function markLiveCaptureReady() {
 
 function liveStart() {
   if (!liveAvailable()) { showLiveGuide(); return; }
+  if (typeof deviceLiveUnsupportedReason === 'function' && deviceLiveUnsupportedReason()) {
+    live.error = '';
+    showLiveGuide();
+    return;
+  }
   if (live.ws) { liveResume(); return; }
   clearTimeout(live.retryTimer);
   live.error = '';
@@ -2245,6 +2458,17 @@ function showLiveGuide(title) {
     $('liveRetry').hidden = true;
     $('liveError').hidden = true;
     $('liveGuideTitle').textContent = t('请先选择设备');
+    $('liveWaiting').hidden = true;
+    return;
+  }
+  const unsupportedReason = typeof deviceLiveUnsupportedReason === 'function' ? deviceLiveUnsupportedReason() : '';
+  if (unsupportedReason) {
+    $('liveGuide').hidden = false;
+    $('liveLoading').hidden = true;
+    $('liveRetry').hidden = true;
+    $('liveGuideTitle').textContent = t('当前设备不支持真机实时画面');
+    $('liveError').hidden = false;
+    $('liveError').textContent = unsupportedReason;
     $('liveWaiting').hidden = true;
     return;
   }
@@ -2783,6 +3007,8 @@ function receiveTargetForeground(deviceId, bundleId, foreground) {
   } else if (foreground && (appState.value === 'background' || appState.value === 'offline')) {
     setAppState('online');
     if (state.mode !== 'live') refresh();
+  } else if (foreground && state.mode === 'live') {
+    if (typeof clearStaleStatusError === 'function') clearStaleStatusError();
   }
 }
 
@@ -3184,7 +3410,7 @@ async function readTaskHierarchy(job, swiftUILayout = false) {
     if (swiftUILayout) toast(t('已捕获 {0} 个 SwiftUI 布局节点', result.count));
     setTaskPhase(job, 'done');
   } catch (error) {
-    if (!taskCurrent(job) || seq !== refreshSeq) return;
+    if (!taskCurrent(job) || seq !== refreshSeq || state.mode === 'live' || !hierarchyAvailable() || !pageActivity.active) return;
     if (error.name === 'AbortError' && !expired) return;
     if (swiftUILayout) {
       toast(t('SwiftUI 布局捕获失败: {0}', expired ? t('请求超时, 请重试') : error.message), true);
@@ -3836,6 +4062,7 @@ function clearHierarchy() {
   state.nodes = new Map();
   state.selected = null;
   state.expanded.clear();
+  state.tempHidden.clear();
   renderTree();
   loadDetail();
   updateAppMeta();
@@ -4024,14 +4251,18 @@ function syncSelectedTargetState() {
   appState.connected = true;
   clearTimeout(appState.offlineTimer);
   appState.offlineTimer = 0;
-  if ((!wasConnected && appState.dropped) || restarted) {
+  const foreground = entry.foreground !== false && entry.foreground !== 0;
+  const switching = typeof pendingSwitch !== 'undefined' && !!pendingSwitch;
+  if (((!wasConnected && appState.dropped) || restarted) && !switching) {
     if (!appState.reconnecting) {
       const selection = appState.source;
       appState.reconnecting = selection;
       reconnected().finally(() => { if (appState.reconnecting === selection) appState.reconnecting = null; });
     }
   } else if (!wasConnected && appState.value !== 'restarting') {
-    setAppState(entry.foreground === false || entry.foreground === 0 ? 'background' : 'online');
+    setAppState(foreground ? 'online' : 'background');
+  } else if (foreground && state.mode === 'live') {
+    if (typeof clearStaleStatusError === 'function') clearStaleStatusError();
   }
   if ([true, false, 0, 1].includes(entry.foreground)) receiveTargetForeground(targets.deviceId, targets.bundleId, !!entry.foreground);
 }
@@ -4969,7 +5200,19 @@ function setupLiveEvents() {
   $('liveCaptureDismiss').addEventListener('click', () => { $('liveCaptureWarning').hidden = true; });
   $('menuLiveRestart').addEventListener('click', liveRestart);
   $('menuLogs').addEventListener('click', revealLogs);
+  $('menuSandbox').addEventListener('click', () => {
+    if (!targets.bundleId || currentDevice()?.kind === 'simulator') closePanel();
+    openSandbox();
+  });
   $('sandboxBtn').addEventListener('click', openSandbox);
+  $('drawerBackdrop').addEventListener('click', () => {
+    if (document.body.dataset.view && document.body.dataset.view !== 'canvas') setView('canvas');
+    else if (logs.open) toggleLogPanel();
+  });
+  $('treeClose').addEventListener('click', () => setView('canvas'));
+  $('treeToDetail').addEventListener('click', () => setView('detail'));
+  $('detailClose').addEventListener('click', () => setView('canvas'));
+  $('detailToTree').addEventListener('click', () => setView('tree'));
   $('liveHealBtn').addEventListener('click', healLiveTouch);
   $('liveHealClose').addEventListener('click', hideLiveHeal);
   $('menuHeal').addEventListener('click', () => openPanel('heal'));
@@ -5340,6 +5583,83 @@ function panelHidden(name) {
   return panel.hidden || (panel.auto && !panel.forced);
 }
 
+let panelSnapshot = null;
+
+function allPanelsCleared() {
+  if (isNarrow()) {
+    return !logs.open && (!document.body.dataset.view || document.body.dataset.view === 'canvas');
+  }
+  return panelHidden('tree') && panelHidden('detail') && !logs.open;
+}
+
+function setPanelVisible(name, visible) {
+  const panel = panels[name];
+  panel.hidden = !visible;
+  panel.forced = visible && panel.auto;
+  try {
+    localStorage.setItem(PANEL_HIDDEN_KEYS[name], panel.hidden ? '1' : '0');
+  } catch (e) { /* ignore */ }
+}
+
+function setLogOpen(open) {
+  logs.open = !!open;
+  try {
+    localStorage.setItem(LOG_OPEN_KEY, logs.open ? '1' : '0');
+  } catch (e) { /* ignore */ }
+}
+
+function syncFocusCanvasButton() {
+  const btn = $('panelsToggle');
+  if (!btn) return;
+  const cleared = allPanelsCleared();
+  btn.classList.toggle('on', cleared);
+  btn.setAttribute('aria-pressed', String(cleared));
+  btn.title = cleared ? t('恢复面板 (\\)') : t('一键清屏 (\\)');
+  btn.setAttribute('aria-label', cleared ? t('恢复面板') : t('一键清屏'));
+}
+
+// 一键收起全部面板进入纯净画布，再次触发恢复清屏前的面板布局。
+function toggleFocusCanvas() {
+  const wasLogMax = logs.open && document.body.classList.contains('log-max');
+  if (isNarrow()) {
+    if (!allPanelsCleared()) {
+      panelSnapshot = { narrow: true, view: document.body.dataset.view || 'canvas', log: logs.open, logMax: wasLogMax };
+      if (logs.open) setLogOpen(false);
+      setView('canvas');
+      return;
+    }
+    const snap = panelSnapshot?.narrow ? panelSnapshot : { view: 'tree', log: false, logMax: false };
+    panelSnapshot = null;
+    if (snap.log) setLogOpen(true);
+    setView(snap.view && snap.view !== 'canvas' ? snap.view : (snap.log ? 'canvas' : 'tree'));
+    if (snap.log && snap.logMax) setLogMax(true);
+    return;
+  }
+  if (!allPanelsCleared()) {
+    panelSnapshot = {
+      narrow: false,
+      tree: !panelHidden('tree'),
+      detail: !panelHidden('detail'),
+      log: logs.open,
+      logMax: wasLogMax,
+    };
+    setPanelVisible('tree', false);
+    setPanelVisible('detail', false);
+    if (logs.open) setLogOpen(false);
+    syncPanels();
+    return;
+  }
+  const snap = (panelSnapshot && !panelSnapshot.narrow && (panelSnapshot.tree || panelSnapshot.detail || panelSnapshot.log))
+    ? panelSnapshot
+    : { tree: true, detail: true, log: false, logMax: false };
+  panelSnapshot = null;
+  if (snap.tree) setPanelVisible('tree', true);
+  if (snap.detail) setPanelVisible('detail', true);
+  if (snap.log) setLogOpen(true);
+  syncPanels();
+  if (snap.log && snap.logMax) setLogMax(true);
+}
+
 function syncPanels() {
   ['tree', 'detail'].forEach((name) => {
     const hidden = panelHidden(name);
@@ -5350,6 +5670,7 @@ function syncPanels() {
     $(name + 'Toggle').setAttribute('aria-pressed', String(on));
   });
   syncLogPanel();
+  syncFocusCanvasButton();
 }
 
 function togglePanel(name) {
@@ -5357,19 +5678,7 @@ function togglePanel(name) {
     toggleView(name);
     return;
   }
-  const panel = panels[name];
-  if (panelHidden(name)) {
-    panel.hidden = false;
-    panel.forced = panel.auto;
-  } else {
-    panel.hidden = true;
-    panel.forced = false;
-  }
-  try {
-    localStorage.setItem(PANEL_HIDDEN_KEYS[name], panel.hidden ? '1' : '0');
-  } catch (e) {
-    // 无痕模式等场景下不可用, 忽略
-  }
+  setPanelVisible(name, panelHidden(name));
   syncPanels();
 }
 
@@ -5390,8 +5699,7 @@ function updateAutoPanels() {
     if (!auto) panel.forced = false;
     panel.auto = auto;
   });
-  // 小屏详情使用浮层, 从宽屏缩小时退出面板全屏, 避免残留布局覆盖浮层
-  if (isNarrow() && document.body.classList.contains('log-max')) setLogMax(false);
+  // 宽屏恢复后清掉手动展开标记, 下次变窄仍自动收起
   syncPanels();
 }
 
@@ -6031,6 +6339,9 @@ function handleViewKey(key) {
     case '`':
       showPaneTab('term');
       return true;
+    case '\\':
+      toggleFocusCanvas();
+      return true;
     case '[':
     case ']':
       if (!three) return false;
@@ -6225,6 +6536,7 @@ const SHORTCUT_GROUPS = [
     [['N'], '显示 / 隐藏网络面板'],
     [['G'], '显示 / 隐藏改动面板'],
     [['`'], '显示 / 隐藏终端'],
+    [['\\'], '一键清屏 / 恢复面板'],
     [['⌘', '1–4'], '切换到日志 / 网络 / 改动 / 终端'],
     [['⌘', 'F'], '在当前区域查找: 层级树, 日志, 网络列表或请求详情'],
     [['?'], '显示此面板'],
@@ -6404,7 +6716,7 @@ function setupPanels() {
   // 设置中的操作执行后关闭弹窗; 打开其他弹窗的由 data-panel 处理
   $('optionsMenu').addEventListener('click', (e) => {
     const action = e.target.closest('.menu-action');
-    if (action && !action.dataset.panel && action.id !== 'menuHeal') closePanel();
+    if (action && !action.dataset.panel && action.id !== 'menuHeal' && action.id !== 'menuSandbox') closePanel();
   });
 }
 
@@ -7660,6 +7972,7 @@ function fitLogMenu() {
 }
 
 function setLogMax(max) {
+  if (max && isNarrow() && document.body.dataset.view && document.body.dataset.view !== 'canvas') setView('canvas');
   document.body.classList.toggle('log-max', max);
   const button = $('logMax');
   button.title = max ? t('还原') : t('最大化');
@@ -9454,6 +9767,7 @@ function setup() {
   $('spacingBtn').addEventListener('click', () => togglePopover('spacingPop'));
   $('treeFilterBtn').addEventListener('click', () => togglePopover('treeFilterPop'));
   $('zoomFit').addEventListener('click', fitView);
+  $('panelsToggle').addEventListener('click', toggleFocusCanvas);
   $('livePixelZoom').addEventListener('click', zoomLivePixels);
   $('themeSeg').addEventListener('click', (e) => {
     const theme = e.target.dataset.theme;

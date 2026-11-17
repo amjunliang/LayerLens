@@ -280,3 +280,118 @@ console.log('PASS device selection and shared offline states/actions across 2D, 
   assert.equal(ctx.layerlensBrowserURL(), 'http://127.0.0.1:9523/?device=sim-1&app=');
   console.log('PASS browser URL carries current device, app and pin state');
 }
+
+{
+  const css = fs.readFileSync(path.join(__dirname, '../../Web/app.css'), 'utf8');
+  const removeRule = css.match(/\.target-remove\s*\{[^}]*\}/)?.[0] || '';
+  assert(removeRule.includes('display: inline-flex;'));
+  assert(removeRule.includes('visibility: hidden;'));
+  assert(!removeRule.includes('display: none;'));
+  assert(css.includes('.target-menu > .target-device { width: 100%; }'));
+  assert(css.includes('.target-app.away:not(.current):focus-visible .target-app-meta { visibility: hidden; }'));
+  console.log('PASS target menu hover keeps stable width');
+}
+
+{
+  const dot = {
+    className: 'status-dot error',
+    title: '连接失败',
+    classList: { contains: (cls) => dot.className.split(/\s+/).includes(cls) },
+  };
+  const refreshBtn = { title: '' };
+  const appMeta = { textContent: '' };
+  const statusCalls = [];
+  const state = { mode: 'live', nodes: new Map() };
+  const appState = { value: 'online', connected: true, dropped: false, instanceId: 'i1', source: { key: 'dev-1|com.example.app' }, offlineTimer: 0 };
+  const targets = { deviceId: 'dev-1', bundleId: 'com.example.app', devices: [], simulators: [] };
+  const ctx = vm.createContext({
+    LANG: 'zh',
+    state,
+    targets,
+    appState,
+    appInfo: { base: '', lastRefresh: 1700000000000 },
+    targetStateHub: { ready: true, states: new Map([['["dev-1","com.example.app"]', { stateConnected: true, foreground: true, instanceId: 'i1' }]]) },
+    pendingSwitch: null,
+    targetStateKey: (d, a) => JSON.stringify([d, a]),
+    logTargetKey: () => 'dev-1|com.example.app',
+    ensureTargetStateSocket() {},
+    receiveTargetForeground() {},
+    clearTimeout() {},
+    reconnected() { return Promise.resolve(); },
+    setAppState(v) { statusCalls.push(v); appState.value = v; ctx.setStatus(v !== 'offline', '', false); },
+    t: (s) => s,
+    $: (id) => ({ statusDot: dot, refreshBtn, appMeta }[id]),
+  });
+  vm.runInContext(
+    section('function setStatus(', 'function prepare(') + '\n' +
+    section('function watchApp(', '// link 为提示条上的次要按钮'),
+    ctx
+  );
+  ctx.syncSelectedTargetState();
+  assert.equal(dot.className, 'status-dot ok', 'Stale hierarchy error dot must recover to green in live mode when app is connected and foreground');
+
+  dot.className = 'status-dot error';
+  appState.connected = false;
+  appState.dropped = true;
+  ctx.pendingSwitch = {};
+  ctx.syncSelectedTargetState();
+  assert.deepEqual(statusCalls, ['online'], 'Concurrent pendingSwitch must not skip online status update via early-returning reconnected');
+  assert.equal(dot.className, 'status-dot ok');
+
+  assert(source.includes("if (!taskCurrent(job) || seq !== refreshSeq || state.mode === 'live' || !hierarchyAvailable() || !pageActivity.active) return;"));
+  assert(source.includes("if (mode === 'live') {\n    syncModeUI();\n    if (typeof clearStaleStatusError === 'function') clearStaleStatusError();"));
+  console.log('PASS status dot clears stale hierarchy errors in live mode and target sync');
+}
+
+{
+  const nodes = {};
+  const device = { id: 'b47c26b1dce84d1223bfdffa1eb7d2a12b1d0347', kind: 'device', os: 'iOS 15.8.3' };
+  const live = { udid: device.id, real: true, error: '' };
+  let socketCreated = 0;
+  const ctx = vm.createContext({
+    targets: { deviceId: device.id, devices: [device], hub: { live: true } },
+    targetHistory: {},
+    live,
+    currentDevice: () => ctx.targets.devices[0],
+    currentDeviceGone: () => false,
+    syncOfflineView() {},
+    liveSupported: () => true,
+    LANG: 'zh',
+    t: (text, ...args) => text.replace(/\{(\d+)\}/g, (_, n) => args[n]),
+    $: id => nodes[id] ||= new Element(),
+    WebSocket: class { constructor() { socketCreated++; } },
+    VideoDecoder: class {},
+    clearTimeout() {},
+    startLiveDeadline() {},
+    layoutLive() {},
+    liveResume() {},
+  });
+  vm.runInContext(
+    section('function iosMajorVersion(', '// 所有已连接设备都显示实时入口') + '\n' +
+    section('function liveStart()', '// 原生视频输出状态') + '\n' +
+    section('function showLiveGuide(title)', '// Both sources:'),
+    ctx
+  );
+  assert.equal(ctx.iosMajorVersion('iOS 15.8.3'), 15);
+  assert.equal(ctx.iosMajorVersion('iOS 17.0'), 17);
+  ctx.liveStart();
+  assert.equal(socketCreated, 0, 'Pre-iOS 17 physical device must not open a device live socket');
+  assert.equal(nodes.liveGuide.hidden, false);
+  assert.equal(nodes.liveLoading.hidden, true);
+  assert.equal(nodes.liveRetry.hidden, true);
+  assert.equal(nodes.liveGuideTitle.textContent, '当前设备不支持真机实时画面');
+  assert(nodes.liveError.textContent.includes('iOS 17'));
+  assert(nodes.liveError.textContent.includes('iOS 15.8.3'));
+
+  device.os = '';
+  live.error = 'coredevice unsupported (iPhone10,6): iOS 17 or later is required for physical device live view';
+  ctx.showLiveGuide();
+  assert.equal(nodes.liveGuideTitle.textContent, '当前设备不支持真机实时画面');
+  assert.equal(nodes.liveRetry.hidden, true);
+
+  device.os = 'iOS 17.4';
+  live.error = '';
+  assert.equal(ctx.deviceLiveUnsupportedReason(device), '');
+  assert.equal(ctx.deviceLiveUnsupportedReason({ kind: 'simulator', os: 'iOS 15.5' }), '');
+  console.log('PASS physical devices below iOS 17 show CoreDevice live-view guidance');
+}

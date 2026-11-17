@@ -46,6 +46,7 @@ for d in devices:
         "model": hw.get("marketingName") or hw.get("productType", "?"),
         "transport": cp.get("transportType", "?"),
         "tunnel": cp.get("tunnelState", "?"),
+        "pairing": cp.get("pairingState", "?"),
     })
 
 def bail(head, candidates):
@@ -67,6 +68,12 @@ if selector:
             sys.exit(0)
         if len(hits) > 1:
             bail(f'"{selector}" matches {len(hits)} devices', hits)
+    unsupported = [c for c in physical if c["pairing"] == "unsupported"]
+    if unsupported and len(needle) == 40 and all(ch in "0123456789abcdef" for ch in needle):
+        names = " / ".join(c["model"] for c in unsupported if c["model"] != "?")
+        suffix = f" ({names})" if names else ""
+        print(f"coredevice unsupported{suffix}: iOS 17 or later is required for physical device live view", file=sys.stderr)
+        sys.exit(3)
     bail(f'no device matches "{selector}"', physical)
 
 usable = [c for c in physical if c["transport"] == "wired" or c["tunnel"] == "connected"]
