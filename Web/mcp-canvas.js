@@ -45,7 +45,15 @@ const mcpCanvas = {
       button.classList.toggle('on', this.tool === name);
       button.setAttribute('aria-pressed', String(this.tool === name));
     }
+    this.syncToolbarOpen();
     for (const layer of document.querySelectorAll('.mcp-annotation-layer')) layer.classList.toggle('active', !!this.tool && layer.parentElement === this.wrap());
+  },
+  syncToolbarOpen(forceOpen) {
+    const box = $('annotationTools');
+    if (!box) return;
+    const open = typeof forceOpen === 'boolean' ? forceOpen : (!!this.tool || this.marks.length > 0 || box.dataset.pinned === '1');
+    box.classList.toggle('open', open);
+    $('annotationToggle')?.setAttribute('aria-expanded', String(open));
   },
   syncInteractionLock() {
     const marking = !!this.tool;
@@ -108,6 +116,7 @@ const mcpCanvas = {
     }
     $('annotationUndo').disabled = !this.marks.length;
     $('annotationClear').disabled = !this.marks.length;
+    this.syncToolbarOpen();
   },
   setupLayer(wrap) {
     const layer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -157,6 +166,13 @@ const mcpCanvas = {
   },
   setup() {
     this.setupLayer($('stageWrap')); this.setupLayer($('liveWrap'));
+    $('annotationToggle')?.addEventListener('click', () => {
+      const box = $('annotationTools');
+      const next = !box?.classList.contains('open');
+      if (box) box.dataset.pinned = next ? '1' : '';
+      if (!next && this.tool) this.setTool('');
+      this.syncToolbarOpen(next);
+    });
     $('annotationRect').addEventListener('click', () => this.setTool('rectangle'));
     $('annotationPen').addEventListener('click', () => this.setTool('freehand'));
     $('annotationUndo').addEventListener('click', () => this.undo());

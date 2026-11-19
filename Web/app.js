@@ -1391,7 +1391,7 @@ async function setMode(mode) {
   const saved = fromKind !== toKind ? state.views[toKind] : null;
   state.mode = mode;
   if (typeof mcpCanvas !== 'undefined') mcpCanvas.syncTarget();
-  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext(pageHasFocus());
   hideHoverTip();
   state.hover = null;
   if (saved) {
@@ -1502,6 +1502,7 @@ function syncModeUI() {
   $('liveWrap').hidden = state.mode !== 'live';
   if (picker.on && !pickerAvailable()) setColorPicker(false);
   $('modeSeg').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.mode === state.mode));
+  layoutNarrowFloat();
 }
 
 function shotURLForNode(node, includeImages = state.showImages) {
@@ -1595,21 +1596,49 @@ function toggleSubtreeView() {
   }
 }
 
+function layoutNarrowFloat() {
+  const float = $('canvasFloat');
+  if (!float) return;
+  const narrow = state.mode !== 'live' && typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia('(max-width: 760px) and (pointer: coarse), (max-width: 600px)').matches;
+  if (!narrow) {
+    float.style.top = '';
+    float.style.bottom = '';
+    return;
+  }
+  const pane = $('canvasPane'), stage = $('stage');
+  if (!pane || !stage || state.mode === '3d') {
+    float.style.top = '';
+    float.style.bottom = '';
+    return;
+  }
+  const stageRect = stage.getBoundingClientRect();
+  const paneRect = pane.getBoundingClientRect();
+  const floatH = float.offsetHeight || 26;
+  float.style.bottom = 'auto';
+  float.style.top = Math.max(40, Math.min(pane.clientHeight - floatH - 8, stageRect.bottom - paneRect.top + 8)) + 'px';
+}
+
 function applyStageTransform() {
   if (state.mode === 'live') {
     layoutLive();
     return;
   }
   const win = currentWindow();
-  if (!win) return;
+  if (!win) {
+    layoutNarrowFloat();
+    return;
+  }
   // 3D 由 WebGL 绘制: 平移后先移到旋转中心再旋转, 选中节点在旋转时保持不动(见 stage-gl.js)
   if (state.mode === '3d') {
     $('stage').style.transform = '';
     stage3DInvalidate();
+    layoutNarrowFloat();
     return;
   }
   // 平移在屏幕坐标系中进行, 放在最前面
   $('stage').style.transform = `translate3d(${state.panX}px, ${state.panY}px, 0px) scale(${stageScale(win)})`;
+  layoutNarrowFloat();
 }
 
 // MARK: - Pivot
@@ -3649,18 +3678,6 @@ function renderTargetMenu() {
     rows.forEach((item) => children.push(...(item.live ? targetDeviceRows(item.device, background) : goneDeviceRows(item.device))));
   }
   if (children.length === 0) children.push(el('div', 'target-empty', t('没有发现设备')));
-  const footer = el('button', 'menu-row menu-action target-footer', t('App 集成…'));
-  footer.dataset.panel = 'integration';
-  children.push(el('div', 'menu-sep'), footer);
-  const windows = el('button', 'menu-row menu-action target-footer', t('窗口信息…'));
-  windows.dataset.panel = 'windows';
-  windows.append(el('span', 'target-footer-shortcut', '⌥⇧,'));
-  children.push(windows);
-  // 设置使用频率低, 工具栏不放按钮, 从这里打开
-  const options = el('button', 'menu-row menu-action target-footer', t('设置…'));
-  options.append(el('span', 'target-footer-shortcut', '⌥,'));
-  options.addEventListener('click', () => openPanel('options'));
-  children.push(options);
   menu.replaceChildren(...children);
 }
 
@@ -4348,7 +4365,7 @@ function setAppState(value, message, link) {
   syncOfflineView();
   renderLaunchSelects();
   renderTargetMenu();
-  if (typeof scheduleMCPContext === 'function') scheduleMCPContext();
+  if (typeof scheduleMCPContext === 'function') scheduleMCPContext(pageHasFocus());
 }
 
 // 画布中央的引导；离线目标由 syncOfflineView 标记后在所有模式显示。
@@ -5204,7 +5221,8 @@ function setupLiveEvents() {
     if (!targets.bundleId || currentDevice()?.kind === 'simulator') closePanel();
     openSandbox();
   });
-  $('sandboxBtn').addEventListener('click', openSandbox);
+  $('sandboxBtn')?.addEventListener('click', openSandbox);
+  $('settingsBtn')?.addEventListener('click', () => openPanel('options'));
   $('drawerBackdrop').addEventListener('click', () => {
     if (document.body.dataset.view && document.body.dataset.view !== 'canvas') setView('canvas');
     else if (logs.open) toggleLogPanel();
@@ -6380,6 +6398,7 @@ function togglePopover(id) {
 function hidePopovers() {
   document.querySelectorAll('.popover').forEach((p) => hideLayer(p, 120));
   document.getElementById('runModeBtn')?.setAttribute('aria-expanded', 'false');
+  document.getElementById('paneExtraBtn')?.setAttribute('aria-expanded', 'false');
 }
 
 // 浮层显示时由 CSS 播放进入动画; 隐藏时先加 closing 播放退出动画, 结束后再设置 hidden(或执行 done)
@@ -8291,8 +8310,36 @@ function syncNetPanel() {
   }
 }
 
+const EXTRA_PANES_KEY = 'layerlens_extra_panes';
+let extraPanes = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(EXTRA_PANES_KEY) || '{}');
+    return { git: !!saved.git, term: !!saved.term };
+  } catch (e) {
+    return { git: false, term: false };
+  }
+})();
+
+function syncExtraPaneTabs() {
+  const gitBtn = $('paneTabGit'), termBtn = $('paneTabTerm');
+  if (gitBtn) gitBtn.hidden = !extraPanes.git;
+  if (termBtn) termBtn.hidden = !extraPanes.term;
+  const gitToggle = $('toggleGitTab'), termToggle = $('toggleTermTab');
+  if (gitToggle) gitToggle.checked = !!extraPanes.git;
+  if (termToggle) termToggle.checked = !!extraPanes.term;
+}
+
+function setExtraPaneVisible(tab, visible) {
+  if (tab !== 'git' && tab !== 'term') return;
+  if (extraPanes[tab] === visible) return;
+  extraPanes[tab] = visible;
+  try { localStorage.setItem(EXTRA_PANES_KEY, JSON.stringify(extraPanes)); } catch (e) {}
+  syncExtraPaneTabs();
+}
+
 function setPaneTab(tab) {
   net.tab = tab === 'net' || tab === 'git' || tab === 'term' ? tab : 'log';
+  if (net.tab === 'git' || net.tab === 'term') setExtraPaneVisible(net.tab, true);
   try {
     localStorage.setItem(NET_TAB_KEY, net.tab);
   } catch (e) {
@@ -9500,6 +9547,22 @@ function setupNetwork() {
     const button = e.target.closest('button[data-pane]');
     if (button) setPaneTab(button.dataset.pane);
   });
+  if (net.tab === 'git' || net.tab === 'term') extraPanes[net.tab] = true;
+  syncExtraPaneTabs();
+  $('paneExtraBtn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    togglePopover('paneExtraMenu');
+    $('paneExtraBtn')?.setAttribute('aria-expanded', String(!$('paneExtraMenu').hidden && !$('paneExtraMenu').classList.contains('closing')));
+  });
+  for (const [id, tab] of [['toggleGitTab', 'git'], ['toggleTermTab', 'term']]) {
+    $(id)?.addEventListener('change', (e) => {
+      const checked = e.target.checked;
+      setExtraPaneVisible(tab, checked);
+      if (checked) setPaneTab(tab);
+      else if (net.tab === tab) setPaneTab('log');
+      hidePopovers();
+    });
+  }
   let filterTimer = null;
   $('netFilter').addEventListener('input', (e) => {
     clearTimeout(filterTimer);
@@ -9763,11 +9826,28 @@ function setup() {
       renderCanvas();
     });
   });
-  $('helpBtn').addEventListener('click', () => openPanel('shortcuts'));
+  $('helpBtn')?.addEventListener('click', () => openPanel('shortcuts'));
   $('spacingBtn').addEventListener('click', () => togglePopover('spacingPop'));
   $('treeFilterBtn').addEventListener('click', () => togglePopover('treeFilterPop'));
   $('zoomFit').addEventListener('click', fitView);
   $('panelsToggle').addEventListener('click', toggleFocusCanvas);
+  const setNarrowToolsOpen = (open) => {
+    const float = $('canvasFloat');
+    if (!float) return;
+    float.classList.toggle('narrow-open', open);
+    $('liveToolsToggle')?.classList.toggle('on', open);
+    $('liveToolsToggle')?.setAttribute('aria-expanded', String(open));
+  };
+  $('liveToolsToggle')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setNarrowToolsOpen(!$('canvasFloat')?.classList.contains('narrow-open'));
+  });
+  document.addEventListener('pointerdown', (e) => {
+    const float = $('canvasFloat');
+    if (!float || !float.classList.contains('narrow-open')) return;
+    if (e.target.closest('#canvasFloat, #liveToolsToggle') || picker.on || mcpCanvas.tool) return;
+    setNarrowToolsOpen(false);
+  });
   $('livePixelZoom').addEventListener('click', zoomLivePixels);
   $('themeSeg').addEventListener('click', (e) => {
     const theme = e.target.dataset.theme;

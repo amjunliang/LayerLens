@@ -372,7 +372,7 @@ final class MCPHTTPService {
     // MARK: - Definitions
 
     static let instructions = """
-    For questions about the UI currently shown in LayerLens, call get_context first. If the conversation has a LayerLens browser page, read document.documentElement.dataset.layerlensWindowId and pass it as windowId. Reuse that windowId for the same page on subsequent get_context calls. With no known windowId, get_context uses the last-focused LayerLens window. \
+    For questions about the UI currently shown in LayerLens, call get_context first without windowId so it uses the last-focused LayerLens window (only pass windowId when explicitly targeting a specific window). \
     selected.element reads "ivar (Class) \"text\" · id=identifier"; search sourceRoot for those parts, selected.owner and selected.vc to locate code. \
     Use visible selected or annotated hints to search sourceRoot; if hints are insufficient, capture the pinned canvas. \
     For runtime behavior, get_context.activity counts this launch's logs and requests: use search_logs with a query, \
@@ -393,7 +393,7 @@ final class MCPHTTPService {
             "inputSchema": [
                 "type": "object",
                 "properties": ["windowId": ["type": "string", "minLength": 1,
-                                            "description": "LayerLens page ID from data-layerlens-window-id on the page's html element or a previous get_context result."]],
+                                            "description": "Optional LayerLens window ID. Omit to use the last-focused LayerLens window."]],
                 "additionalProperties": false,
             ],
             "annotations": readOnly,

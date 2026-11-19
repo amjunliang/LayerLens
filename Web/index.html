@@ -73,6 +73,8 @@
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
     <symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="i-annotate" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
   </defs>
 </svg>
 
@@ -110,12 +112,9 @@
       </div>
     </div>
     <div class="toolbar-tools">
-      <div class="popover-anchor help-anchor">
-        <button class="icon-btn" id="helpBtn" title="快捷键 (?)" aria-label="快捷键"><svg class="icon"><use href="#i-keyboard"/></svg></button>
-      </div>
-      <button class="icon-btn" id="sandboxBtn" title="沙盒文件" aria-label="沙盒文件"><svg class="icon"><use href="#i-folder"/></svg></button>
       <button class="icon-btn toggle" id="logToggle" title="日志与网络面板 (L / N)" aria-label="日志与网络面板" aria-pressed="false"><svg class="icon"><use href="#i-terminal"/></svg><span class="tab-badge toggle-badge" id="termToggleCount" hidden></span></button>
       <button class="icon-btn toggle on" id="detailToggle" title="详情面板 (D)" aria-label="详情面板" aria-pressed="true"><svg class="icon"><use href="#i-sidebar"/></svg></button>
+      <button class="icon-btn" id="settingsBtn" title="设置与工具 (⌥,)" aria-label="设置与工具"><svg class="icon"><use href="#i-settings"/></svg></button>
     </div>
   </div>
 </header>
@@ -147,11 +146,7 @@
 
   <section class="pane canvas-pane" id="canvasPane">
     <div class="crumbs" id="crumbs"></div>
-    <div class="canvas-float">
-      <div class="float-group live-only">
-        <button class="icon-btn toggle" id="liveInspect" title="选择元素 (或按住 ⌥): 点击选中; 拖动摆放两指, 停住后再拖动缩放和旋转" aria-label="选择元素" aria-pressed="false"><svg class="icon"><use href="#i-inspect"/></svg></button>
-        <button class="icon-btn" id="liveSwitcher" title="多任务" aria-label="多任务"><svg class="icon"><use href="#i-switcher"/></svg></button>
-      </div>
+    <div class="canvas-float" id="canvasFloat">
       <div class="float-group">
         <button class="icon-btn non-live-only" id="refreshBtn" title="刷新 (R)" aria-label="刷新"><svg class="icon"><use href="#i-refresh"/></svg></button>
         <button class="icon-btn" id="zoomFit" title="适应窗口" aria-label="适应窗口"><svg class="icon"><use href="#i-fit"/></svg></button>
@@ -161,11 +156,14 @@
         <button class="icon-btn toggle native-color-pick" id="systemColorPick" title="取色 (C)" aria-label="取色" aria-pressed="false"><svg class="icon"><use href="#i-picker"/></svg></button>
         <button class="icon-btn three-only toggle" id="subtreeOnly" title="只看选中子树" aria-label="只看选中子树" aria-pressed="false"><svg class="icon"><use href="#i-focus"/></svg></button>
       </div>
-      <div class="float-group annotation-tools">
-        <button class="icon-btn toggle" id="annotationRect" title="矩形标注 (B)" aria-label="矩形标注" aria-pressed="false"><svg class="icon"><use href="#i-mark-rect"/></svg></button>
-        <button class="icon-btn toggle" id="annotationPen" title="自由划线 (P)" aria-label="自由划线" aria-pressed="false"><svg class="icon"><use href="#i-pencil"/></svg></button>
-        <button class="icon-btn" id="annotationUndo" title="撤销标注 (⌘Z)" aria-label="撤销标注" disabled><svg class="icon"><use href="#i-undo"/></svg></button>
-        <button class="icon-btn" id="annotationClear" title="清除标注" aria-label="清除标注" disabled><svg class="icon"><use href="#i-trash"/></svg></button>
+      <div class="float-group annotation-tools" id="annotationTools">
+        <button class="icon-btn toggle" id="annotationToggle" title="标注工具 (B / P)" aria-label="标注工具" aria-expanded="false"><svg class="icon"><use href="#i-annotate"/></svg></button>
+        <div class="annotation-sub">
+          <button class="icon-btn toggle" id="annotationRect" title="矩形标注 (B)" aria-label="矩形标注" aria-pressed="false"><svg class="icon"><use href="#i-mark-rect"/></svg></button>
+          <button class="icon-btn toggle" id="annotationPen" title="自由划线 (P)" aria-label="自由划线" aria-pressed="false"><svg class="icon"><use href="#i-pencil"/></svg></button>
+          <button class="icon-btn" id="annotationUndo" title="撤销标注 (⌘Z)" aria-label="撤销标注" disabled><svg class="icon"><use href="#i-undo"/></svg></button>
+          <button class="icon-btn" id="annotationClear" title="清除标注" aria-label="清除标注" disabled><svg class="icon"><use href="#i-trash"/></svg></button>
+        </div>
       </div>
       <div class="float-group three-only">
         <div class="popover-anchor">
@@ -243,6 +241,11 @@
         <button class="icon-btn" id="liveHome" title="返回主屏幕" aria-label="返回主屏幕"><svg class="icon"><use href="#i-home"/></svg></button>
         <button class="icon-btn" id="liveRotate" title="向右旋转" aria-label="向右旋转"><svg class="icon"><use href="#i-rotate"/></svg></button>
         <button class="icon-btn" id="liveSleepWake" title="锁屏 / 唤醒" aria-label="锁屏 / 唤醒"><svg class="icon"><use href="#i-lock"/></svg></button>
+        <span class="dock-sep" aria-hidden="true"></span>
+        <button class="icon-btn toggle" id="liveInspect" title="选择元素 (或按住 ⌥): 点击选中; 拖动摆放两指, 停住后再拖动缩放和旋转" aria-label="选择元素" aria-pressed="false"><svg class="icon"><use href="#i-inspect"/></svg></button>
+        <button class="icon-btn" id="liveSwitcher" title="多任务" aria-label="多任务"><svg class="icon"><use href="#i-switcher"/></svg></button>
+        <span class="dock-sep narrow-only" aria-hidden="true"></span>
+        <button class="icon-btn toggle narrow-only" id="liveToolsToggle" title="画布工具" aria-label="画布工具" aria-expanded="false"><svg class="icon"><use href="#i-more"/></svg></button>
       </div>
     </div>
   </section>
@@ -254,8 +257,15 @@
       <div class="segmented small pane-tabs" id="paneTabs">
         <button data-pane="log" class="active" title="日志 (⌘1)">日志</button>
         <button data-pane="net" title="网络 (⌘2)">网络</button>
-        <button data-pane="git" title="改动 (⌘3)">改动</button>
-        <button data-pane="term" title="终端 (⌘4)">终端<span class="tab-badge" id="termCount" hidden></span></button>
+        <button data-pane="git" id="paneTabGit" title="改动 (⌘3)" hidden>改动</button>
+        <button data-pane="term" id="paneTabTerm" title="终端 (⌘4)" hidden>终端<span class="tab-badge" id="termCount" hidden></span></button>
+      </div>
+      <div class="popover-anchor pane-extra-anchor">
+        <button class="icon-btn pane-extra-btn" id="paneExtraBtn" title="更多调试工具" aria-label="更多调试工具" aria-haspopup="menu" aria-expanded="false"><svg class="icon"><use href="#i-plus"/></svg></button>
+        <div class="popover menu pane-extra-menu" id="paneExtraMenu" hidden>
+          <label class="menu-row"><span>显示改动 (Git)</span><input type="checkbox" id="toggleGitTab"></label>
+          <label class="menu-row"><span>显示终端</span><input type="checkbox" id="toggleTermTab"></label>
+        </div>
       </div>
       <div class="log-head-tools">
         <label class="search-box log-search log-only" id="logSearch">
@@ -428,13 +438,18 @@
       </div>
     </div>
     <div class="menu-sep"></div>
+    <button class="menu-row menu-action" id="menuSandbox">沙盒文件…</button>
+    <button class="menu-row menu-action" data-panel="shortcuts">快捷键…</button>
+    <button class="menu-row menu-action" data-panel="cache">缓存管理…</button>
+    <div class="menu-sep"></div>
+    <button class="menu-row menu-action" data-panel="integration">App 集成…</button>
+    <button class="menu-row menu-action" data-panel="mcp">MCP 设置…</button>
+    <div class="menu-sep"></div>
     <button class="menu-row menu-action has-live-only" id="menuHeal">修复模拟器触摸…</button>
     <button class="menu-row menu-action has-live-only" id="menuLiveRestart">修复实时画面黑屏</button>
     <button class="menu-row menu-action" id="menuLogs">打开日志文件夹</button>
-    <button class="menu-row menu-action" id="menuSandbox">沙盒文件…</button>
-    <button class="menu-row menu-action" data-panel="cache">缓存管理…</button>
-    <button class="menu-row menu-action" data-panel="integration">App 集成…</button>
-    <button class="menu-row menu-action" data-panel="mcp">MCP 设置…</button>
+    <button class="menu-row menu-action" data-panel="windows">窗口信息…</button>
+    <div class="menu-sep"></div>
     <button class="menu-row menu-action" data-panel="about">关于 LayerLens…</button>
   </div>
 </div>

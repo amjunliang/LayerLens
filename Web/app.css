@@ -225,6 +225,8 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
   border-bottom: 1px solid var(--border);
 }
 .toolbar-left { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+.toolbar-left > .popover-anchor { flex: 0 1 auto; min-width: 0; }
+.toolbar-left .target-btn { max-width: 100%; }
 .toolbar-center { display: flex; align-items: center; gap: 8px; }
 /* 与模式切换同款外框, 高度一致 */
 .toolbar-actions { display: inline-flex; flex: 0 1 auto; min-width: 0; padding: 2px; background: none; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--border-strong); }
@@ -699,15 +701,16 @@ body:not(.mode-3d) .stage { box-shadow: var(--screen-shadow); }
 .live-wrap { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; -webkit-user-select: none; user-select: none; }
 /* 2D/实时共用留白: 8px 间隔、24px 控件、8px 底部边距。 */
 body:not(.mode-3d) .stage-wrap, .live-wrap { padding: 8px 12px 40px; }
-.live-home-dock { display: flex; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 41; width: 168px; height: 24px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); color: var(--stage-text); }
+.live-home-dock { display: inline-flex; align-items: center; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 41; width: auto; height: 26px; padding: 0 2px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); box-shadow: var(--float-shadow); color: var(--stage-text); }
 /* 控件在底部渐变(40)之上, 最大化面板(30)时隐藏, 避免穿透到面板上。 */
 body.log-max .live-home-dock { visibility: hidden; }
-.live-home-dock .icon-btn + .icon-btn::before { content: ''; position: absolute; left: 0; top: 5px; bottom: 5px; width: 1px; background: var(--float-line); pointer-events: none; }
-.live-home-dock .icon-btn { position: relative; flex: 1; min-width: 0; width: auto; height: 100%; border: 0; border-radius: 0; background: transparent; color: inherit; }
-.live-home-dock .icon-btn .icon { width: 16px; height: 16px; }
-.live-home-dock .icon-btn:hover { background: transparent; color: inherit; }
+.live-home-dock .dock-sep { flex: none; width: 1px; height: 14px; margin: 0 2px; background: var(--float-line); pointer-events: none; }
+.live-home-dock .icon-btn { position: relative; flex: none; width: 34px; height: 100%; border: 0; border-radius: 999px; background: transparent; color: inherit; }
+.live-home-dock .icon-btn .icon { width: 15px; height: 15px; }
+.live-home-dock .icon-btn:hover { background: color-mix(in srgb, var(--stage-text) 8%, transparent); color: inherit; }
+.live-home-dock .icon-btn.toggle.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .live-home-dock .icon-btn:focus { outline: none; }
-.live-home-dock .icon-btn.click-feedback { background: color-mix(in srgb, var(--stage-text) 8%, transparent); }
+.live-home-dock .icon-btn.click-feedback { background: color-mix(in srgb, var(--stage-text) 12%, transparent); }
 /* 细线勾出设备边缘 */
 .live-canvas { flex: none; display: block; background: #000; cursor: default; outline: none; box-shadow: var(--screen-shadow); }
 .live-pixel-hint { position: absolute; top: 14px; left: 50%; z-index: 4; transform: translateX(-50%); padding: 4px 9px; border: 1px solid var(--float-line); border-radius: 999px; background: var(--float-bg); box-shadow: var(--float-shadow); color: var(--stage-text-2); font: 11px/1.4 var(--mono); white-space: nowrap; pointer-events: none; }
@@ -760,6 +763,10 @@ body.log-max .live-pixel-hint { visibility: hidden; }
 .canvas-float .icon-btn { border-radius: 50%; }
 /* 分组间短分隔线: 中间分组总是显示, 实时分组在它之前、3D 分组在它之后, 各自只画靠近中间的一侧 */
 .float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { content: ''; flex: none; align-self: stretch; height: 1px; margin: 4px 6px; background: var(--float-line); }
+.annotation-tools { position: relative; }
+.annotation-sub { display: none; position: absolute; top: 0; right: calc(100% + 8px); flex-direction: row; align-items: center; gap: 2px; padding: 2px; background: var(--float-bg); border: 1px solid var(--float-line); border-radius: 999px; box-shadow: var(--float-shadow); }
+.annotation-tools.open .annotation-sub { display: flex; }
+.annotation-tools.open #annotationToggle { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .annotation-mode .canvas-float > .float-group:not(.annotation-tools) { opacity: .4; }
 /* 层间距从按钮左侧弹出, 不遮挡下方按钮 */
 .spacing-pop { top: 0; right: calc(100% + 8px); transform-origin: right center; display: flex; align-items: center; gap: 8px; padding: 8px 10px; white-space: nowrap; color: var(--text-2); }
@@ -1173,10 +1180,15 @@ body.log-open .log-pane { display: flex; }
 }
 /* 多关键词高亮, 半透明底色在浅色和深色下都可读 */
 /* 底部面板的 日志 / 网络 两页 */
-.pane-tabs { flex: none; margin-right: 6px; }
+.pane-tabs { flex: none; margin-right: 2px; }
+.pane-tabs button[hidden] { display: none; }
 .pane-tabs button { padding: 2px 12px; font-size: 13px; }
 .pane-tabs button.active { font-weight: 600; background: var(--accent); color: #fff; box-shadow: none; }
 .pane-tabs button.active .tab-badge { background: rgba(255, 255, 255, 0.25); color: #fff; }
+.pane-extra-anchor { flex: none; margin-right: 6px; }
+.pane-extra-btn { width: 24px; height: 24px; border-radius: 6px; color: var(--muted); }
+.pane-extra-btn:hover { color: var(--text); }
+.pane-extra-menu { left: 0; top: calc(100% + 6px); min-width: 170px; }
 .log-pane[data-tab="git"] .pane-more, .log-pane[data-tab="term"] .pane-more, .log-pane[data-tab="net"] .log-only, .log-pane[data-tab="git"] .log-only, .log-pane[data-tab="term"] .log-only, .log-pane:not([data-tab="net"]) .net-only, .log-pane:not([data-tab="git"]) .git-only, .log-pane:not([data-tab="term"]) .term-only { display: none !important; }
 /* 网络面板的过滤条: 一行, 超出时横向滚动, 两端渐隐并显示箭头 */
 .net-filter-row { flex: none; display: flex; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--border); background: var(--panel-head); }
@@ -1591,10 +1603,16 @@ body.log-open .log-pane { display: flex; }
   .splitter { display: none; }
   body.log-open .splitter[data-split="s4"] { display: block; }
   .splitter.horizontal::after { inset: -12px 0; }
-  /* 两侧不小于内容宽度, 放不下时模式切换偏离中心也不与左侧重叠; 收紧间距, 快捷键入口(可按 ?)不显示 */
-  .toolbar { padding: 0 6px; gap: 6px; grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr); }
+  /* 窄屏下改为 flex 布局，允许左侧 App 名截断，避免右侧设置按钮被挤出屏幕 */
+  .toolbar { display: flex; align-items: center; justify-content: space-between; padding: 0 6px; gap: 6px; }
+  .toolbar-left { flex: 1 1 0; min-width: 0; gap: 4px; }
+  .target-pin { margin-left: -4px; margin-right: 0; }
+  .toolbar-center { flex: none; }
+  .toolbar-right { flex: 0 1 auto; gap: 4px; }
+  .toolbar-tools { gap: 0; }
+  .toolbar .icon-btn { width: 26px; height: 26px; }
   #modeSeg button { min-width: 38px; padding: 2px 6px; }
-  .toolbar-actions .icon-btn { width: 28px; }
+  .toolbar-actions .icon-btn { width: 26px; }
   .help-anchor { display: none; }
   /* 设备菜单从窗口左边缘展开, 不被右侧遮挡 */
   .menu.target-menu { position: fixed; top: 46px; left: 6px; }
@@ -1606,14 +1624,22 @@ body.log-open .log-pane { display: flex; }
   .row .arrow { width: 24px; height: 24px; }
   .attr .value, .kv, .nums input, .num-readonly { font-size: 14px; }
   .crumb:not(.current) .crumb-ivar { display: none; }
-  /* 统一在画布右侧竖排收纳浮动工具，2D/3D/实时切换位置一致，底部留给 Home 条与提示。 */
-  .stage-wrap { padding: 8px 8px 16px; }
+  /* 窄屏下 2D/3D 直接在底部居中展开，样式与实时模式底部控制条统一；实时模式通过底栏 ⋯ 按需展开。 */
+  .stage-wrap { padding: 8px 8px calc(44px + env(safe-area-inset-bottom)); }
   .live-wrap { padding: 8px 8px calc(44px + env(safe-area-inset-bottom)); }
-  .canvas-float { top: 38px; bottom: auto; left: auto; right: 8px; transform: none; flex-direction: column; max-height: calc(100% - 56px); overflow-y: auto; scrollbar-width: none; }
-  .canvas-float::-webkit-scrollbar { display: none; }
-  body.mode-live .canvas-float { top: 10px; }
-  .float-group { flex-direction: column; }
-  .float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { width: auto; height: 1px; margin: 4px 6px; }
+  .canvas-float { top: auto; bottom: 8px; left: 50%; right: auto; transform: translateX(-50%); flex-direction: row; align-items: center; height: 26px; padding: 0 2px; box-sizing: border-box; max-width: calc(100% - 16px); max-height: none; overflow: visible; color: var(--stage-text); }
+  .canvas-float .icon-btn { flex: none; width: 32px; height: 22px; border-radius: 999px; color: inherit; }
+  .canvas-float .icon-btn .icon { width: 15px; height: 15px; }
+  .canvas-float .icon-btn:hover { background: color-mix(in srgb, var(--stage-text) 8%, transparent); color: inherit; }
+  .canvas-float .icon-btn.toggle.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .canvas-float .pixel-zoom { width: auto; min-width: 32px; padding: 0 6px; }
+  body.mode-live .canvas-float:not(.narrow-open) { display: none; }
+  body.mode-live .canvas-float.narrow-open { bottom: 44px; }
+  .canvas-float #panelsToggle { display: none; }
+  .float-group { flex-direction: row; height: 100%; align-items: center; gap: 0; }
+  .annotation-sub { top: auto; bottom: calc(100% + 8px); left: 50%; right: auto; transform: translateX(-50%); height: 26px; padding: 0 2px; box-sizing: border-box; gap: 0; }
+  .float-group.live-only::after, .float-group.annotation-tools::before, .float-group.three-only::before { width: 1px; height: 14px; margin: 0 2px; align-self: center; }
+  .spacing-pop { top: auto; bottom: calc(100% + 8px); right: 0; left: auto; transform-origin: bottom right; }
   .toast, .run-error { bottom: calc(52px + env(safe-area-inset-bottom)); }
   :root { --edge-fade: 0px; }
   .statusbar { display: none; }
@@ -1623,7 +1649,6 @@ body.log-open .log-pane { display: flex; }
   .toolbar { gap: 4px; }
   #modeSeg button { min-width: 34px; padding: 2px 5px; font-size: 12px; }
   .app-name { max-width: 72px; }
-  #sandboxBtn { display: none; }
 }
 
 /* 浮层动画, 接近 macOS: 菜单进入时轻微缩放并淡入, 退出只淡出; 面板进出带缩放. 退出由 JS 加 closing 类, 动画结束后再隐藏 */
